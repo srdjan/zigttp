@@ -929,6 +929,74 @@ pub fn runCheckOnlyWithOptions(
     return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, opts);
 }
 
+const PathAnalysis = struct {
+    paths_enumerated: u32,
+    paths_exhaustive: bool,
+    max_io_depth: ?u32,
+    cost_bounded: bool,
+    cost_envelope: ?handler_contract.CostEnvelope,
+    behaviors: std.ArrayList(handler_contract.BehaviorPath),
+    fault_coverage: handler_contract.FaultCoverageInfo,
+    fault_clean: bool,
+
+    fn deinit(self: *PathAnalysis, allocator: std.mem.Allocator) void {
+        if (self.cost_envelope) |*envelope| envelope.deinit(allocator);
+        for (self.behaviors.items) |*behavior| behavior.deinit(allocator);
+        self.behaviors.deinit(allocator);
+    }
+};
+
+fn analyzeHandlerPaths(
+    state_allocator: std.mem.Allocator,
+    output_allocator: std.mem.Allocator,
+    ir_view: ir.IrView,
+    atoms: *zigts.context.AtomTable,
+    handler_fn: ir.NodeIndex,
+    include_behaviors: bool,
+) !PathAnalysis {
+    var generator = zigts.PathGenerator.init(state_allocator, ir_view, atoms);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+
+    const tests = generator.getTests();
+    var analysis = PathAnalysis{
+        .paths_enumerated = @intCast(tests.len),
+        .paths_exhaustive = tests.len < zigts.PathGenerator.MAX_PATHS,
+        .max_io_depth = null,
+        .cost_bounded = false,
+        .cost_envelope = null,
+        .behaviors = .empty,
+        .fault_coverage = .{ .total_failable = 0, .covered = 0, .warnings = 0 },
+        .fault_clean = false,
+    };
+    errdefer analysis.deinit(output_allocator);
+
+    if (tests.len > 0) {
+        analysis.cost_envelope = try generator.buildCostEnvelope(output_allocator);
+        analysis.max_io_depth = switch (analysis.cost_envelope.?.total) {
+            .constant => |count| count,
+            else => null,
+        };
+        analysis.cost_bounded = analysis.cost_envelope.?.exhaustive and
+            analysis.cost_envelope.?.total.class() != .unbounded;
+    }
+    if (include_behaviors) {
+        analysis.behaviors = try generator.toBehaviorPaths(output_allocator);
+    }
+
+    var checker = zigts.fault_coverage.FaultCoverageChecker.init(output_allocator, tests);
+    defer checker.deinit();
+    try checker.analyze();
+    const report = checker.getReport();
+    analysis.fault_coverage = .{
+        .total_failable = report.total_failable,
+        .covered = report.covered,
+        .warnings = report.warning_count,
+    };
+    analysis.fault_clean = report.isClean();
+    return analysis;
+}
+
 /// Like runCheckOnly but operates on pre-read source. When skip_contract
 /// is true, stages 7-10 (verification, contract, paths, fault coverage)
 /// are skipped - only parse and type checking run, enough to detect errors.
@@ -955,11 +1023,28 @@ pub fn runCheckOnlyFromSourceWithOptions(
     handler_path: []const u8,
     opts: CheckOptions,
 ) !CheckResult {
+    return runCheckOnlyFromSourceWithPathAllocator(
+        allocator,
+        allocator,
+        source,
+        handler_path,
+        opts,
+    );
+}
+
+fn runCheckOnlyFromSourceWithPathAllocator(
+    allocator: std.mem.Allocator,
+    path_allocator: std.mem.Allocator,
+    source: []const u8,
+    handler_path: []const u8,
+    opts: CheckOptions,
+) !CheckResult {
     const sql_schema_path = opts.sql_schema_path;
     const json_mode = opts.json_mode;
     const system_path = opts.system_path;
     const skip_contract = opts.skip_contract;
     var result = CheckResult{};
+    errdefer result.deinit(allocator);
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
     var source_to_parse: []const u8 = source;
@@ -1251,60 +1336,37 @@ pub fn runCheckOnlyFromSourceWithOptions(
     {
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
-            var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);
-            defer gen.deinit();
-            try gen.generate(hf);
+            var path_analysis = try analyzeHandlerPaths(
+                path_allocator,
+                allocator,
+                ir_view,
+                &atoms,
+                hf,
+                result.contract != null,
+            );
+            defer path_analysis.deinit(allocator);
 
-            const tests = gen.getTests();
-            result.paths_enumerated = @intCast(tests.len);
-            result.paths_exhaustive = tests.len < zigts.PathGenerator.MAX_PATHS;
-
-            var cost_envelope: ?handler_contract.CostEnvelope = null;
-            if (tests.len > 0) {
-                cost_envelope = try gen.buildCostEnvelope(allocator);
-                result.max_io_depth = switch (cost_envelope.?.total) {
-                    .constant => |n| n,
-                    else => null,
-                };
-            } else {
-                result.max_io_depth = null;
-            }
+            result.paths_enumerated = path_analysis.paths_enumerated;
+            result.paths_exhaustive = path_analysis.paths_exhaustive;
+            result.max_io_depth = path_analysis.max_io_depth;
+            result.fault_total = path_analysis.fault_coverage.total_failable;
+            result.fault_covered = path_analysis.fault_coverage.covered;
 
             // Populate behavioral contract
             if (result.contract) |*c| {
                 if (c.properties) |*props| {
                     props.max_io_depth = result.max_io_depth;
-                    props.cost_bounded = if (cost_envelope) |envelope|
-                        envelope.exhaustive and envelope.total.class() != .unbounded
-                    else
-                        false;
+                    props.cost_bounded = path_analysis.cost_bounded;
+                    props.fault_covered = path_analysis.fault_clean;
                 }
-                if (cost_envelope) |envelope| {
+                if (path_analysis.cost_envelope) |envelope| {
                     c.cost_envelope = envelope;
-                    cost_envelope = null;
+                    path_analysis.cost_envelope = null;
                 }
-                c.behaviors = try gen.toBehaviorPaths(allocator);
+                c.behaviors = path_analysis.behaviors;
+                path_analysis.behaviors = .empty;
                 c.behaviors_exhaustive = result.paths_exhaustive;
-            }
-            if (cost_envelope) |*envelope| envelope.deinit(allocator);
-
-            // Fault coverage
-            var fc = zigts.fault_coverage.FaultCoverageChecker.init(allocator, tests);
-            defer fc.deinit();
-            try fc.analyze();
-            const fc_report = fc.getReport();
-            result.fault_total = fc_report.total_failable;
-            result.fault_covered = fc_report.covered;
-
-            if (result.contract) |*c| {
-                c.fault_coverage = .{
-                    .total_failable = fc_report.total_failable,
-                    .covered = fc_report.covered,
-                    .warnings = fc_report.warning_count,
-                };
-                if (c.properties) |*props| {
-                    props.fault_covered = fc_report.isClean();
-                }
+                c.fault_coverage = path_analysis.fault_coverage;
             }
         }
     }
@@ -3649,6 +3711,31 @@ test "contract construction propagates type-check allocation failure" {
             null,
             null,
             failContractTypeCheck,
+        ),
+    );
+}
+
+test "runCheckOnly propagates path analysis allocation failure" {
+    const source =
+        \\import { env } from "zigttp:env";
+        \\function handler(req: Request): Response {
+        \\  _ = req;
+        \\  const value = env("NAME") ?? "world";
+        \\  return Response.text(value);
+        \\}
+    ;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        runCheckOnlyFromSourceWithPathAllocator(
+            std.testing.allocator,
+            failing.allocator(),
+            source,
+            "path-analysis-entrypoint-oom.ts",
+            .{},
         ),
     );
 }

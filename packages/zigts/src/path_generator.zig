@@ -79,6 +79,54 @@ pub const GeneratedTest = struct {
     constraints: []const Constraint = &.{},
 };
 
+fn dupePathCondition(
+    allocator: std.mem.Allocator,
+    constraint: Constraint,
+) !handler_contract.PathCondition {
+    return switch (constraint) {
+        .req_method => |value| .{
+            .kind = .req_method,
+            .value = try allocator.dupe(u8, value),
+        },
+        .req_url => |value| .{
+            .kind = .req_url,
+            .value = try allocator.dupe(u8, value),
+        },
+        .stub_truthy, .result_ok => |info| try dupeIoCondition(allocator, .io_ok, info),
+        .stub_falsy, .result_not_ok => |info| try dupeIoCondition(allocator, .io_fail, info),
+    };
+}
+
+fn dupeIoCondition(
+    allocator: std.mem.Allocator,
+    kind: handler_contract.PathCondition.Kind,
+    info: StubInfo,
+) !handler_contract.PathCondition {
+    const module = try allocator.dupe(u8, info.module);
+    errdefer allocator.free(module);
+    const func = try allocator.dupe(u8, info.func);
+    return .{ .kind = kind, .module = module, .func = func };
+}
+
+fn dupePathIoCall(
+    allocator: std.mem.Allocator,
+    stub: IoStub,
+) !handler_contract.PathIoCall {
+    const module = try allocator.dupe(u8, stub.module);
+    errdefer allocator.free(module);
+    const func = try allocator.dupe(u8, stub.func);
+    errdefer allocator.free(func);
+    const arg_signature = if (stub.arg_signature) |signature|
+        try allocator.dupe(u8, signature)
+    else
+        null;
+    return .{
+        .module = module,
+        .func = func,
+        .arg_signature = arg_signature,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // PathGenerator
 // ---------------------------------------------------------------------------
@@ -229,8 +277,8 @@ pub const PathGenerator = struct {
 
     /// Generate test cases for the given handler function.
     pub fn generate(self: *PathGenerator, handler_func: NodeIndex) !void {
-        self.scanImports();
-        self.findHandlerBindings(handler_func);
+        try self.scanImports();
+        try self.findHandlerBindings(handler_func);
 
         const func = self.ir_view.getFunction(handler_func) orelse return;
         try self.walkPaths(func.body);
@@ -279,7 +327,8 @@ pub const PathGenerator = struct {
                 } else {
                     const module = try allocator.dupe(u8, module_cost.module);
                     errdefer allocator.free(module);
-                    const bound = try module_cost.bound.dupeOwned(allocator);
+                    var bound = try module_cost.bound.dupeOwned(allocator);
+                    errdefer bound.deinitOwned(allocator);
                     try envelope.entries.append(allocator, .{
                         .module = module,
                         .bound = bound,
@@ -294,11 +343,12 @@ pub const PathGenerator = struct {
         }
 
         if (!envelope.exhaustive) {
+            const truncated_desc = try allocator.dupe(u8, "path enumeration truncated at 1024");
             envelope.total.deinitOwned(allocator);
             envelope.total = .{ .unbounded = .{
                 .line = 0,
                 .column = 0,
-                .desc = try allocator.dupe(u8, "path enumeration truncated at 1024"),
+                .desc = truncated_desc,
             } };
         }
 
@@ -390,26 +440,8 @@ pub const PathGenerator = struct {
             for (test_case.constraints) |constraint| {
                 if (constraint.isFailure()) is_failure = true;
 
-                const cond: handler_contract.PathCondition = switch (constraint) {
-                    .req_method => |v| .{
-                        .kind = .req_method,
-                        .value = try allocator.dupe(u8, v),
-                    },
-                    .req_url => |v| .{
-                        .kind = .req_url,
-                        .value = try allocator.dupe(u8, v),
-                    },
-                    .stub_truthy, .result_ok => |info| .{
-                        .kind = .io_ok,
-                        .module = try allocator.dupe(u8, info.module),
-                        .func = try allocator.dupe(u8, info.func),
-                    },
-                    .stub_falsy, .result_not_ok => |info| .{
-                        .kind = .io_fail,
-                        .module = try allocator.dupe(u8, info.module),
-                        .func = try allocator.dupe(u8, info.func),
-                    },
-                };
+                var cond = try dupePathCondition(allocator, constraint);
+                errdefer cond.deinit(allocator);
                 try conditions.append(allocator, cond);
             }
 
@@ -420,20 +452,18 @@ pub const PathGenerator = struct {
             }
 
             for (test_case.io_stubs.items) |stub| {
-                const arg_sig: ?[]const u8 = if (stub.arg_signature) |sig|
-                    try allocator.dupe(u8, sig)
-                else
-                    null;
-                try io_sequence.append(allocator, .{
-                    .module = try allocator.dupe(u8, stub.module),
-                    .func = try allocator.dupe(u8, stub.func),
-                    .arg_signature = arg_sig,
-                });
+                var io_call = try dupePathIoCall(allocator, stub);
+                errdefer io_call.deinit(allocator);
+                try io_sequence.append(allocator, io_call);
             }
 
+            const route_method = try allocator.dupe(u8, test_case.method);
+            errdefer allocator.free(route_method);
+            const route_pattern = try allocator.dupe(u8, test_case.url);
+            errdefer allocator.free(route_pattern);
             try paths.append(allocator, .{
-                .route_method = try allocator.dupe(u8, test_case.method),
-                .route_pattern = try allocator.dupe(u8, test_case.url),
+                .route_method = route_method,
+                .route_pattern = route_pattern,
                 .conditions = conditions,
                 .io_sequence = io_sequence,
                 .response_status = test_case.expected_status,
@@ -449,7 +479,7 @@ pub const PathGenerator = struct {
     // Phase 1: Scan imports and handler bindings
     // -------------------------------------------------------------------
 
-    fn scanImports(self: *PathGenerator) void {
+    fn scanImports(self: *PathGenerator) error{OutOfMemory}!void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -467,17 +497,17 @@ pub const PathGenerator = struct {
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
 
                 if (builtin_modules.findExport(module_str, imported_name)) |entry| {
-                    self.module_fn_bindings.put(self.allocator, spec.local_binding.slot, .{
+                    try self.module_fn_bindings.put(self.allocator, spec.local_binding.slot, .{
                         .module = binding.name,
                         .func = entry.func.name,
                         .returns = entry.func.returns,
-                    }) catch {};
+                    });
                 }
             }
         }
     }
 
-    fn findHandlerBindings(self: *PathGenerator, handler_func: NodeIndex) void {
+    fn findHandlerBindings(self: *PathGenerator, handler_func: NodeIndex) error{OutOfMemory}!void {
         const func = self.ir_view.getFunction(handler_func) orelse return;
         if (func.params_count == 0) return;
 
@@ -501,7 +531,7 @@ pub const PathGenerator = struct {
             if (vd.init == null_node) continue;
 
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-            self.var_inits.put(self.allocator, key, vd.init) catch {};
+            try self.var_inits.put(self.allocator, key, vd.init);
 
             // Check if init is req.method or req.url/req.path
             if (self.isReqMemberAccess(vd.init, "method")) {
@@ -573,21 +603,24 @@ pub const PathGenerator = struct {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 if (vd.init != null_node) {
                     const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-                    self.var_inits.put(self.allocator, key, vd.init) catch {};
-                    self.trackModuleCall(vd.init, key);
+                    try self.var_inits.put(self.allocator, key, vd.init);
+                    try self.trackModuleCall(vd.init, key);
                 }
             },
 
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
-                    self.trackModuleCall(expr, null);
+                    try self.trackModuleCall(expr, null);
                 }
             },
 
             .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 const bound = self.resolveLoopBound(fi.iterable, node);
-                try self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1);
+                self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                    self.freeLoopBound(bound);
+                    return err;
+                };
                 self.loop_stack.append(self.allocator, .{ .bound = bound }) catch |err| {
                     self.freeLoopBound(bound);
                     return err;
@@ -862,20 +895,20 @@ pub const PathGenerator = struct {
     // I/O call tracking
     // -------------------------------------------------------------------
 
-    fn trackModuleCall(self: *PathGenerator, node: NodeIndex, binding_key: ?u32) void {
+    fn trackModuleCall(self: *PathGenerator, node: NodeIndex, binding_key: ?u32) error{OutOfMemory}!void {
         const tag = self.ir_view.getTag(node) orelse return;
 
         if (tag == .call) {
             const call = self.ir_view.getCall(node) orelse return;
             if (self.getCalleeMeta(call.callee)) |meta| {
-                self.io_seq.append(self.allocator, .{
+                try self.io_seq.append(self.allocator, .{
                     .module = meta.module,
                     .func = meta.func,
                     .returns = meta.returns,
                     .binding_key = binding_key,
                     .mult = self.currentMultiplicity(),
                     .call_node = node,
-                }) catch {};
+                });
             }
             return;
         }
@@ -884,7 +917,7 @@ pub const PathGenerator = struct {
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(node) orelse return;
             if (bin.op == .nullish) {
-                self.trackModuleCall(bin.left, binding_key);
+                try self.trackModuleCall(bin.left, binding_key);
                 return;
             }
         }
@@ -1068,6 +1101,7 @@ pub const PathGenerator = struct {
         }
 
         const name = try self.allocator.dupe(u8, name_buf[0..name_len]);
+        errdefer self.allocator.free(name);
 
         // Derive request properties from constraints
         var method: []const u8 = "GET";
@@ -1076,6 +1110,12 @@ pub const PathGenerator = struct {
 
         // Build I/O stubs from constraints + tracked calls
         var io_stubs: std.ArrayList(IoStub) = .empty;
+        errdefer {
+            for (io_stubs.items) |stub| {
+                if (stub.arg_signature) |sig| self.allocator.free(sig);
+            }
+            io_stubs.deinit(self.allocator);
+        }
         var seq: u32 = 0;
 
         // First pass: gather stub requirements from constraints
@@ -1107,23 +1147,27 @@ pub const PathGenerator = struct {
             const result_json = stub_overrides.get(io_call.func) orelse
                 stubValueForType(io_call.returns, true);
 
-            const arg_sig: ?[]const u8 = if (io_call.call_node) |cn|
-                self.computeArgSignature(self.allocator, cn) catch null
-            else
-                null;
+            {
+                const arg_sig: ?[]const u8 = if (io_call.call_node) |cn|
+                    self.computeArgSignature(self.allocator, cn) catch null
+                else
+                    null;
+                errdefer if (arg_sig) |sig| self.allocator.free(sig);
 
-            try io_stubs.append(self.allocator, .{
-                .seq = seq,
-                .module = io_call.module,
-                .func = io_call.func,
-                .result_json = result_json,
-                .arg_signature = arg_sig,
-            });
+                try io_stubs.append(self.allocator, .{
+                    .seq = seq,
+                    .module = io_call.module,
+                    .func = io_call.func,
+                    .result_json = result_json,
+                    .arg_signature = arg_sig,
+                });
+            }
             seq += 1;
         }
 
         // Snapshot current constraints for fault coverage analysis
         const constraints_snapshot = try self.allocator.dupe(Constraint, self.constraints.items);
+        errdefer if (constraints_snapshot.len > 0) self.allocator.free(constraints_snapshot);
         try self.snapshotPathCost();
 
         try self.tests.append(self.allocator, .{
@@ -1662,7 +1706,7 @@ test "scanImports tracks virtual module functions with binding names" {
 
     var generator = PathGenerator.init(allocator, ir_view, &atoms);
     defer generator.deinit();
-    generator.scanImports();
+    try generator.scanImports();
 
     var tracked_slot: ?u16 = null;
     const node_count = ir_view.nodeCount();
@@ -1699,6 +1743,317 @@ const PathGeneratorFixture = struct {
         self.atoms.deinit();
     }
 };
+
+const FailNextAllocation = struct {
+    child: std.mem.Allocator,
+    armed: bool = true,
+    allocations_before_failure: usize = 0,
+
+    fn init(child: std.mem.Allocator) FailNextAllocation {
+        return .{ .child = child };
+    }
+
+    fn allocator(self: *FailNextAllocation) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(
+        context_ptr: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *FailNextAllocation = @ptrCast(@alignCast(context_ptr));
+        if (self.armed) {
+            if (self.allocations_before_failure > 0) {
+                self.allocations_before_failure -= 1;
+                return self.child.rawAlloc(len, alignment, return_address);
+            }
+            self.armed = false;
+            return null;
+        }
+        return self.child.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(
+        context_ptr: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *FailNextAllocation = @ptrCast(@alignCast(context_ptr));
+        return self.child.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(
+        context_ptr: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *FailNextAllocation = @ptrCast(@alignCast(context_ptr));
+        return self.child.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(
+        context_ptr: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *FailNextAllocation = @ptrCast(@alignCast(context_ptr));
+        self.child.rawFree(memory, alignment, return_address);
+    }
+};
+
+fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var parser = parser_mod.Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    var failing = FailNextAllocation.init(allocator);
+    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    defer generator.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, generator.generate(handler_fn));
+}
+
+test "generate fails closed when import binding allocation fails" {
+    try expectGenerationFailsOnFirstAllocation(
+        \\import { env } from "zigttp:env";
+        \\export function handler(req) {
+        \\  const value = env("NAME");
+        \\  return Response.json(value);
+        \\}
+    );
+}
+
+test "generate fails closed when handler binding allocation fails" {
+    try expectGenerationFailsOnFirstAllocation(
+        \\export function handler(req) {
+        \\  const method = req.method;
+        \\  if (method === "POST") return Response.json(true);
+        \\  return Response.json(false);
+        \\}
+    );
+}
+
+test "walkPaths fails closed when local binding allocation fails" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req) {
+        \\  if (req) {
+        \\    const local = req.url;
+        \\    return Response.json(local);
+        \\  }
+        \\  return Response.json(false);
+        \\}
+    ;
+    var parser = parser_mod.Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const function = ir_view.getFunction(handler_fn) orelse return error.HandlerNotFound;
+
+    var failing = FailNextAllocation.init(allocator);
+    failing.armed = false;
+    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    defer generator.deinit();
+    try generator.scanImports();
+    try generator.findHandlerBindings(handler_fn);
+    failing.armed = true;
+
+    try std.testing.expectError(error.OutOfMemory, generator.walkPaths(function.body));
+}
+
+test "walkPaths fails closed when I/O sequence allocation fails" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\export function handler(req) {
+        \\  env("NAME");
+        \\  return Response.json(true);
+        \\}
+    ;
+    var parser = parser_mod.Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const function = ir_view.getFunction(handler_fn) orelse return error.HandlerNotFound;
+
+    var failing = FailNextAllocation.init(allocator);
+    failing.armed = false;
+    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    defer generator.deinit();
+    try generator.scanImports();
+    try generator.findHandlerBindings(handler_fn);
+    failing.armed = true;
+
+    try std.testing.expectError(error.OutOfMemory, generator.walkPaths(function.body));
+}
+
+test "emitTestCase keeps argument signature allocation failure conservative" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zigttp:env";
+        \\export function handler(req) {
+        \\  env("NAME");
+        \\  return Response.json(true);
+        \\}
+    ;
+    var parser = parser_mod.Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+
+    var failing = FailNextAllocation.init(allocator);
+    failing.armed = false;
+    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    defer generator.deinit();
+    try generator.scanImports();
+    try generator.findHandlerBindings(handler_fn);
+    for (0..ir_view.nodeCount()) |idx| {
+        try generator.trackModuleCall(@intCast(idx), null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), generator.io_seq.items.len);
+
+    // The first allocation duplicates the test name; fail the signature copy
+    // immediately after it so the production fallback is exercised.
+    failing.allocations_before_failure = 1;
+    failing.armed = true;
+    try generator.emitTestCase(200);
+
+    try std.testing.expect(!failing.armed);
+    try std.testing.expectEqual(@as(usize, 1), generator.tests.items.len);
+    try std.testing.expectEqual(@as(usize, 1), generator.tests.items[0].io_stubs.items.len);
+    try std.testing.expect(generator.tests.items[0].io_stubs.items[0].arg_signature == null);
+}
+
+fn generateWithAllocator(
+    allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: *context.AtomTable,
+    handler_fn: NodeIndex,
+) !void {
+    var generator = PathGenerator.init(allocator, ir_view, atoms);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+}
+
+test "generate cleans every fatal allocation failure" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  const ids = req.ids;
+        \\  for (const id of ids) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json(true);
+        \\}
+    ;
+    var parser = parser_mod.Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        generateWithAllocator,
+        .{ ir_view, &atoms, handler_fn },
+    );
+}
+
+fn costEnvelopeWithAllocator(
+    allocator: std.mem.Allocator,
+    generator: *const PathGenerator,
+) !void {
+    var envelope = try generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+}
+
+test "cost envelope cleans every allocation failure" {
+    const source =
+        \\import { sqlOne } from "zigttp:sql";
+        \\export function handler(req) {
+        \\  const ids = req.ids;
+        \\  for (const id of ids) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json(true);
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        costEnvelopeWithAllocator,
+        .{&fixture.generator},
+    );
+}
+
+fn behaviorPathsWithAllocator(
+    allocator: std.mem.Allocator,
+    generator: *const PathGenerator,
+) !void {
+    var paths = try generator.toBehaviorPaths(allocator);
+    defer {
+        for (paths.items) |*path| path.deinit(allocator);
+        paths.deinit(allocator);
+    }
+}
+
+test "behavior path conversion cleans every allocation failure" {
+    const source =
+        \\import { env } from "zigttp:env";
+        \\export function handler(req) {
+        \\  const value = env("NAME");
+        \\  if (value) return Response.json(true);
+        \\  return Response.json(false);
+        \\}
+    ;
+    var fixture = try generateFixture(std.testing.allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        behaviorPathsWithAllocator,
+        .{&fixture.generator},
+    );
+}
 
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
     var parser = parser_mod.Parser.init(allocator, source);
