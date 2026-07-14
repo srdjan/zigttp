@@ -1526,7 +1526,7 @@ pub const JSObject = extern struct {
         }
     }
 
-    fn destroyFunctionBytecode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode, seen: ?*FunctionBytecodeSeen) void {
+    pub fn destroyFunctionBytecode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode, seen: ?*FunctionBytecodeSeen) void {
         if (seen) |s| {
             const gop = s.getOrPut(allocator, func) catch return;
             if (gop.found_existing) return;

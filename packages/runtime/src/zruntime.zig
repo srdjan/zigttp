@@ -1385,11 +1385,9 @@ pub const Runtime = struct {
             self.allocator,
             self.strings,
         );
-        var keep_bytecode = false;
-        // Note: We don't defer result.deinit() because the function and constants
-        // need to stay alive. Shapes can be freed after materialization.
+        var bytecode_transferred = false;
         defer {
-            if (keep_bytecode) {
+            if (bytecode_transferred) {
                 // Free shapes after materialization (they're copied into hidden classes)
                 for (result.shapes) |shape| {
                     self.allocator.free(shape);
@@ -1410,8 +1408,13 @@ pub const Runtime = struct {
             try self.ctx.materializeShapes(shapes_const);
         }
 
+        // The script root is heap-allocated on cache deserialization. Transfer
+        // it to the context before execution creates separately tracked nested
+        // function objects; context teardown deduplicates both ownership paths.
+        try self.ctx.takeBytecodeRoot(result.func);
+        bytecode_transferred = true;
+
         // Execute the deserialized bytecode
-        keep_bytecode = true;
         _ = try self.interpreter.run(result.func);
         summarizeFeedbackRecursive(&self.last_feedback_summary, result.func);
         if (refresh_handler) {
@@ -5939,6 +5942,40 @@ test "HandlerPool teardown leaves no leaks under testing.allocator" {
     defer response.deinit();
 
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HandlerPool cached pattern dispatch transfers ownership without leaks" {
+    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const handler_code =
+        \\function handler(request) {
+        \\  const url = request.url;
+        \\  if (url === "/api/a") return Response.text("alpha");
+        \\  return Response.text("fallback");
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    // Keep the source-compiled runtime checked out so the request must create
+    // a second runtime and hydrate it from the shared bytecode cache.
+    const warmed_runtime = try pool.pool.acquire();
+    defer pool.pool.release(warmed_runtime);
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/api/a"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("alpha", response.body);
+    try std.testing.expect(pool.cache.hits.load(.monotonic) > 0);
+    try std.testing.expect(!pool.cache_disabled.load(.monotonic));
 }
 
 test "HandlerPool bytecode cache" {

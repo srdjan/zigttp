@@ -237,6 +237,47 @@ fn decodeTag(comptime E: type, raw: u8) DeserializeError!E {
     return std.enums.fromInt(E, raw) orelse error.InvalidTag;
 }
 
+fn destroyPatternDispatch(
+    allocator: std.mem.Allocator,
+    dispatch: ?*bytecode.PatternDispatchTable,
+) void {
+    if (dispatch) |table| {
+        table.deinit();
+        allocator.destroy(table);
+    }
+}
+
+fn destroyDeserializedConstant(allocator: std.mem.Allocator, constant: value.JSValue) void {
+    if (constant.isExternPtr()) {
+        const magic = constant.toExternPtr(u32);
+        if (magic.* == bytecode.MAGIC) {
+            object.JSObject.destroyFunctionBytecode(
+                allocator,
+                constant.toExternPtr(bytecode.FunctionBytecode),
+                null,
+            );
+        }
+    } else if (constant.isFloat64()) {
+        allocator.destroy(constant.toPtr(value.JSValue.Float64Box));
+    } else if (constant.isString()) {
+        const js_str = constant.toPtr(string.JSString);
+        if (!js_str.flags.is_unique) string.freeString(allocator, js_str);
+    }
+}
+
+fn destroyDeserializedConstants(
+    allocator: std.mem.Allocator,
+    constants: []value.JSValue,
+    initialized_count: usize,
+) void {
+    for (constants[0..initialized_count]) |constant| destroyDeserializedConstant(allocator, constant);
+    allocator.free(constants);
+}
+
+fn destroyDeserializedFunction(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+    object.JSObject.destroyFunctionBytecode(allocator, func, null);
+}
+
 /// Deserialize constants from a reader, reconstructing JSValues
 pub fn deserializeConstants(
     reader: anytype,
@@ -245,10 +286,12 @@ pub fn deserializeConstants(
 ) DeserializeError![]value.JSValue {
     const count = try reader.readInt(u16, .little);
     const constants = try allocator.alloc(value.JSValue, count);
-    errdefer allocator.free(constants);
+    var initialized_count: usize = 0;
+    errdefer destroyDeserializedConstants(allocator, constants, initialized_count);
 
     for (constants) |*slot| {
         slot.* = try deserializeConstant(reader, allocator, strings_table);
+        initialized_count += 1;
     }
 
     return constants;
@@ -363,11 +406,12 @@ pub fn deserializeFunctionBytecode(
 
     // Recursively deserialize constants
     const constants = try deserializeConstants(reader, allocator, strings_table);
-    errdefer allocator.free(constants);
+    errdefer destroyDeserializedConstants(allocator, constants, constants.len);
 
     // Deserialize handler flags and pattern dispatch
     const handler_flags: bytecode.HandlerFlags = @bitCast(try reader.readByte());
     const pattern_dispatch = try deserializePatternDispatch(reader, allocator);
+    errdefer destroyPatternDispatch(allocator, pattern_dispatch);
 
     // Allocate and populate FunctionBytecode
     const func = try allocator.create(bytecode.FunctionBytecode);
@@ -397,10 +441,16 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
     if (pattern_count == 0) return null;
 
     const dispatch = try allocator.create(bytecode.PatternDispatchTable);
+    errdefer allocator.destroy(dispatch);
     dispatch.* = bytecode.PatternDispatchTable.init(allocator);
 
     const patterns = try allocator.alloc(bytecode.HandlerPattern, pattern_count);
-    errdefer allocator.free(patterns);
+    var initialized_count: usize = 0;
+    errdefer {
+        for (patterns[0..initialized_count]) |*pattern| pattern.deinit(allocator);
+        allocator.free(patterns);
+        dispatch.exact_match_map.deinit(allocator);
+    }
 
     for (patterns, 0..) |*pattern, i| {
         pattern.* = .{
@@ -414,6 +464,7 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
             .response_template_prefix = null,
             .response_template_suffix = null,
         };
+        initialized_count += 1;
 
         // Pattern type
         pattern.pattern_type = try decodeTag(bytecode.PatternType, try reader.readByte());
@@ -425,24 +476,15 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
 
         // URL bytes
         const url_len = try reader.readInt(u16, .little);
-        const url_bytes = try allocator.alloc(u8, url_len);
-        const url_read = try reader.readAll(url_bytes);
-        if (url_read != url_len) {
-            allocator.free(url_bytes);
-            return error.IncompleteRead;
-        }
-        pattern.url_bytes = url_bytes;
+        pattern.url_bytes = try allocator.alloc(u8, url_len);
+        const url_read = try reader.readAll(@constCast(pattern.url_bytes));
+        if (url_read != url_len) return error.IncompleteRead;
 
         // Static body
         const body_len = try reader.readInt(u32, .little);
-        const body = try allocator.alloc(u8, body_len);
-        const body_read = try reader.readAll(body);
-        if (body_read != body_len) {
-            allocator.free(url_bytes);
-            allocator.free(body);
-            return error.IncompleteRead;
-        }
-        pattern.static_body = body;
+        pattern.static_body = try allocator.alloc(u8, body_len);
+        const body_read = try reader.readAll(@constCast(pattern.static_body));
+        if (body_read != body_len) return error.IncompleteRead;
 
         // Status and content type
         pattern.status = try reader.readInt(u16, .little);
@@ -451,15 +493,9 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         // Template prefix (optional)
         const prefix_len = try reader.readInt(u16, .little);
         if (prefix_len > 0) {
-            const prefix = try allocator.alloc(u8, prefix_len);
-            const prefix_read = try reader.readAll(prefix);
-            if (prefix_read != prefix_len) {
-                allocator.free(prefix);
-                allocator.free(url_bytes);
-                allocator.free(body);
-                return error.IncompleteRead;
-            }
-            pattern.response_template_prefix = prefix;
+            pattern.response_template_prefix = try allocator.alloc(u8, prefix_len);
+            const prefix_read = try reader.readAll(@constCast(pattern.response_template_prefix.?));
+            if (prefix_read != prefix_len) return error.IncompleteRead;
         } else {
             pattern.response_template_prefix = null;
         }
@@ -467,23 +503,16 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         // Template suffix (optional)
         const suffix_len = try reader.readInt(u16, .little);
         if (suffix_len > 0) {
-            const suffix = try allocator.alloc(u8, suffix_len);
-            const suffix_read = try reader.readAll(suffix);
-            if (suffix_read != suffix_len) {
-                allocator.free(suffix);
-                if (pattern.response_template_prefix) |p| allocator.free(p);
-                allocator.free(url_bytes);
-                allocator.free(body);
-                return error.IncompleteRead;
-            }
-            pattern.response_template_suffix = suffix;
+            pattern.response_template_suffix = try allocator.alloc(u8, suffix_len);
+            const suffix_read = try reader.readAll(@constCast(pattern.response_template_suffix.?));
+            if (suffix_read != suffix_len) return error.IncompleteRead;
         } else {
             pattern.response_template_suffix = null;
         }
 
         // Build exact match hash map entry
         if (pattern.pattern_type == .exact) {
-            const hash = std.hash.Wyhash.hash(0, url_bytes);
+            const hash = std.hash.Wyhash.hash(0, pattern.url_bytes);
             try dispatch.exact_match_map.put(allocator, hash, @intCast(i));
         }
     }
@@ -1086,14 +1115,232 @@ test "deserializeConstant rejects out-of-range SpecialCode byte" {
     try std.testing.expectError(error.InvalidTag, result);
 }
 
-test "decodeTag rejects out-of-range PatternType byte" {
-    // PatternType is exhaustive with values 0-2; 0xFF is out of range.
-    // This is the same decode call `deserializePatternDispatch` makes for the
-    // pattern-type byte; tested directly here (rather than through the
-    // allocating wrapper) since that wrapper has a pre-existing, unrelated
-    // leak of its `dispatch` allocation on any error path past its creation.
-    const result = decodeTag(bytecode.PatternType, 0xFF);
-    try std.testing.expectError(error.InvalidTag, result);
+fn serializePatternDispatchFixture(buffer: []u8) ![]const u8 {
+    var patterns = [_]bytecode.HandlerPattern{
+        .{
+            .pattern_type = .exact,
+            .url_atom = .url,
+            .url_bytes = "/api/a",
+            .static_body = "alpha",
+            .status = 200,
+            .content_type_idx = 0,
+            .response_template_prefix = "prefix-a",
+            .response_template_suffix = "suffix-a",
+        },
+        .{
+            .pattern_type = .prefix,
+            .url_atom = .path,
+            .url_bytes = "/api/b/",
+            .static_body = "beta",
+            .status = 201,
+            .content_type_idx = 1,
+            .response_template_prefix = "prefix-b",
+            .response_template_suffix = "suffix-b",
+        },
+    };
+    var dispatch = bytecode.PatternDispatchTable.init(std.testing.allocator);
+    dispatch.patterns = &patterns;
+    var writer = SliceWriter{ .buffer = buffer };
+    try serializePatternDispatch(&dispatch, &writer);
+    return writer.getWritten();
+}
+
+fn destroyTestFunction(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+    destroyDeserializedFunction(allocator, func);
+}
+
+fn deserializePatternDispatchForAllocationTest(
+    allocator: std.mem.Allocator,
+    serialized: []const u8,
+) !void {
+    var reader = SliceReader{ .data = serialized };
+    const dispatch = (try deserializePatternDispatch(&reader, allocator)) orelse
+        return error.MissingPatternDispatch;
+    defer destroyPatternDispatch(allocator, dispatch);
+}
+
+fn serializeFunctionWithPatternDispatch(
+    allocator: std.mem.Allocator,
+    buffer: []u8,
+) ![]const u8 {
+    var dispatch_buffer: [512]u8 = undefined;
+    const dispatch_bytes = try serializePatternDispatchFixture(&dispatch_buffer);
+    var dispatch_reader = SliceReader{ .data = dispatch_bytes };
+    const dispatch = (try deserializePatternDispatch(&dispatch_reader, allocator)) orelse
+        return error.MissingPatternDispatch;
+    defer destroyPatternDispatch(allocator, dispatch);
+
+    const code = [_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)};
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .pattern_dispatch = dispatch,
+        .handler_flags = .{ .is_http_handler = true, .has_static_routes = true },
+    };
+    var writer = SliceWriter{ .buffer = buffer };
+    try serializeFunctionBytecode(&func, &writer, allocator);
+    return writer.getWritten();
+}
+
+fn deserializeFunctionForAllocationTest(
+    allocator: std.mem.Allocator,
+    serialized: []const u8,
+) !void {
+    var reader = SliceReader{ .data = serialized };
+    const func = try deserializeFunctionBytecode(&reader, allocator, null);
+    defer destroyTestFunction(allocator, func);
+}
+
+fn serializeFullPatternDispatchFixture(
+    allocator: std.mem.Allocator,
+    buffer: []u8,
+) ![]const u8 {
+    var function_buffer: [1024]u8 = undefined;
+    const function_bytes = try serializeFunctionWithPatternDispatch(allocator, &function_buffer);
+    var function_reader = SliceReader{ .data = function_bytes };
+    const func = try deserializeFunctionBytecode(&function_reader, allocator, null);
+    defer destroyTestFunction(allocator, func);
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    const shape = [_]object.Atom{.url};
+    const shapes = [_][]const object.Atom{&shape};
+    var writer = SliceWriter{ .buffer = buffer };
+    try serializeBytecodeWithAtomsAndShapes(func, &atoms, &shapes, &writer, allocator);
+    return writer.getWritten();
+}
+
+fn deserializeFullPatternDispatchForAllocationTest(
+    allocator: std.mem.Allocator,
+    serialized: []const u8,
+) !void {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var reader = SliceReader{ .data = serialized };
+    var result = try deserializeBytecodeWithAtomsAndShapes(&reader, &atoms, allocator, null);
+    defer result.deinit();
+}
+
+fn serializeOwnedConstantsFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8 {
+    const float_box = try allocator.create(value.JSValue.Float64Box);
+    defer allocator.destroy(float_box);
+    float_box.* = .{
+        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
+        ._pad = 0,
+        .value = 42.5,
+    };
+    const js_string = try string.createString(allocator, "owned");
+    defer string.freeString(allocator, js_string);
+    const nested_code = [_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)};
+    const nested = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &nested_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const constants = [_]value.JSValue{
+        value.JSValue.fromPtr(float_box),
+        value.JSValue.fromPtr(js_string),
+        value.JSValue.fromExternPtr(@constCast(&nested)),
+    };
+    var writer = SliceWriter{ .buffer = buffer };
+    try serializeConstants(&constants, &writer, allocator);
+    return writer.getWritten();
+}
+
+fn deserializeOwnedConstantsForAllocationTest(
+    allocator: std.mem.Allocator,
+    serialized: []const u8,
+) !void {
+    var reader = SliceReader{ .data = serialized };
+    const constants = try deserializeConstants(&reader, allocator, null);
+    defer destroyDeserializedConstants(allocator, constants, constants.len);
+}
+
+test "deserializePatternDispatch rejects invalid pattern tags without leaks" {
+    var buffer: [512]u8 = undefined;
+    const serialized = try serializePatternDispatchFixture(&buffer);
+    buffer[2] = 0xff;
+
+    var reader = SliceReader{ .data = serialized };
+    try std.testing.expectError(
+        error.InvalidTag,
+        deserializePatternDispatch(&reader, std.testing.allocator),
+    );
+}
+
+test "deserializePatternDispatch cleans every truncated partial pattern" {
+    var buffer: [512]u8 = undefined;
+    const serialized = try serializePatternDispatchFixture(&buffer);
+
+    for (0..serialized.len) |truncated_len| {
+        var reader = SliceReader{ .data = serialized[0..truncated_len] };
+        if (deserializePatternDispatch(&reader, std.testing.allocator)) |dispatch| {
+            destroyPatternDispatch(std.testing.allocator, dispatch);
+            return error.UnexpectedSuccessfulDecode;
+        } else |_| {}
+    }
+}
+
+test "deserializePatternDispatch cleans every allocation failure" {
+    var buffer: [512]u8 = undefined;
+    const serialized = try serializePatternDispatchFixture(&buffer);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        deserializePatternDispatchForAllocationTest,
+        .{serialized},
+    );
+}
+
+test "deserializeFunctionBytecode cleans dispatch before function ownership" {
+    var buffer: [1024]u8 = undefined;
+    const serialized = try serializeFunctionWithPatternDispatch(std.testing.allocator, &buffer);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        deserializeFunctionForAllocationTest,
+        .{serialized},
+    );
+}
+
+test "full bytecode dispatch ownership is leak-free through shapes and deinit" {
+    var buffer: [2048]u8 = undefined;
+    const serialized = try serializeFullPatternDispatchFixture(std.testing.allocator, &buffer);
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        deserializeFullPatternDispatchForAllocationTest,
+        .{serialized},
+    );
+}
+
+test "deserializeConstants cleans owned values on truncation and allocation failure" {
+    var buffer: [1024]u8 = undefined;
+    const serialized = try serializeOwnedConstantsFixture(std.testing.allocator, &buffer);
+
+    for (0..serialized.len) |truncated_len| {
+        var reader = SliceReader{ .data = serialized[0..truncated_len] };
+        if (deserializeConstants(&reader, std.testing.allocator, null)) |constants| {
+            destroyDeserializedConstants(std.testing.allocator, constants, constants.len);
+            return error.UnexpectedSuccessfulDecode;
+        } else |_| {}
+    }
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        deserializeOwnedConstantsForAllocationTest,
+        .{serialized},
+    );
 }
 
 // ============================================================================
@@ -1595,8 +1842,9 @@ pub fn deserializeShapes(
     const count = try reader.readInt(u16, .little);
 
     const shapes = try allocator.alloc([]object.Atom, count);
+    var initialized_count: usize = 0;
     errdefer {
-        for (shapes) |shape| {
+        for (shapes[0..initialized_count]) |shape| {
             allocator.free(shape);
         }
         allocator.free(shapes);
@@ -1612,6 +1860,7 @@ pub fn deserializeShapes(
             const new_atom = remap.get(old_atom);
             shapes[i][j] = @enumFromInt(new_atom);
         }
+        initialized_count += 1;
     }
 
     return shapes;
@@ -1678,24 +1927,7 @@ pub const DeserializedBytecode = struct {
         }
         self.allocator.free(self.shapes);
 
-        // Free function
-        self.allocator.free(self.func.code);
-        self.allocator.free(self.func.upvalue_info);
-        if (self.func.line_table) |line_table| {
-            if (line_table.len > 0) self.allocator.free(line_table);
-        }
-        for (self.func.constants) |c| {
-            if (c.isFloat64()) {
-                self.allocator.destroy(c.toPtr(value.JSValue.Float64Box));
-            } else if (c.isString()) {
-                const js_str = c.toPtr(string.JSString);
-                if (!js_str.flags.is_unique) {
-                    string.freeString(self.allocator, js_str);
-                }
-            }
-        }
-        self.allocator.free(self.func.constants);
-        self.allocator.destroy(self.func);
+        destroyDeserializedFunction(self.allocator, self.func);
     }
 };
 
@@ -1712,15 +1944,7 @@ pub fn deserializeBytecodeWithAtomsAndShapes(
 
     // Deserialize bytecode
     const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
-    errdefer {
-        allocator.free(func.code);
-        allocator.free(func.upvalue_info);
-        if (func.line_table) |line_table| {
-            if (line_table.len > 0) allocator.free(line_table);
-        }
-        allocator.free(func.constants);
-        allocator.destroy(func);
-    }
+    errdefer destroyDeserializedFunction(allocator, func);
 
     // Remap all atom references in bytecode
     remapBytecodeAtoms(func, &remap);
@@ -1749,15 +1973,7 @@ pub fn deserializeBytecodeWithAtoms(
 
     // Deserialize bytecode
     const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
-    errdefer {
-        allocator.free(func.code);
-        allocator.free(func.upvalue_info);
-        if (func.line_table) |line_table| {
-            if (line_table.len > 0) allocator.free(line_table);
-        }
-        allocator.free(func.constants);
-        allocator.destroy(func);
-    }
+    errdefer destroyDeserializedFunction(allocator, func);
 
     // Remap all atom references
     remapBytecodeAtoms(func, &remap);

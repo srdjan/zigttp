@@ -314,6 +314,10 @@ pub const Context = struct {
     /// Owns nested FunctionBytecode payloads (codegen does not free these;
     /// see CodeGen.freeOwnedConstantPayloads contract).
     bytecode_functions: std.ArrayList(*object.JSObject),
+    /// Owns heap-allocated script roots loaded from serialized bytecode. Their
+    /// nested functions are also reachable through bytecode_functions, so
+    /// teardown shares one seen-set across both ownership paths.
+    bytecode_roots: std.ArrayList(*bytecode.FunctionBytecode),
     /// Cached HTTP shapes for fast Request/Response creation
     http_shapes: ?HttpShapeCache,
     /// Cached vnode shape for fast JSX virtual DOM node creation
@@ -403,6 +407,7 @@ pub const Context = struct {
             .jit_metrics = .{},
             .builtin_objects = .empty,
             .bytecode_functions = .empty,
+            .bytecode_roots = .empty,
             .http_shapes = null,
             .vnode_shape = null,
             .http_strings = null,
@@ -418,6 +423,7 @@ pub const Context = struct {
         };
         errdefer {
             ctx.literal_shapes.deinit(allocator);
+            ctx.bytecode_roots.deinit(allocator);
             ctx.bytecode_functions.deinit(allocator);
             ctx.builtin_objects.deinit(allocator);
             ctx.sdk_sqlite_allowlist.deinit(allocator);
@@ -815,12 +821,19 @@ pub const Context = struct {
 
     pub fn clearCompiledCodePointers(self: *Context) usize {
         var evicted: usize = 0;
+        for (self.bytecode_roots.items) |func| {
+            evicted += self.clearCompiledCodeRecursive(func);
+        }
         for (self.bytecode_functions.items) |obj| {
             if (obj.getBytecodeFunctionData()) |data| {
                 evicted += self.clearCompiledCodeRecursive(@constCast(data.bytecode));
             }
         }
         return evicted;
+    }
+
+    pub fn takeBytecodeRoot(self: *Context, func: *bytecode.FunctionBytecode) !void {
+        try self.bytecode_roots.append(self.allocator, func);
     }
 
     fn clearCompiledCodeRecursive(self: *Context, func: *bytecode.FunctionBytecode) usize {
@@ -1015,6 +1028,10 @@ pub const Context = struct {
         // seen-set across the whole walk so each FunctionBytecode is freed
         // exactly once regardless of which tracked object reaches it first.
         var destroyed_bytecode: object.JSObject.FunctionBytecodeSeen = .empty;
+        for (self.bytecode_roots.items) |func| {
+            object.JSObject.destroyFunctionBytecode(self.allocator, func, &destroyed_bytecode);
+        }
+        self.bytecode_roots.deinit(self.allocator);
         for (self.bytecode_functions.items) |obj| {
             obj.destroyFullTracked(self.allocator, &destroyed_bytecode);
         }
