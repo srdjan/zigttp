@@ -30,7 +30,11 @@ step() {
 }
 
 step "zig build test  (aggregate unit suite)"
-zig build test
+if [ "$(uname -s)" = "Darwin" ]; then
+  zig build test -j1
+else
+  zig build test
+fi
 
 step "zig build test-zruntime  (standalone runtime root)"
 zig build test-zruntime

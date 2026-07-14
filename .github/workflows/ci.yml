@@ -56,7 +56,12 @@ jobs:
           fi
 
       - name: Run aggregate tests
-        run: zig build test
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            zig build test -j1
+          else
+            zig build test
+          fi
 
       - name: Run focused runtime tests
         run: zig build test-zruntime
