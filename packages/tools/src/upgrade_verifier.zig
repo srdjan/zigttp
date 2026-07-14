@@ -488,6 +488,90 @@ pub fn writeUpgradeReport(manifest: *const UpgradeManifest, writer: anytype) !vo
 // Tests
 // -------------------------------------------------------------------------
 
+fn testProperties(value: bool) handler_contract.HandlerProperties {
+    var properties: handler_contract.HandlerProperties = .{
+        .pure = value,
+        .read_only = value,
+        .stateless = value,
+        .retry_safe = value,
+        .deterministic = value,
+        .has_egress = false,
+    };
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
+        if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
+            @field(properties, field.name) = value;
+        }
+    }
+    return properties;
+}
+
+fn expectIntegratedPropertyLoss(
+    comptime field_name: []const u8,
+    expected_severity: Severity,
+    expected_verdict: UpgradeVerdict,
+) !void {
+    const allocator = std.testing.allocator;
+    var old = handler_contract.emptyContract(try allocator.dupe(u8, "old.ts"));
+    defer old.deinit(allocator);
+    var new = handler_contract.emptyContract(try allocator.dupe(u8, "new.ts"));
+    defer new.deinit(allocator);
+    old.properties = testProperties(true);
+    new.properties = testProperties(true);
+    @field(new.properties.?, field_name) = false;
+
+    var diff = try contract_diff.diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+    var manifest = try analyzeUpgrade(
+        allocator,
+        &diff,
+        diff.classify(),
+        null,
+        &new,
+    );
+    defer manifest.deinit(allocator);
+
+    try std.testing.expectEqual(expected_verdict, manifest.verdict);
+    try std.testing.expectEqual(@as(usize, 1), manifest.property_regressions.items.len);
+    const regression = manifest.property_regressions.items[0];
+    try std.testing.expectEqualStrings(field_name, regression.field);
+    try std.testing.expectEqual(expected_severity, regression.severity);
+}
+
+test "integrated critical property loss is breaking" {
+    try expectIntegratedPropertyLoss("no_secret_leakage", .critical, .breaking);
+}
+
+test "integrated warning property loss needs review" {
+    try expectIntegratedPropertyLoss("input_validated", .warning, .needs_review);
+}
+
+test "integrated informational property loss remains visible and safe" {
+    try expectIntegratedPropertyLoss("pure", .info, .safe);
+}
+
+test "integrated property gain remains informational and safe" {
+    const allocator = std.testing.allocator;
+    var old = handler_contract.emptyContract(try allocator.dupe(u8, "old.ts"));
+    defer old.deinit(allocator);
+    var new = handler_contract.emptyContract(try allocator.dupe(u8, "new.ts"));
+    defer new.deinit(allocator);
+    old.properties = testProperties(true);
+    new.properties = testProperties(true);
+    old.properties.?.retry_safe = false;
+
+    var diff = try contract_diff.diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+    var manifest = try analyzeUpgrade(allocator, &diff, diff.classify(), null, &new);
+    defer manifest.deinit(allocator);
+
+    try std.testing.expectEqual(UpgradeVerdict.safe, manifest.verdict);
+    try std.testing.expectEqual(@as(usize, 0), manifest.property_regressions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), manifest.property_gains.items.len);
+    const gain = manifest.property_gains.items[0];
+    try std.testing.expectEqualStrings("retry_safe", gain.field);
+    try std.testing.expectEqual(Severity.info, gain.severity);
+}
+
 test "safe verdict for identical contracts" {
     const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.equivalent, &empty, null, null);

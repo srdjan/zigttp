@@ -631,7 +631,8 @@ pub fn diffContracts(
         }
     }
 
-    // Handler properties comparison (informational only)
+    // Enumerate canonical monotonic proof properties. Policy and severity stay
+    // with the upgrade verifier; this layer only records factual changes.
     var effect_changes: std.ArrayList(PropertiesChange) = .empty;
     errdefer effect_changes.deinit(allocator);
     const old_cost_class = costClassOf(old);
@@ -640,23 +641,17 @@ pub fn diffContracts(
     if (old.properties != null and new.properties != null) {
         const op = old.properties.?;
         const np = new.properties.?;
-        inline for (.{
-            .{ "pure", op.pure, np.pure },
-            .{ "read_only", op.read_only, np.read_only },
-            .{ "stateless", op.stateless, np.stateless },
-            .{ "retry_safe", op.retry_safe, np.retry_safe },
-            .{ "deterministic", op.deterministic, np.deterministic },
-            .{ "injection_safe", op.injection_safe, np.injection_safe },
-            .{ "idempotent", op.idempotent, np.idempotent },
-            .{ "state_isolated", op.state_isolated, np.state_isolated },
-            .{ "fault_covered", op.fault_covered, np.fault_covered },
-        }) |entry| {
-            if (entry[1] != entry[2]) {
-                try effect_changes.append(allocator, .{
-                    .field = entry[0],
-                    .old_value = entry[1],
-                    .new_value = entry[2],
-                });
+        inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
+                const old_value = @field(op, field.name);
+                const new_value = @field(np, field.name);
+                if (old_value != new_value) {
+                    try effect_changes.append(allocator, .{
+                        .field = field.name,
+                        .old_value = old_value,
+                        .new_value = new_value,
+                    });
+                }
             }
         }
 
@@ -1969,6 +1964,82 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
         .verification = null,
         .aot = null,
     };
+}
+
+fn testProperties(value: bool) handler_contract.HandlerProperties {
+    var properties: handler_contract.HandlerProperties = .{
+        .pure = value,
+        .read_only = value,
+        .stateless = value,
+        .retry_safe = value,
+        .deterministic = value,
+        .has_egress = false,
+    };
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
+        if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
+            @field(properties, field.name) = value;
+        }
+    }
+    return properties;
+}
+
+fn expectExhaustiveMonotonicPropertyChanges(old_value: bool, new_value: bool) !void {
+    const allocator = std.testing.allocator;
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    old.properties = testProperties(old_value);
+    new.properties = testProperties(new_value);
+    old.properties.?.has_egress = old_value;
+    new.properties.?.has_egress = new_value;
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(
+        handler_contract.HandlerProperties.max_proven_specs,
+        diff.effect_changes.items.len,
+    );
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
+        if (field.type != bool) continue;
+        const monotonic = handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name);
+        var matches: usize = 0;
+        for (diff.effect_changes.items) |change| {
+            if (std.mem.eql(u8, change.field, field.name)) {
+                matches += 1;
+                try std.testing.expectEqual(old_value, change.old_value);
+                try std.testing.expectEqual(new_value, change.new_value);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (monotonic) 1 else 0), matches);
+    }
+}
+
+test "diffContracts exhaustively reports monotonic property losses and gains" {
+    try expectExhaustiveMonotonicPropertyChanges(true, false);
+    try expectExhaustiveMonotonicPropertyChanges(false, true);
+}
+
+test "diffContracts preserves null properties and numeric depth lanes" {
+    const allocator = std.testing.allocator;
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    new.properties = testProperties(true);
+
+    var null_diff = try diffContracts(allocator, &old, &new);
+    defer null_diff.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), null_diff.effect_changes.items.len);
+
+    old.properties = testProperties(true);
+    old.properties.?.max_io_depth = 1;
+    new.properties.?.max_io_depth = 2;
+    var depth_diff = try diffContracts(allocator, &old, &new);
+    defer depth_diff.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), depth_diff.effect_changes.items.len);
+    try std.testing.expectEqualStrings("max_io_depth", depth_diff.effect_changes.items[0].field);
 }
 
 fn setTestCostEnvelope(
