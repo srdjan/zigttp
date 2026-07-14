@@ -37,6 +37,7 @@ const StartSignal = enum(u8) {
 };
 
 const Spawner = *const fn (*Worker) anyerror!std.Thread;
+const SocketInterrupter = *const fn (*Worker) void;
 
 const Worker = struct {
     owner: *Registry,
@@ -74,6 +75,7 @@ pub const Registry = struct {
     peak_live: usize = 0,
     rejected_at_capacity: u64 = 0,
     spawner: Spawner = defaultSpawner,
+    socket_interrupter: SocketInterrupter = interruptSocket,
 
     pub fn init(allocator: std.mem.Allocator, max_connections: usize) Registry {
         return .{
@@ -85,6 +87,16 @@ pub const Registry = struct {
     fn initWithSpawner(allocator: std.mem.Allocator, max_connections: usize, spawner: Spawner) Registry {
         var registry = init(allocator, max_connections);
         registry.spawner = spawner;
+        return registry;
+    }
+
+    fn initWithSocketInterrupter(
+        allocator: std.mem.Allocator,
+        max_connections: usize,
+        socket_interrupter: SocketInterrupter,
+    ) Registry {
+        var registry = init(allocator, max_connections);
+        registry.socket_interrupter = socket_interrupter;
         return registry;
     }
 
@@ -309,19 +321,22 @@ pub const Registry = struct {
 };
 
 fn requestStopLocked(worker: *Worker) void {
-    const previous = worker.start_signal.cmpxchgStrong(
-        @intFromEnum(StartSignal.pending),
-        @intFromEnum(StartSignal.cancel),
-        .release,
-        .acquire,
-    );
-    if (previous == null) {
-        if (worker.control_fd >= 0) {
-            _ = std.c.shutdown(worker.control_fd, std.c.SHUT.RDWR);
-        }
-        return;
+    const signal: StartSignal = @enumFromInt(worker.start_signal.load(.acquire));
+    switch (signal) {
+        .pending => {
+            // Publish cancellation only after the socket interrupt completes.
+            // Observers may then use `.cancel` as the handoff boundary without
+            // racing ahead of the shutdown that wakes the upgrade path.
+            worker.owner.socket_interrupter(worker);
+            worker.start_signal.store(@intFromEnum(StartSignal.cancel), .release);
+        },
+        .run => worker.owner.socket_interrupter(worker),
+        .cancel => {},
     }
-    if (previous.? == @intFromEnum(StartSignal.run) and worker.control_fd >= 0) {
+}
+
+fn interruptSocket(worker: *Worker) void {
+    if (worker.control_fd >= 0) {
         _ = std.c.shutdown(worker.control_fd, std.c.SHUT.RDWR);
     }
 }
@@ -468,6 +483,13 @@ fn stopRegistry(registry: *Registry) void {
     registry.stopAndJoin();
 }
 
+fn expectPendingThenInterrupt(worker: *Worker) void {
+    if (worker.start_signal.load(.acquire) != @intFromEnum(StartSignal.pending)) {
+        @panic("socket interrupted after cancellation was published");
+    }
+    interruptSocket(worker);
+}
+
 test "shutdown cannot free a worker before its upgrade handle is released" {
     const fds = try testSocketPair();
     defer std.Io.Threaded.closeFd(fds[1]);
@@ -478,7 +500,11 @@ test "shutdown cannot free a worker before its upgrade handle is released" {
     defer pool.deinit();
     const id = try pool.register(fds[0], "/pending", 0);
 
-    var registry = Registry.init(testing.allocator, 1);
+    var registry = Registry.initWithSocketInterrupter(
+        testing.allocator,
+        1,
+        expectPendingThenInterrupt,
+    );
     defer registry.deinit();
     var reservation = try registry.reserve();
     const worker = try registry.spawn(&reservation, .{
