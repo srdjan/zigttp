@@ -958,6 +958,31 @@ test "artifact tail preserves absent-contract creation behavior" {
     try std.testing.expect(!probe.created_with_attestation);
 }
 
+test "artifact tail embeds complete contracts and signs only when requested" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zigts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+
+    for ([_]bool{ true, false }) |attest_requested| {
+        var probe = ArtifactTailProbe{};
+        try writeArtifactTail(allocator, .{
+            .runtime_binary = "runtime",
+            .output_path = "artifact.bin",
+            .attest_requested = attest_requested,
+            .bytecode = "bytecode",
+            .dep_bytecodes = &.{},
+            .contract = &contract,
+        }, probe.capabilities());
+
+        try std.testing.expectEqual(@as(usize, 1), probe.serialize_calls);
+        try std.testing.expectEqual(@as(usize, @intFromBool(attest_requested)), probe.sign_calls);
+        try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
+        try std.testing.expect(probe.created_with_contract);
+        try std.testing.expectEqual(attest_requested, probe.created_with_attestation);
+    }
+}
+
 test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
     const testing = std.testing;
 

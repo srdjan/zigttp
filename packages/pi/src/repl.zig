@@ -1577,6 +1577,35 @@ test "processSubmit: /model lists only the active provider and marks current" {
     }
 }
 
+test "processSubmit: /model exposes no choices without an active provider" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var list_outcome = try processSubmit(testing.allocator, &session, &reg, "/model", null);
+    switch (list_outcome) {
+        .tool_result => |*result| {
+            defer result.deinit(testing.allocator);
+            try testing.expect(result.ok);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "(no active model provider)") != null);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "gpt-4o-mini") == null);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "claude-") == null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var set_outcome = try processSubmit(testing.allocator, &session, &reg, "/model gpt-4o-mini", null);
+    switch (set_outcome) {
+        .tool_result => |*result| {
+            defer result.deinit(testing.allocator);
+            try testing.expect(!result.ok);
+            try testing.expectEqualStrings("No active model provider.\n", result.llm_text);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "processSubmit: cross-provider model rejection preserves session config" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);

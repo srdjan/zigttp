@@ -8,6 +8,10 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Changed
 
+- Contract upgrades now diff every canonical monotonic proof property. Losses
+  that were previously omitted can now tighten `zigts prove` and proof-gate
+  verdicts according to the existing critical, warning, and informational
+  severity policy.
 - Expert model selection is now provider-aware across `--model`, `/model`, and
   RPC `model.{list,set}`. Listings show only the active provider, exact model
   IDs cannot switch providers, and rejected startup or in-session choices leave

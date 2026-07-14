@@ -354,9 +354,13 @@ diff compares I/O capabilities. The behavioral diff compares every
 execution path, matching by route and branching conditions, then
 classifying each as preserved, response-changed, removed, or added.
 
-Property regressions carry severity. Losing `retry_safe` or
-`injection_safe` is critical. Losing `deterministic` or `idempotent`
-is a warning. Losing `pure` is informational.
+Property regressions carry severity. Critical losses are `retry_safe`,
+`injection_safe`, `state_isolated`, `no_secret_leakage`,
+`no_credential_leakage`, `fault_covered`, `result_safe`, and
+`optional_safe`. Warning losses are `idempotent`, `deterministic`,
+`read_only`, `input_validated`, and `pii_contained`. Other losses and all
+property gains are informational. The diff enumerates the canonical monotonic
+property set, so adding a proof property cannot silently bypass this policy.
 
 The upgrade verdict combines these signals:
 

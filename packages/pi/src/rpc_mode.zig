@@ -333,7 +333,7 @@ fn handleModelList(
             try json_writer.writeString(w, model.display_name);
             try w.print(",\"context_window\":{d},\"max_output_tokens\":{d}}}", .{
                 model.capabilities.context_window_tokens,
-                model.capabilities.max_output_tokens,
+                model.request_policy.max_output_tokens,
             });
         }
     }
@@ -951,7 +951,27 @@ test "rpc: model.list filters models to the active provider" {
         buf = aw.toArrayList();
         try testing.expect(std.mem.indexOf(u8, buf.items, "gpt-4o-mini") != null);
         try testing.expect(std.mem.indexOf(u8, buf.items, "claude-") == null);
+        try testing.expect(std.mem.indexOf(u8, buf.items, "\"max_output_tokens\":8192") != null);
     }
+}
+
+test "rpc: model methods expose no models without an active provider" {
+    const allocator = testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.list\"}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model.set\",\"params\":{\"id\":\"gpt-4o-mini\"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}\n",
+        &aw,
+    );
+    buf = aw.toArrayList();
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":1,\"result\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":2,\"error\":{\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "no active model provider") != null);
 }
 
 test "rpc: model.set preserves invalid-params and session state on provider mismatch" {
