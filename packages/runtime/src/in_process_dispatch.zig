@@ -23,17 +23,19 @@ const RuntimeConfig = runtime_config.RuntimeConfig;
 const HttpRequestView = http_types.HttpRequestView;
 
 /// One co-located sub-handler: a name and its own isolated HandlerPool. The
-/// pool borrows `handler_code` and `filename` for its lifetime, so they are
-/// freed after the pool. The registration owns all three so callers may free
-/// the source/path they passed in (e.g. a parsed system.json) right after.
+/// pool borrows `handler_code`, `filename`, and policy slices from `contract`
+/// for its lifetime, so they are freed after the pool. The registration owns
+/// all four so callers may free the source/path they passed in right after.
 pub const Target = struct {
     name: []const u8,
     filename: []const u8,
     handler_code: []const u8,
+    contract: zq.HandlerContract,
     pool: HandlerPool,
 
     fn deinit(self: *Target, allocator: std.mem.Allocator) void {
         self.pool.deinit();
+        self.contract.deinit(allocator);
         allocator.free(self.handler_code);
         allocator.free(self.filename);
         allocator.free(self.name);
@@ -64,6 +66,16 @@ pub const SystemRuntime = struct {
         config: RuntimeConfig,
         pool_size: usize,
     ) !void {
+        var contract = try zq.pipeline.extractContract(self.allocator, source, entry, .{
+            .strict = false,
+            .version = zq.version.string,
+            .read_file = zq.file_io.readFileForModuleGraph,
+        });
+        errdefer contract.deinit(self.allocator);
+
+        var target_config = config;
+        target_config.dev_capability_policy = zq.handler_policy.contractToRuntimePolicy(&contract);
+
         const name_owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_owned);
         const code_owned = try self.allocator.dupe(u8, source);
@@ -71,13 +83,14 @@ pub const SystemRuntime = struct {
         const filename_owned = try self.allocator.dupe(u8, entry);
         errdefer self.allocator.free(filename_owned);
 
-        var pool = try HandlerPool.init(self.allocator, config, code_owned, filename_owned, pool_size, 0);
+        var pool = try HandlerPool.init(self.allocator, target_config, code_owned, filename_owned, pool_size, 0);
         errdefer pool.deinit();
 
         try self.targets.append(self.allocator, .{
             .name = name_owned,
             .filename = filename_owned,
             .handler_code = code_owned,
+            .contract = contract,
             .pool = pool,
         });
     }
@@ -673,4 +686,167 @@ test "buildFromSystemConfig resolves handler paths relative to the manifest" {
 
     try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
     try std.testing.expect(sys.find("rel") != null);
+}
+
+test "buildFromSystemConfig applies each target's contract-derived egress policy" {
+    const allocator = std.testing.allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.ts", .{dir});
+    defer allocator.free(entry_path);
+    try zq.file_io.writeFile(
+        allocator,
+        entry_path,
+        "function handler(req) { return fetchSync('http://localhost:1'); }",
+    );
+
+    const target_path = try std.fmt.allocPrint(allocator, "{s}/target.ts", .{dir});
+    defer allocator.free(target_path);
+    try zq.file_io.writeFile(
+        allocator,
+        target_path,
+        "function handler(req) { const request = fetchSync; return request('http://localhost:1'); }",
+    );
+
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "entry", "path": "{s}", "baseUrl": "https://entry.internal" }},
+        \\  {{ "name": "target", "path": "{s}", "baseUrl": "https://target.internal" }}
+        \\] }}
+    , .{ entry_path, target_path });
+    defer allocator.free(manifest);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    defer allocator.free(system_path);
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    var sys = try SystemRuntime.buildFromSystemConfig(
+        allocator,
+        system_path,
+        .{
+            .jit_policy = .disabled,
+            .outbound_http_enabled = true,
+            .dev_capability_policy = .{
+                .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
+            },
+        },
+        1,
+    );
+    defer sys.deinit();
+
+    var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
+    defer headers.deinit(allocator);
+    const view = HttpRequestView{
+        .method = "GET",
+        .url = "/",
+        .path = "/",
+        .headers = headers,
+        .body = null,
+    };
+
+    var handle = try sys.dispatch("target", view);
+    defer handle.deinit();
+    try std.testing.expectEqual(@as(u16, 599), handle.response.status);
+    try std.testing.expect(std.mem.indexOf(u8, handle.response.body, "HostNotAllowed") != null);
+}
+
+test "buildFromSystemConfig includes imported capabilities in each target policy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const dependency_path = try std.fmt.allocPrint(allocator, "{s}/dependency.ts", .{dir});
+    defer allocator.free(dependency_path);
+    try zq.file_io.writeFile(
+        allocator,
+        dependency_path,
+        "export function request() { return fetchSync('http://localhost:1'); }",
+    );
+
+    const handler_path = try std.fmt.allocPrint(allocator, "{s}/entry.ts", .{dir});
+    defer allocator.free(handler_path);
+    try zq.file_io.writeFile(
+        allocator,
+        handler_path,
+        "import { request } from './dependency.ts'; function handler(req) { return request(req, undefined); }",
+    );
+
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "entry", "path": "{s}", "baseUrl": "https://entry.internal" }}
+        \\] }}
+    , .{handler_path});
+    defer allocator.free(manifest);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    defer allocator.free(system_path);
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    var sys = try SystemRuntime.buildFromSystemConfig(
+        allocator,
+        system_path,
+        .{
+            .jit_policy = .disabled,
+            .outbound_http_enabled = true,
+            .dev_capability_policy = .{
+                .egress = .{ .enabled = true, .values = &[_][]const u8{"denied.example"} },
+            },
+        },
+        1,
+    );
+    defer sys.deinit();
+
+    const target = sys.find("entry") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), target.contract.egress.hosts.items.len);
+    try std.testing.expectEqualStrings("localhost", target.contract.egress.hosts.items[0]);
+}
+
+test "buildFromSystemConfig rejects a target whose contract cannot compile" {
+    const allocator = std.testing.allocator;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const handler_path = try std.fmt.allocPrint(allocator, "{s}/broken.ts", .{dir});
+    defer allocator.free(handler_path);
+    try zq.file_io.writeFile(allocator, handler_path, "function handler(");
+
+    const manifest = try std.fmt.allocPrint(allocator,
+        \\{{ "version": 1, "handlers": [
+        \\  {{ "name": "broken", "path": "{s}", "baseUrl": "https://broken.internal" }}
+        \\] }}
+    , .{handler_path});
+    defer allocator.free(manifest);
+    const system_path = try std.fmt.allocPrint(allocator, "{s}/system.json", .{dir});
+    defer allocator.free(system_path);
+    try zq.file_io.writeFile(allocator, system_path, manifest);
+
+    try std.testing.expectError(
+        error.UnexpectedToken,
+        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1),
+    );
 }

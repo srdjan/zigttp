@@ -86,6 +86,35 @@ test "Server owns a finite WebSocket worker budget by default" {
     try std.testing.expectEqual(@as(usize, 0), stats.peak_live);
 }
 
+test "Server.start rejects a malformed present contract" {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text('ok'); }" },
+        .contract_json = "{not-json",
+        .log_requests = false,
+        .pool_size = 1,
+        .port = 0,
+    });
+    defer srv.deinit();
+
+    try std.testing.expectError(error.SyntaxError, srv.start());
+}
+
+test "Server.start accepts an absent contract" {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { return Response.text('ok'); }" },
+        .contract_json = null,
+        .log_requests = false,
+        .pool_size = 1,
+        .port = 0,
+    });
+    defer srv.deinit();
+
+    try srv.start();
+    try std.testing.expect(srv.pool != null);
+}
+
 // ===========================================================================
 // Handler execution: happy path (HandlerPool public surface)
 // ===========================================================================

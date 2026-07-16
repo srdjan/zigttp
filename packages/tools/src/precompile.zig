@@ -12,7 +12,6 @@ const zigts = @import("zigts");
 const ir = zigts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
 const handler_contract = zigts.handler_contract;
-const ContractBuilder = handler_contract.ContractBuilder;
 const writeContractJson = handler_contract.writeContractJson;
 const HandlerContract = handler_contract.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
@@ -1480,6 +1479,7 @@ pub const CompileOptions = struct {
     emit_aot: bool = false,
     emit_verify: bool = false,
     emit_contract: bool = false,
+    strict: bool = true,
     policy: ?HandlerPolicy = null,
     sql_schema_path: ?[]const u8 = null,
     generate_tests: bool = false,
@@ -1494,32 +1494,9 @@ pub const CompileOptions = struct {
     git_commit: ?[]const u8 = null,
 };
 
-/// Format `seconds_since_epoch` into ISO-8601 (UTC, second precision).
-/// Self-contained — does not depend on the platform/time module which is a
-/// runtime-only path.
-// Buffer is 24 bytes, not 20: year is a u16 so years >= 10000 need 5 digits
-// (21 chars total), and the `catch unreachable` below assumes the format always
-// fits. 24 leaves comfortable headroom.
-fn formatIsoTimestamp(buf: *[24]u8, seconds_since_epoch: i64) []const u8 {
-    const total_secs: u64 = @intCast(@max(0, seconds_since_epoch));
-    const es = std.time.epoch.EpochSeconds{ .secs = total_secs };
-    const epoch_day = es.getEpochDay();
-    const day_secs = es.getDaySeconds();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        @as(u16, @intCast(year_day.year)),
-        @as(u4, @intFromEnum(month_day.month)),
-        @as(u5, month_day.day_index + 1),
-        day_secs.getHoursIntoDay(),
-        day_secs.getMinutesIntoHour(),
-        day_secs.getSecondsIntoMinute(),
-    }) catch unreachable;
-}
-
 test "formatIsoTimestamp produces ISO-8601 UTC" {
     var buf: [24]u8 = undefined;
-    const got = formatIsoTimestamp(&buf, 1_700_000_000);
+    const got = zigts.pipeline.formatIsoTimestamp(&buf, 1_700_000_000);
     try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", got);
 }
 
@@ -1557,7 +1534,7 @@ pub fn compileHandler(
             const ms = zigts.compat.realtimeNowMs() catch break :blk 0;
             break :blk @divTrunc(ms, 1000);
         };
-        const build_time_value = opts.build_time orelse formatIsoTimestamp(&iso_buf, fallback_seconds);
+        const build_time_value = opts.build_time orelse zigts.pipeline.formatIsoTimestamp(&iso_buf, fallback_seconds);
         const git_commit_value = opts.git_commit orelse "unknown";
 
         const comptime_env = zigts.ComptimeEnv{
@@ -1666,7 +1643,7 @@ pub fn compileHandler(
     var resolved = try zigts.pipeline.resolve(
         allocator,
         parsed,
-        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr },
+        .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr, .strict = opts.strict },
     );
     defer resolved.deinit();
 
@@ -2395,98 +2372,6 @@ fn countAotPatterns(dispatch: *const zigts.PatternDispatchTable) usize {
 
 // findHandlerFunction is defined in handler_verifier.zig and exported via zigts.
 const findHandlerFunction = zigts.handler_verifier.findHandlerFunction;
-const ContractTypeCheckFn = *const fn (*zigts.TypeChecker, ir.NodeIndex) anyerror!u32;
-
-fn runContractTypeCheck(type_checker: *zigts.TypeChecker, root: ir.NodeIndex) anyerror!u32 {
-    return type_checker.check(root);
-}
-
-/// Build a contract manifest from the parsed IR.
-fn buildContract(
-    allocator: std.mem.Allocator,
-    js_parser: *zigts.parser.JsParser,
-    atoms: *zigts.context.AtomTable,
-    filename: []const u8,
-    root: ir.NodeIndex,
-    aot: ?AotAnalysis,
-    verify_info: ?VerificationInfo,
-    type_map: ?*const zigts.TypeMap,
-    service_type_context: ?*const ServiceTypeContext,
-    manifest_registry: ?*const zigts.manifest_registry.Registry,
-) !HandlerContract {
-    return buildContractChecking(
-        allocator,
-        js_parser,
-        atoms,
-        filename,
-        root,
-        aot,
-        verify_info,
-        type_map,
-        service_type_context,
-        manifest_registry,
-        runContractTypeCheck,
-    );
-}
-
-fn buildContractChecking(
-    allocator: std.mem.Allocator,
-    js_parser: *zigts.parser.JsParser,
-    atoms: *zigts.context.AtomTable,
-    filename: []const u8,
-    root: ir.NodeIndex,
-    aot: ?AotAnalysis,
-    verify_info: ?VerificationInfo,
-    type_map: ?*const zigts.TypeMap,
-    service_type_context: ?*const ServiceTypeContext,
-    manifest_registry: ?*const zigts.manifest_registry.Registry,
-    type_check: ContractTypeCheckFn,
-) !HandlerContract {
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-
-    // Get handler location
-    var handler_loc: ?ir.SourceLocation = null;
-    const handler_fn = findHandlerFunction(ir_view, root);
-    if (handler_fn) |hf| {
-        if (hf < js_parser.nodes.locs.items.len) {
-            handler_loc = js_parser.nodes.locs.items[hf];
-        }
-    }
-
-    var type_pool = zigts.TypePool.init(allocator);
-    defer type_pool.deinit(allocator);
-
-    var type_env = zigts.TypeEnv.init(allocator, &type_pool);
-    defer type_env.deinit();
-    zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
-    if (type_map) |tm| {
-        type_env.populateFromTypeMap(tm);
-    }
-
-    var type_checker = zigts.TypeChecker.init(allocator, ir_view, atoms, &type_env, service_type_context);
-    defer type_checker.deinit();
-    _ = try type_check(&type_checker, root);
-
-    var builder = ContractBuilder.init(allocator, ir_view, atoms, &type_env, &type_checker);
-    builder.manifest_registry = manifest_registry;
-    defer builder.deinit();
-
-    const dispatch = if (aot) |a| a.dispatch else null;
-    const has_default = if (aot) |a| a.default_response != null else false;
-
-    var contract = try builder.build(
-        filename,
-        handler_loc,
-        handler_fn,
-        root,
-        dispatch,
-        has_default,
-        verify_info,
-    );
-    errdefer contract.deinit(allocator);
-    try type_checker.ensureHealthy();
-    return contract;
-}
 
 fn buildContractWithPolicy(
     allocator: std.mem.Allocator,
@@ -2508,17 +2393,20 @@ fn buildContractWithPolicy(
     precomputed_flow: ?*const zigts.FlowChecker,
     manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !HandlerContract {
-    var contract = try buildContract(
+    const contract_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = zigts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
+    var contract = try zigts.pipeline.extractContractFromParsed(
         allocator,
-        js_parser,
-        atoms,
+        parsed,
         filename,
-        root,
-        aot,
-        verify_info,
-        type_map,
-        service_type_context,
-        manifest_registry,
+        .{
+            .dispatch = if (aot) |analysis| analysis.dispatch else null,
+            .has_default_response = if (aot) |analysis| analysis.default_response != null else false,
+            .verification = verify_info,
+            .type_map = type_map,
+            .service_type_context = service_type_context,
+            .manifest_registry = manifest_registry,
+        },
     );
     errdefer contract.deinit(allocator);
 
@@ -2601,7 +2489,7 @@ fn buildMultiModuleContract(
     service_type_context: ?*const ServiceTypeContext,
     manifest_registry: ?*const zigts.manifest_registry.Registry,
 ) !HandlerContract {
-    var merged = try initMergedContract(allocator, entry_filename);
+    var merged = try handler_contract.initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
 
     const entry_index = compile_result.modules.len - 1;
@@ -2618,17 +2506,18 @@ fn buildMultiModuleContract(
             null;
         defer if (temp_aot) |*aot| aot.deinit(allocator);
 
-        var module_contract = try buildContract(
+        const module_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const parsed = zigts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        var module_contract = try zigts.pipeline.extractContractFromParsed(
             allocator,
-            js_parser,
-            atoms,
+            parsed,
             module.path,
-            compiled_module.root,
-            temp_aot,
-            null,
-            null,
-            service_type_context,
-            manifest_registry,
+            .{
+                .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
+                .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
+                .service_type_context = service_type_context,
+                .manifest_registry = manifest_registry,
+            },
         );
         defer module_contract.deinit(allocator);
 
@@ -2636,7 +2525,7 @@ fn buildMultiModuleContract(
         try enforcePolicyForContract(allocator, module.path, &module_contract, policy);
         if (policy != null) policy_checked = true;
 
-        try mergeModuleContract(allocator, &merged, &module_contract, is_entry);
+        try handler_contract.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
     }
 
     if (policy_checked) {
@@ -2644,275 +2533,6 @@ fn buildMultiModuleContract(
     }
 
     return merged;
-}
-
-fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !HandlerContract {
-    return .{
-        .handler = .{
-            .path = try allocator.dupe(u8, handler_path),
-            .line = 0,
-            .column = 0,
-        },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = .{
-            .schemas = .empty,
-            .requests = .{ .schema_refs = .empty, .dynamic = false },
-            .auth = .{ .bearer = false, .jwt = false },
-            .routes = .empty,
-            .schemas_dynamic = false,
-            .routes_dynamic = false,
-        },
-        .verification = null,
-        .aot = null,
-    };
-}
-
-fn mergeModuleContract(
-    allocator: std.mem.Allocator,
-    target: *HandlerContract,
-    source: *const HandlerContract,
-    is_entry: bool,
-) !void {
-    if (is_entry) {
-        target.handler.line = source.handler.line;
-        target.handler.column = source.handler.column;
-        target.verification = source.verification;
-        target.aot = source.aot;
-
-        for (source.routes.items) |route| {
-            try target.routes.append(allocator, .{
-                .pattern = try allocator.dupe(u8, route.pattern),
-                .route_type = route.route_type,
-                .field = route.field,
-                .status = route.status,
-                .content_type = route.content_type,
-                .aot = route.aot,
-            });
-        }
-    }
-
-    for (source.modules.items) |name| {
-        try appendUniqueString(allocator, &target.modules, name, false);
-    }
-
-    for (source.functions.items) |entry| {
-        const target_entry = try getOrCreateFunctionEntry(allocator, &target.functions, entry.module);
-        for (entry.names.items) |name| {
-            try appendUniqueString(allocator, &target_entry.names, name, false);
-        }
-    }
-
-    for (source.env.literal.items) |name| {
-        try appendUniqueString(allocator, &target.env.literal, name, false);
-    }
-    target.env.dynamic = target.env.dynamic or source.env.dynamic;
-
-    for (source.egress.hosts.items) |host| {
-        try appendUniqueString(allocator, &target.egress.hosts, host, true);
-    }
-    target.egress.dynamic = target.egress.dynamic or source.egress.dynamic;
-
-    for (source.cache.namespaces.items) |ns| {
-        try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
-    }
-    target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
-
-    for (source.sql.queries.items) |query| {
-        try appendSqlQuery(allocator, &target.sql.queries, query);
-    }
-    target.sql.dynamic = target.sql.dynamic or source.sql.dynamic;
-
-    target.scope.used = target.scope.used or source.scope.used;
-    for (source.scope.names.items) |name| {
-        try appendUniqueString(allocator, &target.scope.names, name, false);
-    }
-    target.scope.dynamic = target.scope.dynamic or source.scope.dynamic;
-    target.scope.max_depth = @max(target.scope.max_depth, source.scope.max_depth);
-
-    target.durable.used = target.durable.used or source.durable.used;
-    for (source.durable.keys.literal.items) |key| {
-        try appendUniqueString(allocator, &target.durable.keys.literal, key, false);
-    }
-    target.durable.keys.dynamic = target.durable.keys.dynamic or source.durable.keys.dynamic;
-    for (source.durable.steps.items) |step| {
-        try appendUniqueString(allocator, &target.durable.steps, step, false);
-    }
-    target.durable.timers = target.durable.timers or source.durable.timers;
-    for (source.durable.signals.literal.items) |signal| {
-        try appendUniqueString(allocator, &target.durable.signals.literal, signal, false);
-    }
-    target.durable.signals.dynamic = target.durable.signals.dynamic or source.durable.signals.dynamic;
-    for (source.durable.producer_keys.literal.items) |key| {
-        try appendUniqueString(allocator, &target.durable.producer_keys.literal, key, false);
-    }
-    target.durable.producer_keys.dynamic = target.durable.producer_keys.dynamic or source.durable.producer_keys.dynamic;
-
-    for (source.api.schemas.items) |schema| {
-        try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);
-    }
-
-    for (source.api.requests.schema_refs.items) |schema_ref| {
-        try appendUniqueString(allocator, &target.api.requests.schema_refs, schema_ref, false);
-    }
-    target.api.requests.dynamic = target.api.requests.dynamic or source.api.requests.dynamic;
-    target.api.auth.bearer = target.api.auth.bearer or source.api.auth.bearer;
-    target.api.auth.jwt = target.api.auth.jwt or source.api.auth.jwt;
-    target.api.schemas_dynamic = target.api.schemas_dynamic or source.api.schemas_dynamic;
-    target.api.routes_dynamic = target.api.routes_dynamic or source.api.routes_dynamic;
-
-    for (source.api.routes.items) |route| {
-        if (hasApiRoute(target.api.routes.items, route.method, route.path)) continue;
-
-        var route_copy = handler_contract.ApiRouteInfo{
-            .method = try allocator.dupe(u8, route.method),
-            .path = try allocator.dupe(u8, route.path),
-            .request_schema_refs = .empty,
-            .request_schema_dynamic = route.request_schema_dynamic,
-            .requires_bearer = route.requires_bearer,
-            .requires_jwt = route.requires_jwt,
-            .query_params_dynamic = route.query_params_dynamic,
-            .header_params_dynamic = route.header_params_dynamic,
-            .request_bodies_dynamic = route.request_bodies_dynamic,
-            .responses_dynamic = route.responses_dynamic,
-            .response_status = route.response_status,
-            .response_content_type = if (route.response_content_type) |content_type|
-                try allocator.dupe(u8, content_type)
-            else
-                null,
-            .response_schema_ref = if (route.response_schema_ref) |schema_ref|
-                try allocator.dupe(u8, schema_ref)
-            else
-                null,
-            .response_schema_json = if (route.response_schema_json) |schema_json|
-                try allocator.dupe(u8, schema_json)
-            else
-                null,
-            .response_schema_dynamic = route.response_schema_dynamic,
-        };
-        errdefer route_copy.deinit(allocator);
-
-        for (route.request_schema_refs.items) |schema_ref| {
-            try appendUniqueString(allocator, &route_copy.request_schema_refs, schema_ref, false);
-        }
-        for (route.path_params.items) |param| {
-            try route_copy.path_params.append(allocator, try param.dupeOwned(allocator));
-        }
-        for (route.query_params.items) |param| {
-            try route_copy.query_params.append(allocator, try param.dupeOwned(allocator));
-        }
-        for (route.header_params.items) |param| {
-            try route_copy.header_params.append(allocator, try param.dupeOwned(allocator));
-        }
-        for (route.request_bodies.items) |body| {
-            try route_copy.request_bodies.append(allocator, try body.dupeOwned(allocator));
-        }
-        for (route.responses.items) |response| {
-            try route_copy.responses.append(allocator, try response.dupeOwned(allocator));
-        }
-
-        try target.api.routes.append(allocator, route_copy);
-    }
-}
-
-fn getOrCreateFunctionEntry(
-    allocator: std.mem.Allocator,
-    functions: *std.ArrayList(HandlerContract.FunctionEntry),
-    module_name: []const u8,
-) !*HandlerContract.FunctionEntry {
-    for (functions.items) |*entry| {
-        if (std.mem.eql(u8, entry.module, module_name)) return entry;
-    }
-
-    try functions.append(allocator, .{
-        .module = try allocator.dupe(u8, module_name),
-        .names = .empty,
-    });
-    return &functions.items[functions.items.len - 1];
-}
-
-fn appendUniqueString(
-    allocator: std.mem.Allocator,
-    list: *std.ArrayList([]const u8),
-    value: []const u8,
-    case_insensitive: bool,
-) !void {
-    for (list.items) |item| {
-        const matches = if (case_insensitive)
-            std.ascii.eqlIgnoreCase(item, value)
-        else
-            std.mem.eql(u8, item, value);
-        if (matches) return;
-    }
-    try list.append(allocator, try allocator.dupe(u8, value));
-}
-
-fn appendSqlQuery(
-    allocator: std.mem.Allocator,
-    list: *std.ArrayList(handler_contract.SqlQueryInfo),
-    query: handler_contract.SqlQueryInfo,
-) !void {
-    for (list.items) |*existing| {
-        if (!std.mem.eql(u8, existing.name, query.name)) continue;
-        if (!std.mem.eql(u8, existing.statement, query.statement)) return error.DuplicateSqlQueryName;
-        return;
-    }
-
-    var copy = handler_contract.SqlQueryInfo{
-        .name = try allocator.dupe(u8, query.name),
-        .statement = try allocator.dupe(u8, query.statement),
-        .operation = query.operation,
-        .tables = .empty,
-    };
-    errdefer copy.deinit(allocator);
-
-    for (query.tables.items) |table| {
-        try appendUniqueString(allocator, &copy.tables, table, false);
-    }
-
-    try list.append(allocator, copy);
-}
-
-fn upsertApiSchema(
-    allocator: std.mem.Allocator,
-    list: *std.ArrayList(handler_contract.ApiSchemaInfo),
-    name: []const u8,
-    schema_json: []const u8,
-) !void {
-    for (list.items) |*schema| {
-        if (!std.mem.eql(u8, schema.name, name)) continue;
-        allocator.free(schema.schema_json);
-        schema.schema_json = try allocator.dupe(u8, schema_json);
-        return;
-    }
-
-    try list.append(allocator, .{
-        .name = try allocator.dupe(u8, name),
-        .schema_json = try allocator.dupe(u8, schema_json),
-    });
-}
-
-fn hasApiRoute(routes: []const handler_contract.ApiRouteInfo, method: []const u8, path: []const u8) bool {
-    for (routes) |route| {
-        if (std.mem.eql(u8, route.method, method) and std.mem.eql(u8, route.path, path)) return true;
-    }
-    return false;
 }
 
 /// Validate `zigttp:sql` queries against a schema database. SQLite is a C
@@ -2969,7 +2589,7 @@ fn validateSqlContractNative(
         for (query.tables.items) |table| allocator.free(table);
         query.tables.clearAndFree(allocator);
         for (analysis.tables.items) |table| {
-            try appendUniqueString(allocator, &query.tables, table, false);
+            try handler_contract.appendUniqueString(allocator, &query.tables, table, false);
         }
     }
 }
@@ -3696,21 +3316,16 @@ test "contract construction propagates type-check allocation failure" {
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = zigts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
     try std.testing.expectError(
         error.OutOfMemory,
-        buildContractChecking(
+        zigts.pipeline.extractContractFromParsed(
             allocator,
-            &js_parser,
-            &atoms,
+            parsed,
             "<contract-type-oom>",
-            root,
-            null,
-            null,
-            null,
-            null,
-            null,
-            failContractTypeCheck,
+            .{ .type_check = failContractTypeCheck },
         ),
     );
 }

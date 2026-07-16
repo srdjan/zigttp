@@ -117,6 +117,277 @@ pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]cons
 pub const writeJsonStringContent = json_utils.writeJsonStringContent;
 pub const writeJsonString = json_utils.writeJsonString;
 
+/// Initialize an empty aggregate contract for a multi-module handler.
+pub fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !HandlerContract {
+    return .{
+        .handler = .{
+            .path = try allocator.dupe(u8, handler_path),
+            .line = 0,
+            .column = 0,
+        },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+}
+
+/// Merge one module's extracted facts into a multi-module contract.
+pub fn mergeModuleContract(
+    allocator: std.mem.Allocator,
+    target: *HandlerContract,
+    source: *const HandlerContract,
+    is_entry: bool,
+) !void {
+    if (is_entry) {
+        target.handler.line = source.handler.line;
+        target.handler.column = source.handler.column;
+        target.verification = source.verification;
+        target.aot = source.aot;
+
+        for (source.routes.items) |route| {
+            try target.routes.append(allocator, .{
+                .pattern = try allocator.dupe(u8, route.pattern),
+                .route_type = route.route_type,
+                .field = route.field,
+                .status = route.status,
+                .content_type = route.content_type,
+                .aot = route.aot,
+            });
+        }
+    }
+
+    for (source.modules.items) |name| {
+        try appendUniqueString(allocator, &target.modules, name, false);
+    }
+
+    for (source.functions.items) |entry| {
+        const target_entry = try getOrCreateFunctionEntry(allocator, &target.functions, entry.module);
+        for (entry.names.items) |name| {
+            try appendUniqueString(allocator, &target_entry.names, name, false);
+        }
+    }
+
+    for (source.env.literal.items) |name| {
+        try appendUniqueString(allocator, &target.env.literal, name, false);
+    }
+    target.env.dynamic = target.env.dynamic or source.env.dynamic;
+
+    for (source.egress.hosts.items) |host| {
+        try appendUniqueString(allocator, &target.egress.hosts, host, true);
+    }
+    target.egress.dynamic = target.egress.dynamic or source.egress.dynamic;
+
+    for (source.cache.namespaces.items) |ns| {
+        try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
+    }
+    target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
+
+    for (source.sql.queries.items) |query| {
+        try appendSqlQuery(allocator, &target.sql.queries, query);
+    }
+    target.sql.dynamic = target.sql.dynamic or source.sql.dynamic;
+
+    target.scope.used = target.scope.used or source.scope.used;
+    for (source.scope.names.items) |name| {
+        try appendUniqueString(allocator, &target.scope.names, name, false);
+    }
+    target.scope.dynamic = target.scope.dynamic or source.scope.dynamic;
+    target.scope.max_depth = @max(target.scope.max_depth, source.scope.max_depth);
+
+    target.durable.used = target.durable.used or source.durable.used;
+    for (source.durable.keys.literal.items) |key| {
+        try appendUniqueString(allocator, &target.durable.keys.literal, key, false);
+    }
+    target.durable.keys.dynamic = target.durable.keys.dynamic or source.durable.keys.dynamic;
+    for (source.durable.steps.items) |step| {
+        try appendUniqueString(allocator, &target.durable.steps, step, false);
+    }
+    target.durable.timers = target.durable.timers or source.durable.timers;
+    for (source.durable.signals.literal.items) |signal| {
+        try appendUniqueString(allocator, &target.durable.signals.literal, signal, false);
+    }
+    target.durable.signals.dynamic = target.durable.signals.dynamic or source.durable.signals.dynamic;
+    for (source.durable.producer_keys.literal.items) |key| {
+        try appendUniqueString(allocator, &target.durable.producer_keys.literal, key, false);
+    }
+    target.durable.producer_keys.dynamic = target.durable.producer_keys.dynamic or source.durable.producer_keys.dynamic;
+
+    for (source.api.schemas.items) |schema| {
+        try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);
+    }
+
+    for (source.api.requests.schema_refs.items) |schema_ref| {
+        try appendUniqueString(allocator, &target.api.requests.schema_refs, schema_ref, false);
+    }
+    target.api.requests.dynamic = target.api.requests.dynamic or source.api.requests.dynamic;
+    target.api.auth.bearer = target.api.auth.bearer or source.api.auth.bearer;
+    target.api.auth.jwt = target.api.auth.jwt or source.api.auth.jwt;
+    target.api.schemas_dynamic = target.api.schemas_dynamic or source.api.schemas_dynamic;
+    target.api.routes_dynamic = target.api.routes_dynamic or source.api.routes_dynamic;
+
+    for (source.api.routes.items) |route| {
+        if (hasApiRoute(target.api.routes.items, route.method, route.path)) continue;
+
+        var route_copy = ApiRouteInfo{
+            .method = try allocator.dupe(u8, route.method),
+            .path = try allocator.dupe(u8, route.path),
+            .request_schema_refs = .empty,
+            .request_schema_dynamic = route.request_schema_dynamic,
+            .requires_bearer = route.requires_bearer,
+            .requires_jwt = route.requires_jwt,
+            .query_params_dynamic = route.query_params_dynamic,
+            .header_params_dynamic = route.header_params_dynamic,
+            .request_bodies_dynamic = route.request_bodies_dynamic,
+            .responses_dynamic = route.responses_dynamic,
+            .response_status = route.response_status,
+            .response_content_type = if (route.response_content_type) |content_type|
+                try allocator.dupe(u8, content_type)
+            else
+                null,
+            .response_schema_ref = if (route.response_schema_ref) |schema_ref|
+                try allocator.dupe(u8, schema_ref)
+            else
+                null,
+            .response_schema_json = if (route.response_schema_json) |schema_json|
+                try allocator.dupe(u8, schema_json)
+            else
+                null,
+            .response_schema_dynamic = route.response_schema_dynamic,
+        };
+        errdefer route_copy.deinit(allocator);
+
+        for (route.request_schema_refs.items) |schema_ref| {
+            try appendUniqueString(allocator, &route_copy.request_schema_refs, schema_ref, false);
+        }
+        for (route.path_params.items) |param| {
+            try route_copy.path_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.query_params.items) |param| {
+            try route_copy.query_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.header_params.items) |param| {
+            try route_copy.header_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.request_bodies.items) |body| {
+            try route_copy.request_bodies.append(allocator, try body.dupeOwned(allocator));
+        }
+        for (route.responses.items) |response| {
+            try route_copy.responses.append(allocator, try response.dupeOwned(allocator));
+        }
+
+        try target.api.routes.append(allocator, route_copy);
+    }
+}
+
+fn getOrCreateFunctionEntry(
+    allocator: std.mem.Allocator,
+    functions: *std.ArrayList(HandlerContract.FunctionEntry),
+    module_name: []const u8,
+) !*HandlerContract.FunctionEntry {
+    for (functions.items) |*entry| {
+        if (std.mem.eql(u8, entry.module, module_name)) return entry;
+    }
+
+    try functions.append(allocator, .{
+        .module = try allocator.dupe(u8, module_name),
+        .names = .empty,
+    });
+    return &functions.items[functions.items.len - 1];
+}
+
+pub fn appendUniqueString(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList([]const u8),
+    value: []const u8,
+    case_insensitive: bool,
+) !void {
+    for (list.items) |item| {
+        const matches = if (case_insensitive)
+            std.ascii.eqlIgnoreCase(item, value)
+        else
+            std.mem.eql(u8, item, value);
+        if (matches) return;
+    }
+    try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+fn appendSqlQuery(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(SqlQueryInfo),
+    query: SqlQueryInfo,
+) !void {
+    for (list.items) |*existing| {
+        if (!std.mem.eql(u8, existing.name, query.name)) continue;
+        if (!std.mem.eql(u8, existing.statement, query.statement)) return error.DuplicateSqlQueryName;
+        return;
+    }
+
+    var copy = SqlQueryInfo{
+        .name = try allocator.dupe(u8, query.name),
+        .statement = try allocator.dupe(u8, query.statement),
+        .operation = query.operation,
+        .tables = .empty,
+    };
+    errdefer copy.deinit(allocator);
+
+    for (query.tables.items) |table| {
+        try appendUniqueString(allocator, &copy.tables, table, false);
+    }
+
+    try list.append(allocator, copy);
+}
+
+fn upsertApiSchema(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiSchemaInfo),
+    name: []const u8,
+    schema_json: []const u8,
+) !void {
+    for (list.items) |*schema| {
+        if (!std.mem.eql(u8, schema.name, name)) continue;
+        allocator.free(schema.schema_json);
+        schema.schema_json = try allocator.dupe(u8, schema_json);
+        return;
+    }
+
+    try list.append(allocator, .{
+        .name = try allocator.dupe(u8, name),
+        .schema_json = try allocator.dupe(u8, schema_json),
+    });
+}
+
+fn hasApiRoute(routes: []const ApiRouteInfo, method: []const u8, path: []const u8) bool {
+    for (routes) |route| {
+        if (std.mem.eql(u8, route.method, method) and std.mem.eql(u8, route.path, path)) return true;
+    }
+    return false;
+}
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
