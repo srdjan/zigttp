@@ -1799,7 +1799,7 @@ pub const FlowChecker = struct {
         if (obj_tag != .identifier) return false;
         const binding = self.ir_view.getBinding(member.object) orelse return false;
         if (binding.kind != .undeclared_global) return false;
-        const obj_name = self.resolveAtomName(binding.slot) orelse return false;
+        const obj_name = self.resolveAtomName(binding.name_atom) orelse return false;
         if (!std.mem.eql(u8, obj_name, object_name)) return false;
 
         const method_name = self.resolveAtomName(member.property) orelse return false;
@@ -1822,7 +1822,7 @@ pub const FlowChecker = struct {
         if (tag != .identifier) return false;
         const binding = self.ir_view.getBinding(callee) orelse return false;
         if (binding.kind != .undeclared_global) return false;
-        const name = self.resolveAtomName(binding.slot) orelse return false;
+        const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "fetchSync");
     }
 
@@ -1833,7 +1833,7 @@ pub const FlowChecker = struct {
         if (tag != .identifier) return false;
         const binding = self.ir_view.getBinding(callee) orelse return false;
         if (binding.kind != .undeclared_global) return false;
-        const name = self.resolveAtomName(binding.slot) orelse return false;
+        const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "renderToString");
     }
 
@@ -1922,7 +1922,7 @@ pub const FlowChecker = struct {
         const tag = self.ir_view.getTag(key_idx) orelse return null;
         if (tag == .identifier) {
             const binding = self.ir_view.getBinding(key_idx) orelse return null;
-            return self.resolveAtomName(binding.slot);
+            return self.resolveAtomName(binding.name_atom);
         } else if (tag == .lit_string) {
             const str_idx = self.ir_view.getStringIdx(key_idx) orelse return null;
             return self.ir_view.getString(str_idx);

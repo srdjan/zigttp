@@ -211,7 +211,7 @@ fn propKeyName(deps: Deps, key_idx: NodeIndex) ?[]const u8 {
         .lit_string => return literalString(deps, key_idx),
         .identifier => {
             const binding = deps.ir_view.getBinding(key_idx) orelse return null;
-            return resolverCall(deps, binding.slot);
+            return resolverCall(deps, binding.name_atom);
         },
         else => return null,
     }

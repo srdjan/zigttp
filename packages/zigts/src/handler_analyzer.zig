@@ -411,7 +411,7 @@ pub const HandlerAnalyzer = struct {
 
         const binding = self.ir.getBinding(node) orelse return false;
         if (binding.kind != .global and binding.kind != .undeclared_global) return false;
-        return binding.slot == @intFromEnum(atom);
+        return binding.name_atom == @intFromEnum(atom);
     }
 
     /// Analyze condition for URL matching pattern
@@ -1013,7 +1013,7 @@ fn findHandlerFunctionForTest(ir_view: IrView, root: NodeIndex) ?NodeIndex {
 
         const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
         if (decl.binding.kind != .global) continue;
-        if (decl.binding.slot != @intFromEnum(object.Atom.handler)) continue;
+        if (decl.binding.name_atom != @intFromEnum(object.Atom.handler)) continue;
 
         const init_tag = ir_view.getTag(decl.init) orelse continue;
         if (init_tag == .function_expr or init_tag == .arrow_function) {

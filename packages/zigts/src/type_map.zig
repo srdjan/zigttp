@@ -48,6 +48,9 @@ pub const TypeMapEntry = struct {
     name_start: u32,
     /// Byte offset end of the name.
     name_end: u32,
+    /// Zero-based occurrence among variable declarations with the same name.
+    /// Present only for variable annotations and independent of locations.
+    name_ordinal: ?u32 = null,
 };
 
 /// Collection of type annotations extracted during stripping.

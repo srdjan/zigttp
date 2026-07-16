@@ -4044,6 +4044,21 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
     try std.testing.expect(saw_202);
 }
 
+test "zigts check --types path rejects exported handler local mismatch" {
+    const source =
+        \\export function handler(req: Request): Response {
+        \\  const n: number = "not a number";
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "exported-local.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expect(result.totalErrors() >= 1);
+}
+
 test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
     const source =
         \\function Page(): JSX.Element {

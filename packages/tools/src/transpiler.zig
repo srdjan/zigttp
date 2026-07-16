@@ -378,7 +378,7 @@ pub const IrTranspiler = struct {
                 if (callee_tag != .identifier) break :blk .jsvalue_type;
                 const callee_binding = self.ir.getBinding(call_data.callee) orelse break :blk .jsvalue_type;
                 if (callee_binding.kind != .global) break :blk .jsvalue_type;
-                const func_name = self.atomName(callee_binding.slot) orelse break :blk .jsvalue_type;
+                const func_name = self.atomName(callee_binding.name_atom) orelse break :blk .jsvalue_type;
                 for (self.functions.items) |func_info| {
                     if (std.mem.eql(u8, func_info.name, func_name)) {
                         if (func_info.sig) |sig| {
@@ -434,7 +434,8 @@ pub const IrTranspiler = struct {
         // declaration binding from the parameter list node.
         var p: u8 = 0;
         while (p < func.params_count) : (p += 1) {
-            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
+            const param_idx = self.ir.getListIndex(func.params_start, p);
+            const arg_binding = self.ir.paramBinding(param_idx) orelse continue;
             const key = bindingKey(arg_binding);
             self.type_env.put(key, .i32_type) catch {};
         }
@@ -445,7 +446,8 @@ pub const IrTranspiler = struct {
         // Clean up temporary parameter registrations
         p = 0;
         while (p < func.params_count) : (p += 1) {
-            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
+            const param_idx = self.ir.getListIndex(func.params_start, p);
+            const arg_binding = self.ir.paramBinding(param_idx) orelse continue;
             const key = bindingKey(arg_binding);
             _ = self.type_env.remove(key);
         }
@@ -520,7 +522,7 @@ pub const IrTranspiler = struct {
                 if (callee_tag != .identifier) break :blk false;
                 const callee_binding = self.ir.getBinding(call.callee) orelse break :blk false;
                 if (callee_binding.kind != .global) break :blk false;
-                const callee_name = self.atomName(callee_binding.slot) orelse break :blk false;
+                const callee_name = self.atomName(callee_binding.name_atom) orelse break :blk false;
                 if (!std.mem.eql(u8, callee_name, "range")) break :blk false;
                 // range() is valid - check body
                 break :blk self.checkPureIntegerBody(for_iter.body, scope_id, param_count);
@@ -589,13 +591,13 @@ pub const IrTranspiler = struct {
                 const init_tag = self.ir.getTag(decl.init) orelse continue;
                 if (init_tag != .function_expr and init_tag != .arrow_function) continue;
 
-                const is_handler = decl.binding.slot == @intFromEnum(Atom.handler);
-                const name = self.atomName(decl.binding.slot) orelse "unknown";
+                const is_handler = decl.binding.name_atom == @intFromEnum(Atom.handler);
+                const name = self.atomName(decl.binding.name_atom) orelse "unknown";
                 const sig = if (!is_handler) self.inferFunctionSig(decl.init) else null;
 
                 try self.functions.append(self.allocator, .{
                     .node_idx = decl.init,
-                    .name_atom = decl.binding.slot,
+                    .name_atom = decl.binding.name_atom,
                     .name = name,
                     .sig = sig,
                     .is_handler = is_handler,
@@ -842,13 +844,9 @@ pub const IrTranspiler = struct {
             const param_name = self.getParamName(param_idx, p);
             self.emitFmt("{s}: i32", .{param_name});
 
-            // Register parameter binding for both declaration and body references.
-            // Declaration uses (kind=local, scope=0), body uses (kind=argument, scope=func.scope_id).
-            if (self.ir.getBinding(param_idx)) |binding| {
-                self.registerLocal(binding, param_name, .i32_type, false);
+            if (self.ir.paramBinding(param_idx)) |arg_binding| {
+                self.registerLocal(arg_binding, param_name, .i32_type, false);
             }
-            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
-            self.registerLocal(arg_binding, param_name, .i32_type, false);
         }
         self.emit(") error{AotBail}!i32 {\n");
         self.pushIndent();
@@ -912,7 +910,7 @@ pub const IrTranspiler = struct {
         if (tag == .identifier) {
             const binding = self.ir.getBinding(param_idx) orelse return "p";
             if (binding.kind == .global) {
-                if (self.atomName(binding.slot)) |name| return name;
+                if (self.atomName(binding.name_atom)) |name| return name;
             }
             return self.localName(binding);
         }
@@ -1095,7 +1093,7 @@ pub const IrTranspiler = struct {
     fn resolveVarDeclName(self: *IrTranspiler, decl: ir.Node.VarDecl) []const u8 {
         // Try to get the atom name for global bindings
         if (decl.binding.kind == .global) {
-            if (self.atomName(decl.binding.slot)) |name| return name;
+            if (self.atomName(decl.binding.name_atom)) |name| return name;
         }
         return self.localName(decl.binding);
     }
@@ -1103,7 +1101,7 @@ pub const IrTranspiler = struct {
     /// Resolve a handler-context variable name with aot_ prefix
     fn resolveHandlerVarName(self: *IrTranspiler, decl: ir.Node.VarDecl) ?[]const u8 {
         const base_name = if (decl.binding.kind == .global)
-            self.atomName(decl.binding.slot) orelse return null
+            self.atomName(decl.binding.name_atom) orelse return null
         else
             self.localName(decl.binding);
         const name = std.fmt.allocPrint(self.allocator, "aot_{s}", .{base_name}) catch return null;
@@ -1210,7 +1208,7 @@ pub const IrTranspiler = struct {
         if (obj_tag != .identifier) return false;
         const obj_binding = self.ir.getBinding(member.object) orelse return false;
         if (obj_binding.kind != .global) return false;
-        if (obj_binding.slot != @intFromEnum(Atom.Response)) return false;
+        if (obj_binding.name_atom != @intFromEnum(Atom.Response)) return false;
 
         // Determine which Response method
         const method_atom = member.property;
@@ -1553,7 +1551,7 @@ pub const IrTranspiler = struct {
         if (tag == .identifier) {
             const binding = self.ir.getBinding(key_idx) orelse return null;
             if (binding.kind == .global) {
-                return self.atomName(binding.slot);
+                return self.atomName(binding.name_atom);
             }
         }
         if (tag == .lit_string) {
@@ -1781,7 +1779,7 @@ pub const IrTranspiler = struct {
         const callee_binding = self.ir.getBinding(call.callee) orelse return false;
         if (callee_binding.kind != .global) return false;
 
-        const func_name = self.atomName(callee_binding.slot) orelse return false;
+        const func_name = self.atomName(callee_binding.name_atom) orelse return false;
 
         // Check if this function was transpiled as pure integer
         for (self.functions.items) |func_info| {
@@ -1826,7 +1824,7 @@ pub const IrTranspiler = struct {
         const obj_binding = self.ir.getBinding(member.object) orelse return false;
         if (obj_binding.kind != .global) return false;
 
-        const obj_name = self.atomName(obj_binding.slot) orelse return false;
+        const obj_name = self.atomName(obj_binding.name_atom) orelse return false;
         const method_name = self.atomName(member.property) orelse return false;
 
         // Date.now() -> std.posix.clock_gettime(.REALTIME) converted to epoch millis
@@ -2401,7 +2399,7 @@ pub const IrTranspiler = struct {
             self.emit("0");
             return;
         }
-        const func_name = self.atomName(callee_binding.slot) orelse {
+        const func_name = self.atomName(callee_binding.name_atom) orelse {
             self.emit("0");
             return;
         };
@@ -2659,7 +2657,7 @@ pub const IrTranspiler = struct {
         const callee_binding = self.ir.getBinding(call.callee) orelse return false;
         if (callee_binding.kind != .global) return false;
 
-        const callee_name = self.atomName(callee_binding.slot) orelse return false;
+        const callee_name = self.atomName(callee_binding.name_atom) orelse return false;
         if (!std.mem.eql(u8, callee_name, "range")) return false;
 
         if (call.args_count < 2) return false;

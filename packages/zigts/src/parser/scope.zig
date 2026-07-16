@@ -246,7 +246,8 @@ pub const ScopeAnalyzer = struct {
 
             return .{
                 .scope_id = self.current_scope,
-                .slot = name_atom, // Atom index for global property lookup (no truncation)
+                .slot = name_atom,
+                .name_atom = name_atom,
                 .kind = .global,
             };
         }
@@ -276,12 +277,13 @@ pub const ScopeAnalyzer = struct {
         return .{
             .scope_id = self.current_scope,
             .slot = slot,
+            .name_atom = name_atom,
             .kind = if (kind == .parameter) .argument else .local,
         };
     }
 
     /// Resolve a variable name, potentially creating upvalues
-    pub fn resolveBinding(self: *ScopeAnalyzer, name: []const u8, name_atom: u16) BindingRef {
+    pub fn resolveBinding(self: *ScopeAnalyzer, name: []const u8, name_atom: u16) !BindingRef {
         var scope_id = self.current_scope;
         var crossed_function = false;
         var current_function_scope: ScopeId = self.scopes.items[scope_id].enclosing_function;
@@ -295,7 +297,8 @@ pub const ScopeAnalyzer = struct {
                 if (scope.kind == .global) {
                     return .{
                         .scope_id = scope_id,
-                        .slot = binding.slot, // Already stores atom index for globals
+                        .slot = binding.slot,
+                        .name_atom = binding.name_atom,
                         .kind = .global,
                     };
                 }
@@ -303,16 +306,17 @@ pub const ScopeAnalyzer = struct {
                 if (crossed_function) {
                     // We need to create an upvalue chain
                     binding.is_captured = true;
-                    const upvalue_slot = self.createUpvalueChain(
+                    const upvalue_slot = try self.createUpvalueChain(
                         current_function_scope,
                         scope_id,
                         @truncate(binding.slot), // Local slots are u8 (checked at allocation)
                         name,
-                    ) catch return .{ .scope_id = 0, .slot = 0, .kind = .global };
+                    );
 
                     return .{
                         .scope_id = current_function_scope,
                         .slot = upvalue_slot,
+                        .name_atom = name_atom,
                         .kind = .upvalue,
                     };
                 } else {
@@ -320,6 +324,7 @@ pub const ScopeAnalyzer = struct {
                     return .{
                         .scope_id = scope_id,
                         .slot = binding.slot,
+                        .name_atom = binding.name_atom,
                         .kind = if (binding.kind == .parameter) .argument else .local,
                     };
                 }
@@ -338,7 +343,8 @@ pub const ScopeAnalyzer = struct {
                 // Not found - it's an undeclared/implicit global (builtin or external)
                 return .{
                     .scope_id = 0,
-                    .slot = name_atom, // Atom index stored in slot (for globals)
+                    .slot = name_atom,
+                    .name_atom = name_atom,
                     .kind = .undeclared_global,
                 };
             }
@@ -465,12 +471,12 @@ test "basic scope and binding" {
     try std.testing.expectEqual(@as(u8, 1), x_ref.slot); // Atom index stored in slot
 
     // Resolve x - should find it as global
-    const resolved = analyzer.resolveBinding("x", 1);
+    const resolved = try analyzer.resolveBinding("x", 1);
     try std.testing.expectEqual(BindingRef.BindingKind.global, resolved.kind);
     try std.testing.expectEqual(@as(u8, 1), resolved.slot);
 
     // Resolve undefined - should be undeclared_global (not found in any scope)
-    const undefined_ref = analyzer.resolveBinding("undefined", 2);
+    const undefined_ref = try analyzer.resolveBinding("undefined", 2);
     try std.testing.expectEqual(BindingRef.BindingKind.undeclared_global, undefined_ref.kind);
 }
 
@@ -490,7 +496,7 @@ test "nested function creates upvalue" {
     const inner_scope_id = try analyzer.pushScope(.function);
 
     // Resolve y from inner function - should create upvalue
-    const y_ref = analyzer.resolveBinding("y", 2);
+    const y_ref = try analyzer.resolveBinding("y", 2);
     try std.testing.expectEqual(BindingRef.BindingKind.upvalue, y_ref.kind);
     try std.testing.expectEqual(@as(u8, 0), y_ref.slot);
 
@@ -540,6 +546,22 @@ test "function parameters" {
     try std.testing.expectEqual(@as(u8, 1), param_b.slot);
 
     // Resolve parameter
-    const resolved = analyzer.resolveBinding("a", 1);
+    const resolved = try analyzer.resolveBinding("a", 1);
     try std.testing.expectEqual(BindingRef.BindingKind.argument, resolved.kind);
+}
+
+test "captured binding allocation failure propagates" {
+    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    _ = try analyzer.pushScope(.function);
+    _ = try analyzer.declareBinding("captured", 1, .variable, false);
+    _ = try analyzer.pushScope(.function);
+
+    const allocator = analyzer.allocator;
+    defer analyzer.allocator = allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    analyzer.allocator = failing.allocator();
+
+    try std.testing.expectError(error.OutOfMemory, analyzer.resolveBinding("captured", 1));
 }

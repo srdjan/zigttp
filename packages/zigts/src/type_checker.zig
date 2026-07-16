@@ -39,6 +39,8 @@ const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 /// Max union members tracked during type inference (member access, return types, etc.).
 const MAX_UNION_MEMBERS = 16;
 
+pub const TypeCheckerError = type_pool_mod.TypePoolError || error{UnresolvedTypeBinding};
+
 // ---------------------------------------------------------------------------
 // Diagnostic types
 // ---------------------------------------------------------------------------
@@ -84,6 +86,11 @@ pub const TypeChecker = struct {
         type_idx: TypeIndex,
     };
 
+    const ActiveDeclaredType = struct {
+        name_atom: u16,
+        type_idx: TypeIndex,
+    };
+
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
@@ -101,6 +108,14 @@ pub const TypeChecker = struct {
     /// Consulted only where a declared parameter type is load-bearing:
     /// match-discriminant exhaustiveness.
     param_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
+    /// Next declaration occurrence for each name atom. The stripper records
+    /// the same semantic occurrence, so annotation binding is coordinate-free.
+    var_name_ordinals: std.AutoHashMapUnmanaged(u16, u32),
+    /// Lexically active declarations, including untyped shadows. Upvalues use
+    /// this stack to resolve the nearest declaration by name.
+    active_declared_types: std.ArrayListUnmanaged(ActiveDeclaredType),
+    bound_var_annotations: usize = 0,
+    binding_resolution_failed: bool = false,
     /// Flow-sensitive narrowing: binding key -> narrowed TypeIndex
     narrowed: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Track current function's declared return type for return statement checking
@@ -127,6 +142,8 @@ pub const TypeChecker = struct {
             .compiled_schemas = .empty,
             .binding_types = .empty,
             .param_types = .empty,
+            .var_name_ordinals = .empty,
+            .active_declared_types = .empty,
             .narrowed = .empty,
             .allocation_failed = false,
         };
@@ -145,6 +162,8 @@ pub const TypeChecker = struct {
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
         self.param_types.deinit(self.allocator);
+        self.var_name_ordinals.deinit(self.allocator);
+        self.active_declared_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
     }
 
@@ -152,6 +171,9 @@ pub const TypeChecker = struct {
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         try self.ensureHealthy();
         self.walkStmt(root);
+        if (self.bound_var_annotations != self.env.varAnnotationCount()) {
+            self.binding_resolution_failed = true;
+        }
         try self.ensureHealthy();
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
@@ -162,9 +184,10 @@ pub const TypeChecker = struct {
 
     /// Reject proof/type results after either the checker or its shared pool
     /// encounters an operational allocation or compact-capacity failure.
-    pub fn ensureHealthy(self: *const TypeChecker) type_pool_mod.TypePoolError!void {
+    pub fn ensureHealthy(self: *const TypeChecker) TypeCheckerError!void {
         try self.env.pool.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
+        if (self.binding_resolution_failed) return error.UnresolvedTypeBinding;
     }
 
     pub fn getDiagnostics(self: *const TypeChecker) []const Diagnostic {
@@ -217,6 +240,8 @@ pub const TypeChecker = struct {
         switch (tag) {
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return;
+                const active_start = self.active_declared_types.items.len;
+                defer self.active_declared_types.items.len = active_start;
                 for (0..block.stmts_count) |i| {
                     const stmt_idx = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
                     self.walkStmt(stmt_idx);
@@ -225,6 +250,7 @@ pub const TypeChecker = struct {
 
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
+                const declared = self.bindVarDeclaration(vd.binding);
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
 
@@ -232,13 +258,6 @@ pub const TypeChecker = struct {
                     const binding = vd.binding;
                     const key = packBindingKey(binding.scope_id, binding.slot);
                     const inferred = self.inferType(vd.init);
-
-                    const loc = self.ir_view.getLoc(node);
-                    const by_loc = if (loc) |l| self.env.getVarTypeByLoc(l.line, l.column) else null;
-                    const declared = by_loc orelse blk: {
-                        const name = self.resolveAtomName(binding.slot);
-                        break :blk if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
-                    };
 
                     if (declared != null_type_idx and inferred != null_type_idx) {
                         if (!self.env.pool.isAssignableTo(inferred, declared)) {
@@ -379,9 +398,11 @@ pub const TypeChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 const func = self.ir_view.getFunction(decl.init) orelse return;
-                // Look up function signature from TypeEnv
-                const loc = self.ir_view.getLoc(node);
-                const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
+                const active_start = self.active_declared_types.items.len;
+                defer self.active_declared_types.items.len = active_start;
+                // Named declarations resolve signatures by binding identity.
+                const fn_name = self.resolveAtomName(decl.binding.name_atom);
+                const sig = if (fn_name) |name| self.env.getFnSigByName(name) else null;
                 const saved_return = self.current_return_type;
                 if (sig) |s| {
                     // Proof markers (Spec/Proof/Effects capsules) are
@@ -397,6 +418,8 @@ pub const TypeChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
+                const active_start = self.active_declared_types.items.len;
+                defer self.active_declared_types.items.len = active_start;
                 const loc = self.ir_view.getLoc(node);
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
@@ -412,6 +435,11 @@ pub const TypeChecker = struct {
                 if (self.ir_view.getOptValue(node)) |val| {
                     self.walkStmt(val);
                 }
+            },
+
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.walkStmt(export_decl.declaration);
             },
 
             .binary_op,
@@ -588,7 +616,7 @@ pub const TypeChecker = struct {
         if (callee_tag != .identifier or call.args_count < 2) return;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return;
-        const name = self.resolveAtomName(binding.slot) orelse return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
         if (!std.mem.eql(u8, name, "schemaCompile")) return;
 
         const schema_name_node = self.ir_view.getListIndex(call.args_start, 0);
@@ -735,7 +763,7 @@ pub const TypeChecker = struct {
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.slot != @intFromEnum(object.Atom.JSON)) return null;
+        if (binding.name_atom != @intFromEnum(object.Atom.JSON)) return null;
 
         return self.ir_view.getListIndex(call.args_start, 0);
     }
@@ -837,7 +865,7 @@ pub const TypeChecker = struct {
             .lit_string => self.getLiteralString(node_idx),
             .identifier => blk: {
                 const binding = self.ir_view.getBinding(node_idx) orelse break :blk null;
-                break :blk self.resolveAtomName(binding.slot);
+                break :blk self.resolveAtomName(binding.name_atom);
             },
             else => null,
         };
@@ -1164,12 +1192,7 @@ pub const TypeChecker = struct {
                 if (self.narrowed.get(key)) |t| return t;
                 // Check tracked binding types
                 if (self.binding_types.get(key)) |t| return t;
-                // Check by name in the environment
-                const name = self.resolveAtomName(binding.slot);
-                if (name) |n| {
-                    if (self.env.getVarTypeByName(n)) |t| return t;
-                }
-                return null_type_idx;
+                return self.declaredTypeForBinding(binding);
             },
 
             .member_access => self.inferMemberAccessType(node),
@@ -1395,7 +1418,7 @@ pub const TypeChecker = struct {
             // The key is a node index (identifier, string, or computed); extract atom from it
             const key_tag = self.ir_view.getTag(prop.key) orelse continue;
             const prop_name = if (key_tag == .identifier)
-                (if (self.ir_view.getBinding(prop.key)) |b| self.resolveAtomName(b.slot) else null)
+                (if (self.ir_view.getBinding(prop.key)) |b| self.resolveAtomName(b.name_atom) else null)
             else if (key_tag == .lit_string)
                 (if (self.ir_view.getStringIdx(prop.key)) |si| self.ir_view.getString(si) else null)
             else
@@ -1620,7 +1643,7 @@ pub const TypeChecker = struct {
         if (callee_tag != .identifier) return null_type_idx;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
-        const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         if (std.mem.eql(u8, name, "serviceCall")) {
             const service_call_type = self.inferServiceCallType(call);
             if (service_call_type != null_type_idx) return service_call_type;
@@ -1674,6 +1697,58 @@ pub const TypeChecker = struct {
     // Match expression narrowing
     // -------------------------------------------------------------------
 
+    fn bindVarDeclaration(self: *TypeChecker, binding: ir.BindingRef) TypeIndex {
+        const name = self.resolveAtomName(binding.name_atom) orelse {
+            self.pushActiveDeclared(binding.name_atom, null_type_idx);
+            return null_type_idx;
+        };
+
+        const gop = self.var_name_ordinals.getOrPut(self.allocator, binding.name_atom) catch {
+            self.markAllocationFailure();
+            return null_type_idx;
+        };
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        const ordinal = gop.value_ptr.*;
+        gop.value_ptr.* += 1;
+
+        const declared = self.env.getVarTypeByNameOrdinal(name, ordinal) orelse null_type_idx;
+        if (declared != null_type_idx) {
+            self.env.bindVarType(binding.scope_id, binding.name_atom, declared) catch self.markAllocationFailure();
+            self.bound_var_annotations += 1;
+        }
+        self.pushActiveDeclared(binding.name_atom, declared);
+        return declared;
+    }
+
+    fn pushActiveDeclared(self: *TypeChecker, name_atom: u16, type_idx: TypeIndex) void {
+        self.active_declared_types.append(self.allocator, .{
+            .name_atom = name_atom,
+            .type_idx = type_idx,
+        }) catch self.markAllocationFailure();
+    }
+
+    fn declaredTypeForBinding(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
+        if (self.env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |declared| {
+            return declared;
+        }
+
+        if (binding.kind == .upvalue) {
+            var i = self.active_declared_types.items.len;
+            while (i > 0) {
+                i -= 1;
+                const active = self.active_declared_types.items[i];
+                if (active.name_atom == binding.name_atom) return active.type_idx;
+            }
+            return null_type_idx;
+        }
+
+        if (binding.kind == .undeclared_global) {
+            const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
+            return self.env.getVarTypeByName(name) orelse null_type_idx;
+        }
+        return null_type_idx;
+    }
+
     fn walkMatchWithNarrowing(self: *TypeChecker, me: ir.Node.MatchExpr) void {
         // Check if discriminant is an identifier with a union type
         const disc_tag = self.ir_view.getTag(me.discriminant) orelse return;
@@ -1719,14 +1794,15 @@ pub const TypeChecker = struct {
     /// (scope_id, slot), which is unique per function scope, so no
     /// save/restore is needed.
     fn registerParamTypes(self: *TypeChecker, func: ir.Node.FunctionExpr, sig: type_env_mod.FunctionSig) void {
-        const count = @min(func.params_count, sig.param_count);
-        for (0..count) |i| {
+        for (0..func.params_count) |i| {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
             const binding = self.ir_view.paramBinding(param_idx) orelse continue;
-            const param_type = sig.param_types[i];
+            const param_type = if (i < sig.param_count) sig.param_types[i] else null_type_idx;
+            self.pushActiveDeclared(binding.name_atom, param_type);
             if (param_type == null_type_idx) continue;
             const key = packBindingKey(binding.scope_id, binding.slot);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
+            self.env.bindVarType(binding.scope_id, binding.name_atom, param_type) catch self.markAllocationFailure();
         }
     }
 
@@ -1829,7 +1905,7 @@ pub const TypeChecker = struct {
         if (callee_tag != .identifier) return;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return;
-        const name = self.resolveAtomName(binding.slot) orelse return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
 
         if (std.mem.eql(u8, name, "serviceCall")) {
             const service_context = self.service_type_context orelse return;
@@ -2367,6 +2443,91 @@ test "TypeChecker: annotation rejects incompatible type" {
     try checkTypedSource(
         \\const bad: number = "oops";
     , 1, 0);
+}
+
+test "TypeChecker: exported handler local const rejects incompatible initializer" {
+    try checkTypedSource(
+        \\export function handler(req: Request): Response {
+        \\  const n: number = "not a number";
+        \\  return Response.json({});
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: exported default handler local annotation is checked" {
+    try checkTypedSource(
+        \\export default function handler(req: Request): Response {
+        \\  const n: number = "x";
+        \\  return Response.json({});
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: exported arrow handler local annotation is checked" {
+    try checkTypedSource(
+        \\export const handler = () => {
+        \\  const n: number = "x";
+        \\  return Response.json({});
+        \\};
+    , 1, 0);
+}
+
+test "TypeChecker: exported handler local let annotation is checked" {
+    try checkTypedSource(
+        \\export function handler(req: Request): Response {
+        \\  let n: number = "x";
+        \\  return Response.json({});
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: nested arrow in exported handler checks local annotation" {
+    try checkTypedSource(
+        \\export const handler = () => {
+        \\  const nested = () => {
+        \\    const n: number = "x";
+        \\    return n;
+        \\  };
+        \\  return Response.json({ value: nested() });
+        \\};
+    , 1, 0);
+}
+
+test "TypeChecker: shadowed exported local uses its own scoped annotation" {
+    try checkTypedSource(
+        \\export const zz: string = "top level";
+        \\export function handler(req: Request): Response {
+        \\  const zz: number = "not a number";
+        \\  return Response.json({ value: zz });
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: exported handler argument annotation reaches nested upvalue" {
+    try checkTypedSource(
+        \\export function handler(req: number): Response {
+        \\  const nested = () => {
+        \\    const text: string = req;
+        \\    return text;
+        \\  };
+        \\  return Response.json({ value: nested() });
+        \\}
+    , 1, 0);
+}
+
+test "TypeChecker: exported top-level annotation remains checked" {
+    try checkTypedSource(
+        \\export const top: number = "x";
+    , 1, 0);
+}
+
+test "TypeChecker: correct local annotation in exported handler passes" {
+    try checkTypedSource(
+        \\export function handler(req: Request): Response {
+        \\  const n: number = 1;
+        \\  return Response.json({ value: n });
+        \\}
+    , 0, 0);
 }
 
 test "TypeChecker: rejects assignment to readonly property" {

@@ -103,6 +103,12 @@ pub const GenericAlias = struct {
 // ---------------------------------------------------------------------------
 
 pub const TypeEnv = struct {
+    const NamedVarAnnotation = struct {
+        name: []const u8,
+        ordinal: u32,
+        type_idx: TypeIndex,
+    };
+
     pool: *TypePool,
     allocator: std.mem.Allocator,
 
@@ -118,6 +124,10 @@ pub const TypeEnv = struct {
     fn_signatures: std.AutoHashMapUnmanaged(u32, FunctionSig),
     /// Variable name -> declared type (for name-based lookup)
     var_types_by_name: std.StringHashMapUnmanaged(TypeIndex),
+    /// All variable annotations keyed by semantic (name, occurrence), in source order.
+    var_annotations: std.ArrayListUnmanaged(NamedVarAnnotation),
+    /// Scoped binding identity: packed(scope_id, name_atom) -> declared type.
+    var_types_by_binding: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Function name -> signature (for name-based lookup)
     fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
     /// Generic scope stack
@@ -137,6 +147,8 @@ pub const TypeEnv = struct {
             .var_types = .empty,
             .fn_signatures = .empty,
             .var_types_by_name = .empty,
+            .var_annotations = .empty,
+            .var_types_by_binding = .empty,
             .fn_sigs_by_name = .empty,
             .generic_scopes = .empty,
             .name_storage = .empty,
@@ -236,6 +248,8 @@ pub const TypeEnv = struct {
         self.var_types.deinit(self.allocator);
         self.fn_signatures.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
+        self.var_annotations.deinit(self.allocator);
+        self.var_types_by_binding.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         for (self.name_storage.items) |name| {
@@ -419,6 +433,13 @@ pub const TypeEnv = struct {
         if (tm.getNameText(entry)) |name| {
             const owned_name = self.internName(name);
             self.var_types_by_name.put(self.allocator, owned_name, type_idx) catch {};
+            if (entry.name_ordinal) |ordinal| {
+                self.var_annotations.append(self.allocator, .{
+                    .name = owned_name,
+                    .ordinal = ordinal,
+                    .type_idx = type_idx,
+                }) catch {};
+            }
         }
     }
 
@@ -597,6 +618,28 @@ pub const TypeEnv = struct {
     /// Look up a variable's declared type by name.
     pub fn getVarTypeByName(self: *const TypeEnv, name: []const u8) ?TypeIndex {
         return self.var_types_by_name.get(name);
+    }
+
+    /// Resolve one declaration annotation by semantic name occurrence.
+    pub fn getVarTypeByNameOrdinal(self: *const TypeEnv, name: []const u8, ordinal: u32) ?TypeIndex {
+        for (self.var_annotations.items) |annotation| {
+            if (annotation.ordinal == ordinal and std.mem.eql(u8, annotation.name, name)) {
+                return annotation.type_idx;
+            }
+        }
+        return null;
+    }
+
+    pub fn varAnnotationCount(self: *const TypeEnv) usize {
+        return self.var_annotations.items.len;
+    }
+
+    pub fn bindVarType(self: *TypeEnv, scope_id: u16, name_atom: u16, type_idx: TypeIndex) !void {
+        try self.var_types_by_binding.put(self.allocator, packBindingNameKey(scope_id, name_atom), type_idx);
+    }
+
+    pub fn getVarTypeByBinding(self: *const TypeEnv, scope_id: u16, name_atom: u16) ?TypeIndex {
+        return self.var_types_by_binding.get(packBindingNameKey(scope_id, name_atom));
     }
 
     /// Look up a function signature by name.
@@ -815,6 +858,10 @@ pub const TypeEnv = struct {
 fn packLocationKey(line: u32, col: u32) u32 {
     // Pack line (20 bits) + col (12 bits) into u32
     return (line << 12) | (col & 0xFFF);
+}
+
+fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {
+    return (@as(u32, scope_id) << 16) | name_atom;
 }
 
 // ---------------------------------------------------------------------------
