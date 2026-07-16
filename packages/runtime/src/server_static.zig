@@ -215,3 +215,62 @@ test "resolveStaticFile returns not_found for safe missing paths" {
     );
     try std.testing.expectEqual(StaticFileLookup.not_found, resolved);
 }
+
+test "resolveStaticFile contains symlinks within the static root" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(io, "static/real-dir");
+    try tmp.dir.createDirPath(io, "outside-dir");
+    try tmp.dir.writeFile(io, .{ .sub_path = "static/inside.txt", .data = "inside" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "static/real-dir/inside.txt", .data = "inside dir" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside.txt", .data = "outside" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside-dir/outside.txt", .data = "outside dir" });
+
+    const tmp_path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(tmp_path);
+    const static_dir = try std.fs.path.join(allocator, &.{ tmp_path, "static" });
+    defer allocator.free(static_dir);
+    const outside_file = try std.fs.path.join(allocator, &.{ tmp_path, "outside.txt" });
+    defer allocator.free(outside_file);
+    const outside_dir = try std.fs.path.join(allocator, &.{ tmp_path, "outside-dir" });
+    defer allocator.free(outside_dir);
+    const inside_file = try std.fs.path.join(allocator, &.{ static_dir, "inside.txt" });
+    defer allocator.free(inside_file);
+    const inside_dir = try std.fs.path.join(allocator, &.{ static_dir, "real-dir" });
+    defer allocator.free(inside_dir);
+
+    const outside_file_link = try std.fs.path.join(allocator, &.{ static_dir, "outside-file" });
+    defer allocator.free(outside_file_link);
+    const outside_dir_link = try std.fs.path.join(allocator, &.{ static_dir, "outside-dir" });
+    defer allocator.free(outside_dir_link);
+    const inside_file_link = try std.fs.path.join(allocator, &.{ static_dir, "inside-file" });
+    defer allocator.free(inside_file_link);
+    const inside_dir_link = try std.fs.path.join(allocator, &.{ static_dir, "inside-dir" });
+    defer allocator.free(inside_dir_link);
+
+    try Dir.symLinkAbsolute(io, outside_file, outside_file_link, .{});
+    try Dir.symLinkAbsolute(io, outside_dir, outside_dir_link, .{ .is_directory = true });
+    try Dir.symLinkAbsolute(io, inside_file, inside_file_link, .{});
+    try Dir.symLinkAbsolute(io, inside_dir, inside_dir_link, .{ .is_directory = true });
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var etag_buf: [34]u8 = undefined;
+
+    const direct_escape = try resolveStaticFile(allocator, io, static_dir, "outside-file", &path_buf, &etag_buf);
+    try std.testing.expectEqual(StaticFileLookup.forbidden, direct_escape);
+
+    const directory_escape = try resolveStaticFile(allocator, io, static_dir, "outside-dir/outside.txt", &path_buf, &etag_buf);
+    try std.testing.expectEqual(StaticFileLookup.forbidden, directory_escape);
+
+    const inside_final_link = try resolveStaticFile(allocator, io, static_dir, "inside-file", &path_buf, &etag_buf);
+    try std.testing.expectEqual(StaticFileLookup.not_found, inside_final_link);
+
+    const inside_directory_link = try resolveStaticFile(allocator, io, static_dir, "inside-dir/inside.txt", &path_buf, &etag_buf);
+    switch (inside_directory_link) {
+        .ok => |file| file.file.close(io),
+        else => return error.ExpectedInternalDirectorySymlink,
+    }
+}
