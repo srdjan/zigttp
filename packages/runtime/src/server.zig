@@ -920,17 +920,22 @@ const ConnectionPool = struct {
         if (transfer_encoding == .chunked and content_length_opt != null) return error.InvalidRequest;
 
         if (transfer_encoding == .chunked) {
+            const encoded_cap = http_parser.maxChunkedEncodedBodyBytes(self.server.config.max_body_size);
             const encoded_len = (try http_parser.chunkedBodyConsumedResumable(
                 data[body_start..],
                 self.server.config.max_body_size,
                 chunked_state,
             )) orelse {
                 const encoded_so_far = if (body_start <= data.len) data.len - body_start else 0;
-                if (encoded_so_far > maxChunkedEncodedBodyBytes(self.server.config.max_body_size)) {
+                if (encoded_so_far > encoded_cap) {
                     return error.FileTooBig;
                 }
                 return null;
             };
+            // The cap must also gate the completed body: a read that both crosses
+            // the cap and finishes the body would otherwise return through here
+            // without ever entering the incomplete branch above.
+            if (encoded_len > encoded_cap) return error.FileTooBig;
             return body_start + encoded_len;
         }
 
@@ -939,11 +944,6 @@ const ConnectionPool = struct {
         const total_needed = body_start + content_length;
         if (data.len < total_needed) return null;
         return total_needed;
-    }
-
-    fn maxChunkedEncodedBodyBytes(max_body_size: usize) usize {
-        const overhead = @max(max_body_size, 64 * 1024);
-        return std.math.add(usize, max_body_size, overhead) catch std.math.maxInt(usize);
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool, is_head: bool) !void {

@@ -442,6 +442,15 @@ const MAX_CHUNK_SIZE_LINE_BYTES: usize = 8 * 1024;
 const MAX_CHUNK_TRAILER_LINE_BYTES: usize = 8 * 1024;
 const MAX_CHUNK_TRAILER_BYTES: usize = 16 * 1024;
 
+/// Bound the encoded representation of a chunked request independently from
+/// its decoded payload. Small bodies retain enough room for normal framing and
+/// trailers; larger bodies may use at most their decoded-size limit again as
+/// chunk metadata overhead.
+pub fn maxChunkedEncodedBodyBytes(max_body_size: usize) usize {
+    const overhead = @max(max_body_size, 64 * 1024);
+    return std.math.add(usize, max_body_size, overhead) catch std.math.maxInt(usize);
+}
+
 /// Resume state for `chunkedBodyConsumedResumable`, letting a caller that
 /// sees the same logical body grow across repeated calls (e.g. one call per
 /// socket read) pick up where the previous call left off instead of
@@ -956,6 +965,25 @@ test "chunkedBodyConsumedResumable resumes mid chunk-data without rescanning" {
 
     const poison = "Z" ** resume_offset;
     const resumed_body = poison ++ chunk2_data_partial ++ chunk2_data_rest ++ terminator;
+    const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
+    try testing.expectEqual(@as(?usize, full_valid_body.len), result);
+}
+
+test "chunkedBodyConsumedResumable resumes mid chunk-data CRLF without rescanning" {
+    const size_line = "5\r\n";
+    const chunk_data = "hello";
+    const terminator = "0\r\n\r\n";
+    const full_valid_body = size_line ++ chunk_data ++ "\r\n" ++ terminator;
+
+    // First call ends between the CR and LF that terminate chunk data.
+    const first_call_body = size_line ++ chunk_data ++ "\r";
+    var state: ChunkedBodyParseState = .{};
+    try testing.expectEqual(@as(?usize, null), try chunkedBodyConsumedResumable(first_call_body, 1024, &state));
+    try testing.expectEqual(ChunkedBodyParseState.Phase.chunk_data, state.phase);
+    try testing.expectEqual(@as(usize, size_line.len), state.pos);
+
+    const poison = "Z" ** size_line.len;
+    const resumed_body = poison ++ chunk_data ++ "\r\n" ++ terminator;
     const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
     try testing.expectEqual(@as(?usize, full_valid_body.len), result);
 }

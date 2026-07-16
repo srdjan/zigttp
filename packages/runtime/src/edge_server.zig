@@ -792,6 +792,8 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
     var header_end: ?usize = null;
     var total_needed: ?usize = null;
     var is_chunked = false;
+    var chunked_state: http_parser.ChunkedBodyParseState = .{};
+    const max_chunked_encoded_body_bytes = http_parser.maxChunkedEncodedBodyBytes(max_body_size);
     var tmp: [8192]u8 = undefined;
     var read_timer = compat.Timer.start() catch null;
     const read_budget_ns: u64 = @as(u64, timeout_ms) * std.time.ns_per_ms;
@@ -815,8 +817,12 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
                 const content_len = content_len_opt orelse 0;
                 if (content_len > max_body_size) return error.FileTooBig;
                 if (is_chunked) {
-                    if (try http_parser.chunkedBodyConsumed(buf.items[end + 4 ..], max_body_size)) |encoded_len| {
+                    const body = buf.items[end + 4 ..];
+                    if (try http_parser.chunkedBodyConsumedResumable(body, max_body_size, &chunked_state)) |encoded_len| {
+                        if (encoded_len > max_chunked_encoded_body_bytes) return error.FileTooBig;
                         total_needed = end + 4 + encoded_len;
+                    } else if (body.len > max_chunked_encoded_body_bytes) {
+                        return error.FileTooBig;
                     }
                 } else {
                     total_needed = end + 4 + content_len;
@@ -826,8 +832,12 @@ fn readRequestData(fd: std.posix.fd_t, allocator: std.mem.Allocator, max_body_si
             }
         } else if (is_chunked and total_needed == null) {
             const body_start = header_end.? + 4;
-            if (try http_parser.chunkedBodyConsumed(buf.items[body_start..], max_body_size)) |encoded_len| {
+            const body = buf.items[body_start..];
+            if (try http_parser.chunkedBodyConsumedResumable(body, max_body_size, &chunked_state)) |encoded_len| {
+                if (encoded_len > max_chunked_encoded_body_bytes) return error.FileTooBig;
                 total_needed = body_start + encoded_len;
+            } else if (body.len > max_chunked_encoded_body_bytes) {
+                return error.FileTooBig;
             }
         }
         if (total_needed) |needed| {
@@ -1016,6 +1026,59 @@ test "edge readRequestData rejects unsupported transfer-encoding" {
         error.UnsupportedTransferEncoding,
         readRequestData(fds[0], allocator, 1024, 30_000),
     );
+}
+
+test "edge readRequestData rejects oversized encoded chunked body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const max_body_size: usize = 64;
+
+    var request: std.ArrayList(u8) = .empty;
+    defer request.deinit(std.testing.allocator);
+    try request.appendSlice(
+        std.testing.allocator,
+        "POST /api HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+
+    // Each one-byte decoded chunk carries a large extension. The decoded
+    // payload stays within max_body_size while its encoded representation
+    // exceeds the separate wire-size cap.
+    var chunk_index: usize = 0;
+    while (chunk_index < max_body_size) : (chunk_index += 1) {
+        try request.appendSlice(std.testing.allocator, "1;");
+        try request.appendNTimes(std.testing.allocator, 'x', 1100);
+        try request.appendSlice(std.testing.allocator, "\r\na\r\n");
+    }
+    try request.appendSlice(std.testing.allocator, "0\r\n\r\n");
+    const body_start = http_parser.findHeaderEnd(request.items).? + 4;
+    const encoded_cap = http_parser.maxChunkedEncodedBodyBytes(max_body_size);
+    try std.testing.expect(request.items.len - body_start > encoded_cap);
+
+    const fds = try io_mod.createUnixSocketPair();
+    var read_fd_open = true;
+    defer if (read_fd_open) std.Io.Threaded.closeFd(fds[0]);
+    var write_fd_open = true;
+    errdefer if (write_fd_open) std.Io.Threaded.closeFd(fds[1]);
+
+    const WriteCtx = struct {
+        fd: std.posix.fd_t,
+        bytes: []const u8,
+    };
+    const writer_thread = try std.Thread.spawn(.{}, struct {
+        fn run(ctx: WriteCtx) void {
+            io_mod.writeAllFd(ctx.fd, ctx.bytes) catch {};
+            std.Io.Threaded.closeFd(ctx.fd);
+        }
+    }.run, .{WriteCtx{ .fd = fds[1], .bytes = request.items }});
+    write_fd_open = false;
+
+    const result = readRequestData(fds[0], allocator, max_body_size, 30_000);
+    std.Io.Threaded.closeFd(fds[0]);
+    read_fd_open = false;
+    writer_thread.join();
+
+    try std.testing.expectError(error.FileTooBig, result);
 }
 
 test "edge sendResponse drops handler supplied framing headers" {
