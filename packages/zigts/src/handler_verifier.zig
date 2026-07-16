@@ -1144,17 +1144,9 @@ pub const HandlerVerifier = struct {
         if (tag != .identifier) return null_type_idx;
 
         const binding = self.ir_view.getBinding(node) orelse return null_type_idx;
-        const target_key = bindingKey(binding.scope_id, binding.slot);
-
-        for (self.all_bindings.items) |tracked| {
-            if (tracked.key() != target_key) continue;
-            const loc = self.ir_view.getLoc(tracked.decl_node) orelse continue;
-            if (env.getVarTypeByLoc(loc.line, loc.column)) |type_idx| {
-                return type_idx;
-            }
-        }
-
-        const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        if (env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |type_idx| return type_idx;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null_type_idx;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         return env.getVarTypeByName(name) orelse null_type_idx;
     }
 
@@ -1516,7 +1508,7 @@ pub fn findHandlerFunction(ir_view: IrView, root: NodeIndex) ?NodeIndex {
         if (effective_tag == .function_decl or effective_tag == .var_decl) {
             const decl = ir_view.getVarDecl(effective_stmt) orelse continue;
             if (decl.binding.kind != .global) continue;
-            if (decl.binding.slot != @intFromEnum(object.Atom.handler)) continue;
+            if (decl.binding.name_atom != @intFromEnum(object.Atom.handler)) continue;
 
             const init_tag = ir_view.getTag(decl.init) orelse continue;
             if (init_tag == .function_expr or init_tag == .arrow_function) {

@@ -44,8 +44,8 @@ pub const AtomResolver = *const fn (atom_idx: u16, ctx: *const anyopaque) ?[]con
 pub const Deps = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
-    /// Caller-provided atom name resolver. Receives the atom slot index
-    /// (BindingRef.slot) and returns the source-level identifier, or null
+    /// Caller-provided atom name resolver. Receives `BindingRef.name_atom`
+    /// and returns the source-level identifier, or null
     /// if the atom is not user-declared. Used to find `intent` and to
     /// read object property keys written as identifiers.
     resolver: AtomResolver,
@@ -67,7 +67,7 @@ pub fn extract(deps: Deps) !?IntentInfo {
         const decl = deps.ir_view.getVarDecl(idx) orelse continue;
         if (decl.binding.kind != .global) continue;
 
-        const name = resolverCall(deps, decl.binding.slot) orelse continue;
+        const name = resolverCall(deps, decl.binding.name_atom) orelse continue;
         if (!std.mem.eql(u8, name, "intent")) continue;
 
         return try extractFromInit(deps, decl.init);
@@ -468,7 +468,7 @@ fn propKeyName(deps: Deps, key_idx: NodeIndex) ?[]const u8 {
         .lit_string => return literalString(deps, key_idx),
         .identifier => {
             const binding = deps.ir_view.getBinding(key_idx) orelse return null;
-            return resolverCall(deps, binding.slot);
+            return resolverCall(deps, binding.name_atom);
         },
         else => return null,
     }

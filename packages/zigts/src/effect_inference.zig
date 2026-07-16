@@ -252,7 +252,7 @@ pub const Analyzer = struct {
         exported: bool,
     ) !void {
         const func = self.ir_view.getFunction(fn_node) orelse return;
-        const name = self.resolveAtomName(binding.slot) orelse return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
         const key = bool_checker.packBindingKey(binding.scope_id, binding.slot);
         const idx = self.functions.items.len;
         try self.functions.append(self.allocator, .{
@@ -614,7 +614,7 @@ pub const Analyzer = struct {
     fn identifierName(self: *const Analyzer, node: NodeIndex) ?[]const u8 {
         if (self.ir_view.getTag(node) != .identifier) return null;
         const binding = self.ir_view.getBinding(node) orelse return null;
-        return self.resolveAtomName(binding.slot);
+        return self.resolveAtomName(binding.name_atom);
     }
 
     fn resolveAtomName(self: *const Analyzer, atom_value: u32) ?[]const u8 {

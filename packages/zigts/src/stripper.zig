@@ -128,6 +128,7 @@ pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOpt
     errdefer stripper.diagnostics.deinit(allocator);
     defer stripper.brace_stack.deinit(allocator);
     defer stripper.paren_cf_stack.deinit(allocator);
+    defer stripper.binding_name_ordinals.deinit(allocator);
     return stripper.strip();
 }
 
@@ -179,6 +180,12 @@ const Stripper = struct {
     // A `{` seen while this holds opens a destructuring pattern, where property
     // colons are renames (`{ a: localName }`), never type annotations.
     expect_binding: bool,
+    /// Per-name declaration ordinal for simple variable bindings. Downstream
+    /// code uses this name identity instead of rewritten source coordinates.
+    binding_name_ordinals: std.StringHashMapUnmanaged(u32),
+    last_binding_name_start: usize,
+    last_binding_name_end: usize,
+    last_binding_name_ordinal: ?u32,
 
     // TypeMap: records type annotations for downstream type checking
     type_map: TypeMap,
@@ -206,6 +213,10 @@ const Stripper = struct {
             .paren_cf_stack = .empty,
             .last_paren_was_cf_header = false,
             .expect_binding = false,
+            .binding_name_ordinals = .empty,
+            .last_binding_name_start = 0,
+            .last_binding_name_end = 0,
+            .last_binding_name_ordinal = null,
             .type_map = TypeMap.init(source),
         };
     }
@@ -289,10 +300,20 @@ const Stripper = struct {
         // Identifiers
         if (isIdentifierStart(c)) {
             const ident = self.scanIdentifier();
+            const was_binding = self.expect_binding;
 
             // Any identifier other than const/let/var ends a pending binding
             // position; the keyword branch below re-arms it when applicable.
             self.expect_binding = false;
+
+            if (was_binding) {
+                const gop = self.binding_name_ordinals.getOrPut(self.allocator, ident) catch return StripError.OutOfMemory;
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                self.last_binding_name_start = start;
+                self.last_binding_name_end = self.pos;
+                self.last_binding_name_ordinal = gop.value_ptr.*;
+                gop.value_ptr.* += 1;
+            }
 
             // Check for comptime() expression
             if (self.enable_comptime and std.mem.eql(u8, ident, "comptime")) {
@@ -1419,7 +1440,12 @@ const Stripper = struct {
 
         // Find the identifier name before the colon in original source
         const name_range = self.findIdentifierBefore(colon_pos);
-        self.recordTypeAnnotation(.var_annotation, type_start, type_end, name_range[0], name_range[1]);
+        const name_ordinal = if (name_range[0] == self.last_binding_name_start and
+            name_range[1] == self.last_binding_name_end)
+            self.last_binding_name_ordinal
+        else
+            null;
+        self.recordVarTypeAnnotation(type_start, type_end, name_range[0], name_range[1], name_ordinal);
 
         // Blank from colon to current position
         self.blankSpan(colon_pos, self.pos);
@@ -1938,6 +1964,26 @@ const Stripper = struct {
             .context_col = self.col,
             .name_start = @intCast(name_start),
             .name_end = @intCast(name_end),
+        }) catch {};
+    }
+
+    fn recordVarTypeAnnotation(
+        self: *Self,
+        type_start: usize,
+        type_end: usize,
+        name_start: usize,
+        name_end: usize,
+        name_ordinal: ?u32,
+    ) void {
+        self.type_map.addEntry(self.allocator, .{
+            .kind = .var_annotation,
+            .source_start = @intCast(type_start),
+            .source_end = @intCast(type_end),
+            .context_line = self.line,
+            .context_col = self.col,
+            .name_start = @intCast(name_start),
+            .name_end = @intCast(name_end),
+            .name_ordinal = name_ordinal,
         }) catch {};
     }
 

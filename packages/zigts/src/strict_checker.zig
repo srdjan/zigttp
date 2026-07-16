@@ -892,7 +892,7 @@ pub const StrictChecker = struct {
         // wrongly suppress the implicit_unknown diagnostic. Only consult it for
         // globals.
         if (binding.kind == .global or binding.kind == .undeclared_global) {
-            if (self.resolveAtomName(binding.slot)) |name| {
+            if (self.resolveAtomName(binding.name_atom)) |name| {
                 if (isKnownGlobalFunction(name)) return false;
             }
         }
@@ -1159,7 +1159,7 @@ pub const StrictChecker = struct {
     }
 
     fn isHandlerBinding(self: *const StrictChecker, binding: ir.BindingRef) bool {
-        const name = self.resolveAtomName(binding.slot) orelse return false;
+        const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "handler");
     }
 

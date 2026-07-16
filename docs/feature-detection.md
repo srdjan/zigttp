@@ -59,7 +59,7 @@ These produce helpful error messages directing users to named imports/exports:
 | `import X from "mod"` | Default imports not supported; use named imports |
 | `import * as X from "mod"` | Namespace imports not supported; use named imports |
 | `import "mod"` | Side-effect imports not supported; use named imports |
-| `export default function() {}` | Export default not supported; use named exports |
+| `export default function handler() {}` | Supported for named functions; anonymous defaults are rejected |
 | `export { x } from "mod"` | Re-exports not supported; use named exports |
 | `export * from "mod"` | Export star not supported; use named exports |
 

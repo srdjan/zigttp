@@ -44,7 +44,10 @@ fn unpackListRef(packed_value: u32) ListRef {
 /// Reference to a variable binding
 pub const BindingRef = struct {
     scope_id: ScopeId,
-    slot: u16, // Changed from u8 to support atom indices > 255
+    /// Runtime storage index: local/upvalue slot, or the global atom-backed slot.
+    slot: u16,
+    /// Binding identity. Unlike `slot`, this is an atom index for every kind.
+    name_atom: u16,
     kind: BindingKind,
 
     pub const BindingKind = enum(u3) {
@@ -59,7 +62,8 @@ pub const BindingRef = struct {
     pub fn global(atom_idx: u16) BindingRef {
         return .{
             .scope_id = 0,
-            .slot = atom_idx, // No truncation needed now
+            .slot = atom_idx,
+            .name_atom = atom_idx,
             .kind = .global,
         };
     }
@@ -868,6 +872,11 @@ pub const IRStore = struct {
     /// Compact data payloads - 8 bytes each
     data: std.ArrayListUnmanaged(DataPayload),
 
+    /// Binding-name atom for nodes that carry a BindingRef; zero otherwise.
+    /// Kept parallel to `data` so BindingRef gains an explicit identity without
+    /// repacking runtime slot/scope operands in the compact payload.
+    binding_name_atoms: std.ArrayListUnmanaged(u16),
+
     /// Extra data for variable-length content
     /// Used for: function params, object properties, switch cases, etc.
     extra: std.ArrayListUnmanaged(u32),
@@ -881,6 +890,7 @@ pub const IRStore = struct {
             .tags = .empty,
             .locs = .empty,
             .data = .empty,
+            .binding_name_atoms = .empty,
             .extra = .empty,
             .index_lists = .empty,
         };
@@ -890,6 +900,7 @@ pub const IRStore = struct {
         self.tags.deinit(self.allocator);
         self.locs.deinit(self.allocator);
         self.data.deinit(self.allocator);
+        self.binding_name_atoms.deinit(self.allocator);
         self.extra.deinit(self.allocator);
         self.index_lists.deinit(self.allocator);
     }
@@ -900,7 +911,16 @@ pub const IRStore = struct {
         try self.tags.append(self.allocator, tag);
         try self.locs.append(self.allocator, loc);
         try self.data.append(self.allocator, payload);
+        try self.binding_name_atoms.append(self.allocator, 0);
         return idx;
+    }
+
+    fn setBindingName(self: *IRStore, idx: NodeIndex, name_atom: u16) void {
+        self.binding_name_atoms.items[idx] = name_atom;
+    }
+
+    fn bindingName(self: *const IRStore, idx: NodeIndex) u16 {
+        return self.binding_name_atoms.items[idx];
     }
 
     /// Add extra data and return starting index
@@ -992,10 +1012,12 @@ pub const IRStore = struct {
     /// Add identifier reference
     pub fn addIdentifier(self: *IRStore, loc: SourceLocation, binding: BindingRef) !NodeIndex {
         // Pack binding: scope_id(16) | slot(16) in a, kind(8) in b
-        return self.addNode(.identifier, loc, .{
+        const idx = try self.addNode(.identifier, loc, .{
             .a = (@as(u32, binding.scope_id) << 16) | binding.slot,
             .b = @intFromEnum(binding.kind),
         });
+        self.setBindingName(idx, binding.name_atom);
+        return idx;
     }
 
     /// Unpack identifier binding
@@ -1004,6 +1026,7 @@ pub const IRStore = struct {
         return .{
             .scope_id = @truncate(d.a >> 16),
             .slot = @truncate(d.a),
+            .name_atom = self.bindingName(idx),
             .kind = @enumFromInt(@as(u3, @truncate(d.b))),
         };
     }
@@ -1035,7 +1058,7 @@ pub const IRStore = struct {
     /// in the parser without changing node creation code.
     pub fn add(self: *IRStore, node: Node) !NodeIndex {
         const loc = node.loc;
-        return switch (node.tag) {
+        const idx = try switch (node.tag) {
             // --- Literals ---
             .lit_int => self.addNode(.lit_int, loc, DataPayload.fromInt(node.data.int_value)),
             .lit_float => self.addNode(.lit_float, loc, .{ .a = node.data.float_idx, .b = 0 }),
@@ -1436,6 +1459,18 @@ pub const IRStore = struct {
             // --- Internal markers (no data) ---
             .param_list, .arg_list, .stmt_list => self.addNode(node.tag, loc, .{ .a = 0, .b = 0 }),
         };
+
+        const binding_name: ?u16 = switch (node.tag) {
+            .identifier => node.data.binding.name_atom,
+            .var_decl, .function_decl => node.data.var_decl.binding.name_atom,
+            .for_of_stmt, .for_in_stmt => node.data.for_iter.binding.name_atom,
+            .try_stmt => node.data.try_stmt.catch_binding.name_atom,
+            .pattern_element, .pattern_rest, .pattern_default => node.data.pattern_elem.binding.name_atom,
+            .import_specifier, .import_default, .import_namespace => node.data.import_spec.local_binding.name_atom,
+            else => null,
+        };
+        if (binding_name) |name_atom| self.setBindingName(idx, name_atom);
+        return idx;
     }
 
     /// Get a Node struct from index (for compatibility during migration)
@@ -1559,6 +1594,7 @@ test "IRStore identifier binding" {
     const binding = BindingRef{
         .scope_id = 5,
         .slot = 3,
+        .name_atom = 17,
         .kind = .upvalue,
     };
 
@@ -1567,6 +1603,7 @@ test "IRStore identifier binding" {
 
     try std.testing.expectEqual(@as(ScopeId, 5), unpacked.scope_id);
     try std.testing.expectEqual(@as(u16, 3), unpacked.slot);
+    try std.testing.expectEqual(@as(u16, 17), unpacked.name_atom);
     try std.testing.expectEqual(BindingRef.BindingKind.upvalue, unpacked.kind);
 }
 
@@ -2004,6 +2041,7 @@ pub const IrView = struct {
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
+                        .name_atom = ir.bindingName(idx),
                         .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start + 3] >> 2))),
                     },
                     .pattern = extra[extra_start + 1],
@@ -2068,6 +2106,7 @@ pub const IrView = struct {
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
+                        .name_atom = ir.bindingName(idx),
                         .kind = @enumFromInt(@as(u3, @truncate(flags >> 2))),
                     },
                     .pattern = extra[extra_start + 2],
@@ -2289,6 +2328,7 @@ pub const IrView = struct {
                     .local_binding = .{
                         .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
                         .slot = @truncate(binding_packed),
+                        .name_atom = ir.bindingName(idx),
                         .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
                     },
                 };
@@ -2351,6 +2391,7 @@ pub const IrView = struct {
                     .binding = .{
                         .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
                         .slot = @truncate(binding_packed),
+                        .name_atom = ir.bindingName(idx),
                         .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
                     },
                     .key = extra[extra_start + 2],

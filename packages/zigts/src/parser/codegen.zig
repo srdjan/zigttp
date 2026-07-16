@@ -577,7 +577,7 @@ pub const CodeGen = struct {
             },
             .global, .undeclared_global => {
                 try self.emit(.get_global);
-                try self.emitU16(binding.slot);
+                try self.emitU16(binding.name_atom);
             },
         }
         self.pushStack(1);
@@ -603,7 +603,7 @@ pub const CodeGen = struct {
             },
             .global, .undeclared_global => {
                 try self.emit(.put_global);
-                try self.emitU16(binding.slot);
+                try self.emitU16(binding.name_atom);
             },
         }
         self.popStack(1);
@@ -1365,7 +1365,7 @@ pub const CodeGen = struct {
 
         // Must be Math global (atom index)
         const math_atom: u16 = @intFromEnum(js_object.Atom.Math);
-        if (binding.slot != math_atom) return false;
+        if (binding.name_atom != math_atom) return false;
 
         // Match property to known Math methods
         const floor_atom: u16 = @intFromEnum(js_object.Atom.floor);
@@ -3007,6 +3007,34 @@ test "basic codegen" {
 
     const result = try gen.generate(lit_node);
     try std.testing.expect(result.code.len > 0);
+}
+
+test "global binding codegen uses the binding name atom" {
+    const allocator = std.testing.allocator;
+
+    var nodes = NodeList.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+
+    const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+    const global = try nodes.add(Node.identifier(loc, .{
+        .scope_id = 0,
+        .slot = 7,
+        .name_atom = 0x1234,
+        .kind = .global,
+    }));
+
+    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    defer gen.deinit();
+    const result = try gen.generate(global);
+
+    try std.testing.expect(result.code.len >= 3);
+    try std.testing.expectEqual(@intFromEnum(Opcode.get_global), result.code[0]);
+    try std.testing.expectEqual(@as(u8, 0x34), result.code[1]);
+    try std.testing.expectEqual(@as(u8, 0x12), result.code[2]);
 }
 
 test "binary op codegen" {

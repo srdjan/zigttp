@@ -358,6 +358,7 @@ pub const Parser = struct {
         const dummy_binding = BindingRef{
             .scope_id = 0,
             .slot = 255,
+            .name_atom = 0,
             .kind = .local,
         };
 
@@ -460,7 +461,7 @@ pub const Parser = struct {
                     .data = .{
                         .pattern_elem = .{
                             .kind = .object,
-                            .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                            .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
                             .key = nested, // Nested pattern
                             .key_atom = key_atom_for_binding, // property-name atom for get_field
                             .default_value = nested_default,
@@ -481,7 +482,7 @@ pub const Parser = struct {
                     .data = .{
                         .pattern_elem = .{
                             .kind = .array,
-                            .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                            .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
                             .key = nested, // Nested pattern
                             .key_atom = key_atom_for_binding, // property-name atom for get_field
                             .default_value = nested_default,
@@ -605,7 +606,7 @@ pub const Parser = struct {
                 .loc = loc,
                 .data = .{ .pattern_elem = .{
                     .kind = .object,
-                    .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                    .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
                     .key = nested,
                     .key_atom = 0,
                     .default_value = null_node,
@@ -618,7 +619,7 @@ pub const Parser = struct {
                 .loc = loc,
                 .data = .{ .pattern_elem = .{
                     .kind = .array,
-                    .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                    .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
                     .key = nested,
                     .key_atom = 0,
                     .default_value = null_node,
@@ -1470,10 +1471,25 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume 'export'
 
-        // export default - not supported
+        // export default function X() {}
         if (self.check(.kw_default)) {
-            self.errorAt(loc, "'export default' is not supported; use named exports: export function handler() {}");
-            return error.ParseError;
+            self.advance();
+            if (!self.check(.kw_function)) {
+                self.errorAt(loc, "'export default' must be followed by a named function");
+                return error.ParseError;
+            }
+            const decl = try self.parseFunctionDeclaration();
+            return try self.nodes.add(.{
+                .tag = .export_decl,
+                .loc = loc,
+                .data = .{ .export_decl = .{
+                    .kind = .default,
+                    .declaration = decl,
+                    .specifiers_start = null_node,
+                    .specifiers_count = 0,
+                    .from_module_idx = 0,
+                } },
+            });
         }
 
         // export { ... } - re-exports, not supported
@@ -1894,7 +1910,7 @@ pub const Parser = struct {
                     if (left_node.tag == .identifier) {
                         const binding = left_node.data.binding;
                         // Check if it's the builtin Object global (undeclared)
-                        if (binding.kind == .undeclared_global and binding.slot == @intFromEnum(object.Atom.Object)) {
+                        if (binding.kind == .undeclared_global and binding.name_atom == @intFromEnum(object.Atom.Object)) {
                             if (std.mem.eql(u8, prop_name, "assign")) {
                                 self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
                                 return error.ParseError;
@@ -2187,7 +2203,7 @@ pub const Parser = struct {
         const name = self.current.text(self.source);
 
         const name_atom = try self.addAtom(name);
-        const binding = self.scopes.resolveBinding(name, name_atom);
+        const binding = try self.scopes.resolveBinding(name, name_atom);
 
         // Check for removed global identifiers (allow user-declared bindings)
         if (binding.kind == .undeclared_global) {
@@ -2235,7 +2251,7 @@ pub const Parser = struct {
 
         // Just 'async' as identifier
         const name_atom = try self.addAtom("async");
-        const binding = self.scopes.resolveBinding("async", name_atom);
+        const binding = try self.scopes.resolveBinding("async", name_atom);
         return try self.nodes.add(Node.identifier(loc, binding));
     }
 
@@ -2366,7 +2382,7 @@ pub const Parser = struct {
 
                             // Shorthand - value is identifier reference
                             const name_atom = try self.addAtom(key.text(self.source));
-                            const binding = self.scopes.resolveBinding(key.text(self.source), name_atom);
+                            const binding = try self.scopes.resolveBinding(key.text(self.source), name_atom);
                             const value_node = try self.nodes.add(Node.identifier(key.location(), binding));
 
                             const prop_node = try self.nodes.add(.{
@@ -4852,7 +4868,7 @@ test "unsupported: import namespace star" {
     try std.testing.expect(false);
 }
 
-test "unsupported: export default" {
+test "export default named function" {
     const allocator = std.testing.allocator;
     const source =
         \\export default function handler() {}
@@ -4861,17 +4877,13 @@ test "unsupported: export default" {
     var parser = Parser.init(allocator, source);
     defer parser.deinit();
 
-    _ = parser.parse() catch {
-        try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "export default") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
-        return;
-    };
-
-    try std.testing.expect(false);
+    const root = try parser.parse();
+    const program = parser.nodes.get(root).?;
+    const export_idx = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
+    try std.testing.expectEqual(NodeTag.export_decl, parser.nodes.getTag(export_idx));
+    const ir_view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const export_decl = ir_view.getExportDecl(export_idx).?;
+    try std.testing.expectEqual(Node.ExportDecl.ExportKind.default, export_decl.kind);
 }
 
 test "unsupported: export re-export braces" {

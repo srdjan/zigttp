@@ -103,6 +103,12 @@ pub const GenericAlias = struct {
 // ---------------------------------------------------------------------------
 
 pub const TypeEnv = struct {
+    const NamedVarAnnotation = struct {
+        name: []const u8,
+        ordinal: u32,
+        type_idx: TypeIndex,
+    };
+
     pool: *TypePool,
     allocator: std.mem.Allocator,
 
@@ -118,8 +124,16 @@ pub const TypeEnv = struct {
     fn_signatures: std.AutoHashMapUnmanaged(u32, FunctionSig),
     /// Variable name -> declared type (for name-based lookup)
     var_types_by_name: std.StringHashMapUnmanaged(TypeIndex),
+    /// All variable annotations keyed by semantic (name, occurrence), in source order.
+    var_annotations: std.ArrayListUnmanaged(NamedVarAnnotation),
+    /// Scoped binding identity: packed(scope_id, name_atom) -> declared type.
+    var_types_by_binding: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Function name -> signature (for name-based lookup)
     fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
+    /// Source-declared function name -> signature. Kept separate from module
+    /// exports so a colliding module name cannot masquerade as a user's
+    /// function declaration while binding-local metadata is established.
+    source_fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
 
@@ -137,7 +151,10 @@ pub const TypeEnv = struct {
             .var_types = .empty,
             .fn_signatures = .empty,
             .var_types_by_name = .empty,
+            .var_annotations = .empty,
+            .var_types_by_binding = .empty,
             .fn_sigs_by_name = .empty,
+            .source_fn_sigs_by_name = .empty,
             .generic_scopes = .empty,
             .name_storage = .empty,
         };
@@ -236,7 +253,10 @@ pub const TypeEnv = struct {
         self.var_types.deinit(self.allocator);
         self.fn_signatures.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
+        self.var_annotations.deinit(self.allocator);
+        self.var_types_by_binding.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
+        self.source_fn_sigs_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
@@ -317,6 +337,7 @@ pub const TypeEnv = struct {
             self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch {};
             if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
                 self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch {};
+                self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch {};
             }
         }
     }
@@ -419,6 +440,13 @@ pub const TypeEnv = struct {
         if (tm.getNameText(entry)) |name| {
             const owned_name = self.internName(name);
             self.var_types_by_name.put(self.allocator, owned_name, type_idx) catch {};
+            if (entry.name_ordinal) |ordinal| {
+                self.var_annotations.append(self.allocator, .{
+                    .name = owned_name,
+                    .ordinal = ordinal,
+                    .type_idx = type_idx,
+                }) catch {};
+            }
         }
     }
 
@@ -587,6 +615,56 @@ pub const TypeEnv = struct {
         return cur;
     }
 
+    /// Type-aware assignability for checks that need the environment's alias
+    /// table. The pool alone cannot distinguish an object-like named type from
+    /// a named alias of a primitive.
+    pub fn isAssignableTo(self: *const TypeEnv, source: TypeIndex, target: TypeIndex) bool {
+        const target_tag = self.pool.getTag(target) orelse return false;
+        if (target_tag == .t_nullable) {
+            const source_tag = self.pool.getTag(source) orelse return false;
+            if (source_tag == .t_null or source_tag == .t_undefined) return true;
+            const target_inner = self.pool.getNullableInner(target);
+            if (source_tag == .t_nullable) {
+                return self.isAssignableTo(self.pool.getNullableInner(source), target_inner);
+            }
+            return self.isAssignableTo(source, target_inner);
+        }
+
+        if (target_tag == .t_ref and std.mem.eql(u8, self.pool.getRefName(target), "object")) {
+            return self.isObjectLike(source, 0);
+        }
+
+        return self.pool.isAssignableTo(source, target);
+    }
+
+    fn isObjectLike(self: *const TypeEnv, source: TypeIndex, depth: u8) bool {
+        const source_tag = self.pool.getTag(source) orelse return false;
+        return switch (source_tag) {
+            .t_never => true,
+            .t_record, .t_array, .t_tuple, .t_function => true,
+            .t_ref => blk: {
+                const resolved = self.resolveRef(source);
+                if (resolved != source and depth < 8) {
+                    break :blk self.isObjectLike(resolved, depth + 1);
+                }
+                // Request/WebSocket-style nominal refs have no definition in
+                // TypeEnv, so unresolved named refs are pragmatically object-like.
+                // This over-accepts an unresolved primitive alias such as
+                // `type Foo = string`; aliases present in TypeEnv resolve above.
+                break :blk true;
+            },
+            .t_union => blk: {
+                const members = self.pool.getUnionMembers(source);
+                if (members.len == 0) break :blk false;
+                for (members) |member| {
+                    if (!self.isObjectLike(member, depth)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
     /// Resolve a type to a record: a record passes through, a named ref resolves
     /// via resolveRef (following alias chains), otherwise null_type_idx. Used by
     /// the utility-type path to find the source object's fields.
@@ -602,9 +680,37 @@ pub const TypeEnv = struct {
         return self.var_types_by_name.get(name);
     }
 
+    /// Resolve one declaration annotation by semantic name occurrence.
+    pub fn getVarTypeByNameOrdinal(self: *const TypeEnv, name: []const u8, ordinal: u32) ?TypeIndex {
+        for (self.var_annotations.items) |annotation| {
+            if (annotation.ordinal == ordinal and std.mem.eql(u8, annotation.name, name)) {
+                return annotation.type_idx;
+            }
+        }
+        return null;
+    }
+
+    pub fn varAnnotationCount(self: *const TypeEnv) usize {
+        return self.var_annotations.items.len;
+    }
+
+    pub fn bindVarType(self: *TypeEnv, scope_id: u16, name_atom: u16, type_idx: TypeIndex) !void {
+        try self.var_types_by_binding.put(self.allocator, packBindingNameKey(scope_id, name_atom), type_idx);
+    }
+
+    pub fn getVarTypeByBinding(self: *const TypeEnv, scope_id: u16, name_atom: u16) ?TypeIndex {
+        return self.var_types_by_binding.get(packBindingNameKey(scope_id, name_atom));
+    }
+
     /// Look up a function signature by name.
     pub fn getFnSigByName(self: *const TypeEnv, name: []const u8) ?FunctionSig {
         return self.fn_sigs_by_name.get(name);
+    }
+
+    /// Look up only a signature declared by the checked source. Module export
+    /// signatures deliberately do not participate in this lookup.
+    pub fn getSourceFnSigByName(self: *const TypeEnv, name: []const u8) ?FunctionSig {
+        return self.source_fn_sigs_by_name.get(name);
     }
 
     /// Look up a type alias by name.
@@ -818,6 +924,10 @@ pub const TypeEnv = struct {
 fn packLocationKey(line: u32, col: u32) u32 {
     // Pack line (20 bits) + col (12 bits) into u32
     return (line << 12) | (col & 0xFFF);
+}
+
+fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {
+    return (@as(u32, scope_id) << 16) | name_atom;
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1541,43 @@ test "resolveType Required<Conf> clears optional and rejects a missing field" {
 
     const subset = parseTypeExpr(&pool, allocator, "{ host: string }");
     try std.testing.expect(!pool.isAssignableTo(subset, req));
+}
+
+test "TypeEnv object assignability accepts non-primitives and resolves known aliases" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const object_ref = pool.addRef(allocator, "object");
+    const optional_object = pool.addNullable(allocator, object_ref);
+    const record = parseTypeExpr(&pool, allocator, "{ id: number }");
+    const array = pool.addArray(allocator, pool.idx_number);
+    const function = pool.addFunctionWithReturn(allocator, &.{}, pool.idx_undefined);
+    const request_ref = pool.addRef(allocator, "Request");
+    const nullable_request = pool.addNullable(allocator, request_ref);
+
+    try std.testing.expect(env.isAssignableTo(record, object_ref));
+    try std.testing.expect(env.isAssignableTo(array, object_ref));
+    try std.testing.expect(env.isAssignableTo(function, object_ref));
+    try std.testing.expect(env.isAssignableTo(request_ref, object_ref));
+
+    try std.testing.expect(!env.isAssignableTo(pool.idx_string, object_ref));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_number, object_ref));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_boolean, object_ref));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_undefined, object_ref));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_null, object_ref));
+    try std.testing.expect(!env.isAssignableTo(pool.addLiteralString(allocator, "x"), object_ref));
+    try std.testing.expect(!env.isAssignableTo(nullable_request, object_ref));
+
+    try std.testing.expect(env.isAssignableTo(request_ref, optional_object));
+    try std.testing.expect(env.isAssignableTo(nullable_request, optional_object));
+    try std.testing.expect(env.isAssignableTo(pool.idx_undefined, optional_object));
+
+    env.type_aliases.put(allocator, env.internName("StringAlias"), pool.idx_string) catch unreachable;
+    const string_alias = pool.addRef(allocator, "StringAlias");
+    try std.testing.expect(!env.isAssignableTo(string_alias, object_ref));
 }
 
 test "TypeEnv registers Spec<S> built-in alias on init" {

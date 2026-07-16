@@ -1091,7 +1091,7 @@ pub const ContractBuilder = struct {
             const init_tag = self.ir_view.getTag(decl.init) orelse continue;
             if (init_tag != .function_expr and init_tag != .arrow_function) continue;
 
-            const name = self.resolveAtomName(decl.binding.slot) orelse continue;
+            const name = self.resolveAtomName(decl.binding.name_atom) orelse continue;
             if (std.mem.eql(u8, name, "onOpen")) {
                 self.websocket.on_open = true;
             } else if (std.mem.eql(u8, name, "onMessage")) {
@@ -1254,7 +1254,7 @@ pub const ContractBuilder = struct {
 
                 // Check for fetchSync (undeclared global)
                 if (binding.kind == .undeclared_global) {
-                    const name = self.resolveAtomName(binding.slot) orelse continue;
+                    const name = self.resolveAtomName(binding.name_atom) orelse continue;
                     if (std.mem.eql(u8, name, "fetchSync")) {
                         try self.extractLiteralArg(call, .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic }, &extractHost);
                         try self.extractLiteralArg(call, .{ .list = &self.egress_urls, .dynamic = &self.egress_dynamic }, null);
@@ -1268,7 +1268,7 @@ pub const ContractBuilder = struct {
                 // system linker's hypermedia resolution (fail-closed: a non-literal
                 // affordances arg marks the contract affordances_dynamic).
                 if (binding.kind == .global or binding.kind == .undeclared_global) {
-                    if (self.resolveAtomName(binding.slot)) |name| {
+                    if (self.resolveAtomName(binding.name_atom)) |name| {
                         if (std.mem.eql(u8, name, "resource")) {
                             try self.extractAffordances(call);
                             continue;
@@ -1332,7 +1332,7 @@ pub const ContractBuilder = struct {
                 if (obj_tag == .identifier) {
                     const binding = self.ir_view.getBinding(member.object) orelse continue;
                     if (binding.kind == .global or binding.kind == .undeclared_global) {
-                        const obj_name = self.resolveAtomName(binding.slot) orelse continue;
+                        const obj_name = self.resolveAtomName(binding.name_atom) orelse continue;
                         const prop_name = self.resolveAtomName(member.property) orelse continue;
                         const is_date_now = std.mem.eql(u8, obj_name, "Date") and std.mem.eql(u8, prop_name, "now");
                         const is_math_random = std.mem.eql(u8, obj_name, "Math") and std.mem.eql(u8, prop_name, "random");
@@ -1814,7 +1814,7 @@ pub const ContractBuilder = struct {
         }
 
         if (binding.kind == .global or binding.kind == .undeclared_global) {
-            const name = self.resolveAtomName(binding.slot) orelse return false;
+            const name = self.resolveAtomName(binding.name_atom) orelse return false;
             return std.mem.eql(u8, name, expected);
         }
 
@@ -2373,7 +2373,7 @@ pub const ContractBuilder = struct {
         const binding = self.ir_view.getBinding(member.object) orelse return false;
         if (binding.kind != .undeclared_global) return false;
 
-        const obj_name = self.resolveAtomName(binding.slot) orelse return false;
+        const obj_name = self.resolveAtomName(binding.name_atom) orelse return false;
         if (!std.mem.eql(u8, obj_name, "Response")) return false;
 
         const method_name = self.resolveAtomName(member.property) orelse return false;
@@ -2537,7 +2537,7 @@ pub const ContractBuilder = struct {
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.slot != @intFromEnum(object.Atom.JSON)) return null;
+        if (binding.name_atom != @intFromEnum(object.Atom.JSON)) return null;
 
         return self.ir_view.getListIndex(call.args_start, 0);
     }
@@ -2631,7 +2631,7 @@ pub const ContractBuilder = struct {
             .lit_string => self.getLiteralString(key_idx),
             .identifier => blk: {
                 const binding = self.ir_view.getBinding(key_idx) orelse break :blk null;
-                break :blk self.resolveAtomName(binding.slot);
+                break :blk self.resolveAtomName(binding.name_atom);
             },
             else => null,
         };
@@ -3244,7 +3244,7 @@ pub const ContractBuilder = struct {
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
                     if (self.isBindingCategory(binding.slot, .request_schema)) {
-                        const fn_name = self.resolveAtomName(binding.slot);
+                        const fn_name = self.resolveAtomName(binding.name_atom);
                         const is_decode_query = fn_name != null and std.mem.eql(u8, fn_name.?, "decodeQuery");
 
                         if (!is_decode_query) {
@@ -3350,7 +3350,7 @@ pub const ContractBuilder = struct {
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
+        if (binding.name_atom != @intFromEnum(object.Atom.Response)) return null;
 
         var candidate = ResponseSchemaCandidate{};
         errdefer candidate.deinit(self.allocator);
@@ -4037,7 +4037,7 @@ pub const ContractBuilder = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (binding.kind == .undeclared_global) {
-            const name = self.resolveAtomName(binding.slot) orelse return;
+            const name = self.resolveAtomName(binding.name_atom) orelse return;
             if (std.mem.eql(u8, name, "fetchSync")) {
                 summary.includeEgress();
                 return;
@@ -4316,7 +4316,7 @@ fn findTestFunctionNode(view: IrView, atoms: *context.AtomTable, name: []const u
         switch (tag) {
             .function_decl, .var_decl => {
                 const decl = view.getVarDecl(idx) orelse continue;
-                const binding_name = resolveTestAtomName(atoms, decl.binding.slot) orelse continue;
+                const binding_name = resolveTestAtomName(atoms, decl.binding.name_atom) orelse continue;
                 if (!std.mem.eql(u8, binding_name, name)) continue;
                 if (decl.init == null_node) return null;
                 const init_tag = view.getTag(decl.init) orelse return null;
