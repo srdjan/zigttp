@@ -131,9 +131,49 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
                     };
                 }
                 const upvalue_count = code[pc + 3];
-                if (upvalue_count > 0 and func.upvalue_count == 0) {
-                    // This is a closure creation, not a self-reference check
-                    // The upvalue_count in the instruction refers to the child function's upvalues
+                const child_value = func.constants[func_idx];
+                if (!child_value.isExternPtr()) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.ConstantIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "make_closure constant is not function bytecode",
+                    };
+                }
+                const child = child_value.toExternPtr(FunctionBytecode);
+                if (child.header.magic != bytecode.MAGIC) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.ConstantIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "make_closure constant is not function bytecode",
+                    };
+                }
+                if (upvalue_count != child.upvalue_count or upvalue_count != child.upvalue_info.len) {
+                    return .{
+                        .valid = false,
+                        .err = VerifyError.UpvalueIndexOutOfBounds,
+                        .offset = pc,
+                        .message = "make_closure upvalue count does not match child metadata",
+                    };
+                }
+                for (child.upvalue_info) |upvalue| {
+                    if (upvalue.is_local and upvalue.index >= func.local_count) {
+                        return .{
+                            .valid = false,
+                            .err = VerifyError.LocalIndexOutOfBounds,
+                            .offset = pc,
+                            .message = "closure local capture index out of bounds",
+                        };
+                    }
+                    if (!upvalue.is_local and upvalue.index >= func.upvalue_count) {
+                        return .{
+                            .valid = false,
+                            .err = VerifyError.UpvalueIndexOutOfBounds,
+                            .offset = pc,
+                            .message = "closure upvalue capture index out of bounds",
+                        };
+                    }
                 }
             },
             // Inline-cache index validation. get_field_ic/put_field_ic index
@@ -636,6 +676,131 @@ test "verify: constant index out of bounds rejected" {
     const result = verify(&func);
     try std.testing.expect(!result.valid);
     try std.testing.expectEqual(VerifyError.ConstantIndexOutOfBounds, result.err.?);
+}
+
+test "verify: make_closure rejects declared upvalues beyond child metadata" {
+    const child_upvalues = [_]bytecode.UpvalueInfo{
+        .{ .is_local = true, .index = 0 },
+    };
+    var child = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .upvalue_count = 1,
+        .upvalue_info = &child_upvalues,
+        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const constants = [_]value.JSValue{value.JSValue.fromExternPtr(&child)};
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 1,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.make_closure),
+            0x00, 0x00, // child function constant index 0
+            0x02, // declares 2 upvalues, child has 1 descriptor
+            @intFromEnum(Opcode.drop),
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.UpvalueIndexOutOfBounds, result.err.?);
+}
+
+test "verify: make_closure rejects child local descriptor outside parent locals" {
+    const child_upvalues = [_]bytecode.UpvalueInfo{
+        .{ .is_local = true, .index = 1 },
+    };
+    var child = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .upvalue_count = 1,
+        .upvalue_info = &child_upvalues,
+        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const constants = [_]value.JSValue{value.JSValue.fromExternPtr(&child)};
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 1,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.make_closure),
+            0x00,                               0x00, // child function constant index 0
+            0x01,                               @intFromEnum(Opcode.drop),
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.LocalIndexOutOfBounds, result.err.?);
+}
+
+test "verify: make_closure rejects child upvalue descriptor outside parent upvalues" {
+    const child_upvalues = [_]bytecode.UpvalueInfo{
+        .{ .is_local = false, .index = 1 },
+    };
+    var child = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .upvalue_count = 1,
+        .upvalue_info = &child_upvalues,
+        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+    const constants = [_]value.JSValue{value.JSValue.fromExternPtr(&child)};
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 256,
+        .flags = .{},
+        .upvalue_count = 1,
+        .code = &.{
+            @intFromEnum(Opcode.make_closure),
+            0x00,                               0x00, // child function constant index 0
+            0x01,                               @intFromEnum(Opcode.drop),
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &constants,
+        .source_map = null,
+        .line_table = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqual(VerifyError.UpvalueIndexOutOfBounds, result.err.?);
 }
 
 test "verify: stack underflow rejected" {
