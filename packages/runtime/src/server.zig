@@ -956,19 +956,21 @@ const ConnectionPool = struct {
         // and RFC 7231 forbids a body on a HEAD response (a client reading it
         // would mis-frame the next response on a keep-alive connection).
         if (!is_head) {
-            if (response.prebuilt_raw) |prebuilt| {
-                // Only take the zero-construction fast path when attestation is off.
-                // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
-                // so when attestation is active we must fall through to the normal
-                // builder; otherwise a constant-Response handler would ship attestation
-                // headers on close connections but drop them on keep-alive, making
-                // their presence unpredictable for a third-party `zigttp verify`.
-                if (keep_alive and self.server.attestation_headers == null) {
-                    // Prebuilt response already has keep-alive, write directly
-                    try writeAllFd(fd, prebuilt);
-                    return;
+            if (response_mod.statusAllowsBody(response.status)) {
+                if (response.prebuilt_raw) |prebuilt| {
+                    // Only take the zero-construction fast path when attestation is off.
+                    // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
+                    // so when attestation is active we must fall through to the normal
+                    // builder; otherwise a constant-Response handler would ship attestation
+                    // headers on close connections but drop them on keep-alive, making
+                    // their presence unpredictable for a third-party `zigttp verify`.
+                    if (keep_alive and self.server.attestation_headers == null) {
+                        // Prebuilt response already has keep-alive, write directly
+                        try writeAllFd(fd, prebuilt);
+                        return;
+                    }
+                    // For close (or when attestation is active) fall through to normal path.
                 }
-                // For close (or when attestation is active) fall through to normal path.
             }
         }
 
@@ -990,6 +992,11 @@ const ConnectionPool = struct {
             return;
         }
 
+        if (!response_mod.statusAllowsBody(response.status)) {
+            try writeAllFd(fd, header_buf[0..pos]);
+            return;
+        }
+
         // OPTIMIZATION: Combine headers + body in single syscall
         if (response.body.len > 0 and pos + response.body.len <= header_buf.len) {
             // Body fits in remaining buffer space - single memcpy + write
@@ -1007,6 +1014,70 @@ const ConnectionPool = struct {
             // Empty body - just headers
             try writeAllFd(fd, header_buf[0..pos]);
         }
+    }
+
+    test "sendResponseSync suppresses forbidden bodies and preserves 200 and HEAD framing" {
+        const readResponse = struct {
+            fn read(writer_fd: std.posix.fd_t, reader_fd: std.posix.fd_t, buf: []u8) !usize {
+                _ = std.c.shutdown(writer_fd, std.c.SHUT.WR);
+                var len: usize = 0;
+                while (len < buf.len) {
+                    const n = try std.posix.read(reader_fd, buf[len..]);
+                    if (n == 0) break;
+                    len += n;
+                }
+                return len;
+            }
+        }.read;
+
+        var server: Server = undefined;
+        server.attestation_headers = null;
+        var pool = ConnectionPool{
+            .workers = &[_]std.Thread{},
+            .queue = ConnectionPool.BoundedQueue.init(),
+            .running = std.atomic.Value(bool).init(true),
+            .server = &server,
+            .allocator = std.testing.allocator,
+        };
+
+        const forbidden_statuses = [_]u16{ 103, 204, 304 };
+        for (forbidden_statuses) |status| {
+            var response = HttpResponse.init(std.testing.allocator);
+            defer response.deinit();
+            response.status = status;
+            response.body = "unexpected body";
+            response.prebuilt_raw = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: keep-alive\r\n\r\nunexpected body";
+
+            const fds = try createUnixSocketPair();
+            defer std.Io.Threaded.closeFd(fds[0]);
+            defer std.Io.Threaded.closeFd(fds[1]);
+            try pool.sendResponseSync(fds[0], &response, true, false);
+
+            var buf: [512]u8 = undefined;
+            const n = try readResponse(fds[0], fds[1], &buf);
+            try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "Content-Length:") == null);
+            try std.testing.expect(std.mem.endsWith(u8, buf[0..n], "\r\n\r\n"));
+        }
+
+        var response = HttpResponse.init(std.testing.allocator);
+        defer response.deinit();
+        response.body = "hello";
+
+        const get_fds = try createUnixSocketPair();
+        defer std.Io.Threaded.closeFd(get_fds[0]);
+        defer std.Io.Threaded.closeFd(get_fds[1]);
+        try pool.sendResponseSync(get_fds[0], &response, true, false);
+        var get_buf: [512]u8 = undefined;
+        const get_n = try readResponse(get_fds[0], get_fds[1], &get_buf);
+        try std.testing.expect(std.mem.endsWith(u8, get_buf[0..get_n], "Content-Length: 5\r\nConnection: keep-alive\r\n\r\nhello"));
+
+        const head_fds = try createUnixSocketPair();
+        defer std.Io.Threaded.closeFd(head_fds[0]);
+        defer std.Io.Threaded.closeFd(head_fds[1]);
+        try pool.sendResponseSync(head_fds[0], &response, true, true);
+        var head_buf: [512]u8 = undefined;
+        const head_n = try readResponse(head_fds[0], head_fds[1], &head_buf);
+        try std.testing.expect(std.mem.endsWith(u8, head_buf[0..head_n], "Content-Length: 5\r\nConnection: keep-alive\r\n\r\n"));
     }
 
     /// Map a request-parse error to an HTTP status. Takes `anyerror` so it can
