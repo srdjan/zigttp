@@ -131,6 +131,10 @@ pub fn appendContentLengthHeader(buf: []u8, pos: *usize, body_len: usize) !void 
     pos.* += line.len;
 }
 
+pub fn statusAllowsBody(status: u16) bool {
+    return status < 100 or status >= 200 and status != 204 and status != 304;
+}
+
 pub fn appendConnectionHeader(buf: []u8, pos: *usize, keep_alive: bool) !void {
     const line = if (keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
     if (pos.* + line.len > buf.len) return error.BufferOverflow;
@@ -161,11 +165,15 @@ pub fn buildDynamicResponseHeader(
                 try appendHeaderLine(buf, &pos, header.key, header.value);
             }
             pos = try appendAttestationHeaders(attestation_headers, buf, pos);
-            try appendContentLengthHeader(buf, &pos, response.body.len);
+            if (statusAllowsBody(response.status)) {
+                try appendContentLengthHeader(buf, &pos, response.body.len);
+            }
             try appendConnectionHeader(buf, &pos, keep_alive);
         },
         .evented => {
-            try appendContentLengthHeader(buf, &pos, response.body.len);
+            if (statusAllowsBody(response.status)) {
+                try appendContentLengthHeader(buf, &pos, response.body.len);
+            }
             try appendConnectionHeader(buf, &pos, keep_alive);
             for (response.headers.items) |header| {
                 if (isFramingHeader(header.key)) continue;
@@ -194,7 +202,7 @@ pub fn formatWellKnownHeaders(
     if (cached) {
         const out = try std.fmt.bufPrint(
             header_buf,
-            "HTTP/1.1 304 Not Modified\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\nContent-Length: 0\r\n\r\n",
+            "HTTP/1.1 304 Not Modified\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\n\r\n",
             .{ doc.etag_hex, attest_well_known.cache_max_age_seconds, conn },
         );
         return out.len;
@@ -229,6 +237,9 @@ pub fn appendAttestationHeaders(
 
 pub fn getStatusText(status: u16) []const u8 {
     return switch (status) {
+        100 => "Continue",
+        101 => "Switching Protocols",
+        103 => "Early Hints",
         200 => "OK",
         201 => "Created",
         204 => "No Content",
@@ -315,7 +326,54 @@ test "appendAttestationHeaders: BufferOverflow when buf too small" {
 }
 
 test "get status text" {
+    try std.testing.expectEqualStrings("Continue", getStatusText(100));
     try std.testing.expectEqualStrings("OK", getStatusText(200));
     try std.testing.expectEqualStrings("Not Found", getStatusText(404));
     try std.testing.expectEqualStrings("Internal Server Error", getStatusText(500));
+}
+
+test "dynamic response headers omit content length when status forbids a body" {
+    const statuses = [_]u16{ 103, 204, 304 };
+
+    for (statuses) |status| {
+        var response = HttpResponse.init(std.testing.allocator);
+        defer response.deinit();
+        response.status = status;
+        response.body = "unexpected body";
+
+        inline for (std.meta.tags(DynamicHeaderOrder)) |order| {
+            var buf: [256]u8 = undefined;
+            const len = try buildDynamicResponseHeader(&buf, &response, true, null, order);
+            try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
+        }
+    }
+}
+
+test "dynamic 200 response header keeps content length" {
+    var response = HttpResponse.init(std.testing.allocator);
+    defer response.deinit();
+    response.body = "hello";
+
+    var buf: [256]u8 = undefined;
+    const len = try buildDynamicResponseHeader(&buf, &response, true, null, .sync);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length: 5\r\n") != null);
+}
+
+test "static 304 response remains bodyless without content length" {
+    var buf: [256]u8 = undefined;
+    const response = try formatStaticNotModified(&buf, "\"etag\"", true);
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 304 Not Modified\r\nETag: \"etag\"\r\nConnection: keep-alive\r\n\r\n",
+        response,
+    );
+}
+
+test "well-known 304 omits content length" {
+    const doc = attest_well_known.Doc{
+        .body = "representation",
+        .etag_hex = [_]u8{'a'} ** 64,
+    };
+    var buf: [512]u8 = undefined;
+    const len = try formatWellKnownHeaders(&doc, true, true, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
 }
