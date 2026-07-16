@@ -9,6 +9,7 @@
 //!   zig build run -- --replay traces.jsonl handler_v2.ts   (diff mode)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zigts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
@@ -25,8 +26,9 @@ const trace = zq.trace;
 pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     const replay_path = config.runtime_config.replay_file_path orelse return error.NoReplayFile;
 
-    const groups = try loadTraceGroups(allocator, replay_path);
-    defer freeTraceGroups(allocator, groups);
+    var loaded = try loadTraceGroups(allocator, replay_path);
+    defer loaded.deinit(allocator);
+    const groups = loaded.groups;
 
     if (groups.len == 0) {
         std.log.info("No traces found in '{s}'\n", .{replay_path});
@@ -79,7 +81,12 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
 
     if (summary.identical == summary.total) {
         std.log.info("\nAll {d} traces passed.\n", .{summary.total});
+        return;
     }
+    for (results.items) |result| {
+        if (result.err != null) return error.ReplayExecutionFailed;
+    }
+    return error.ReplayVerificationFailed;
 }
 
 /// Replay a single parsed trace group against an in-memory handler.
@@ -303,14 +310,27 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
 }
 
-fn loadTraceGroups(allocator: std.mem.Allocator, replay_path: []const u8) ![]trace.RequestTraceGroup {
+const LoadedTraceGroups = struct {
+    source: []const u8,
+    groups: []trace.RequestTraceGroup,
+
+    fn deinit(self: *LoadedTraceGroups, allocator: std.mem.Allocator) void {
+        freeTraceGroups(allocator, self.groups);
+        allocator.free(self.source);
+    }
+};
+
+fn loadTraceGroups(allocator: std.mem.Allocator, replay_path: []const u8) !LoadedTraceGroups {
     const trace_source = readFile(allocator, replay_path) catch |err| {
-        std.log.err("Failed to read trace file '{s}': {}", .{ replay_path, err });
+        if (!builtin.is_test) std.log.err("Failed to read trace file '{s}': {}", .{ replay_path, err });
         return err;
     };
-    defer allocator.free(trace_source);
+    errdefer allocator.free(trace_source);
 
-    return trace.parseTraceFile(allocator, trace_source);
+    return .{
+        .source = trace_source,
+        .groups = try trace.parseTraceFile(allocator, trace_source),
+    };
 }
 
 fn freeTraceGroups(allocator: std.mem.Allocator, groups: []trace.RequestTraceGroup) void {
@@ -530,4 +550,66 @@ test "replay does not flag matching arguments (#5 control)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqual(@as(u32, 0), try replaySha256ArgDivergences(arena.allocator(), "AAA"));
+}
+
+const replay_exit_test_trace =
+    \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+    \\{"type":"response","status":200,"headers":{},"body":"{\"ok\":true}"}
+    \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+;
+
+fn replayExitTestPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
+    return std.fs.path.join(allocator, &.{ root_buf[0..root_len], "trace.jsonl" });
+}
+
+test "replay mismatch returns verification failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_exit_test_trace });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: false }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, config));
+}
+
+test "replay hard error stays distinct from verification failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.FileNotFound, run(allocator, config));
+}
+
+test "all-identical replay returns success" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_exit_test_trace });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try run(allocator, config);
 }

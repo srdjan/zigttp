@@ -761,28 +761,33 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
             root_owned = false;
             ctx.gc_state.removeRootAt(compensate_root);
             // Roll back completed steps in reverse declaration order.
+            var compensation: SagaCompensation = .{};
             var j = completed.items.len;
             while (j > 0) {
                 j -= 1;
                 const c = completed.items[j];
                 const compensate = ctx.gc_state.getRoot(c.compensate_root);
-                if (!compensate.isCallable()) continue;
+                if (!compensate.isCallable()) {
+                    compensation.skipped = true;
+                    continue;
+                }
+                compensation.ran = true;
                 const undo_name = try std.fmt.allocPrint(arena, "undo:{s}", .{c.name});
                 const undo_result = try durable_executor.durableStep(rt, ctx, undo_name, compensate);
                 if (!sagaStepSucceeded(rt, undo_result)) {
-                    return buildSagaResponse(rt, 500, false, name, c.name);
+                    return buildSagaResponse(rt, 500, false, name, c.name, .{});
                 }
             }
             const failed_status = extractResponseStatus(rt, result);
             const status: u16 = if (failed_status >= 400) failed_status else 500;
-            return buildSagaResponse(rt, status, false, name, null);
+            return buildSagaResponse(rt, status, false, name, null, compensation);
         }
 
         try completed.append(arena, .{ .name = name, .compensate_root = compensate_root });
         root_owned = false;
     }
 
-    return buildSagaResponse(rt, 200, true, null, null);
+    return buildSagaResponse(rt, 200, true, null, null, .{});
 }
 
 /// A saga step succeeds iff its result is a Response with a 1xx-3xx status. A
@@ -796,9 +801,14 @@ fn sagaStepSucceeded(rt: *Runtime, result: zq.JSValue) bool {
 
 /// Build saga's summary Response - always freshly constructed so the live and
 /// replay results are byte-identical. 200 {ok:true} on full success; the failed
-/// step's status with {ok:false,failed,compensated:true} after a clean rollback;
+/// step's status with whether compensation ran and whether any was skipped;
 /// 500 {ok:false,failed,compensationFailed} when a compensation itself failed.
-fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, comp_failed: ?[]const u8) !zq.JSValue {
+const SagaCompensation = struct {
+    ran: bool = false,
+    skipped: bool = false,
+};
+
+fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, comp_failed: ?[]const u8, compensation: SagaCompensation) !zq.JSValue {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(rt.allocator);
     try body.appendSlice(rt.allocator, "{\"ok\":");
@@ -813,12 +823,93 @@ fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, c
         try appendEscapedJson(&body, rt.allocator, c);
         try body.append(rt.allocator, '"');
     } else if (failed != null) {
-        try body.appendSlice(rt.allocator, ",\"compensated\":true");
+        try body.appendSlice(rt.allocator, if (compensation.ran) ",\"compensated\":true" else ",\"compensated\":false");
+        if (compensation.skipped) {
+            try body.appendSlice(rt.allocator, ",\"compensationSkipped\":true");
+        }
     }
     try body.append(rt.allocator, '}');
 
     const created = try createFetchResponse(rt, status, statusTextFor(status), body.items, "application/json");
     return created.value;
+}
+
+fn runSagaForTest(allocator: std.mem.Allocator, durable_dir: []const u8, key: []const u8, handler_code: []const u8) !struct { status: u16, body: []u8, oplog: []u8 } {
+    var system = SystemRuntime.init(allocator);
+    defer system.deinit();
+
+    const rt = try Runtime.init(allocator, .{
+        .durable_oplog_dir = durable_dir,
+        .system_registry = @ptrCast(&system),
+    });
+    defer rt.deinit();
+    try rt.loadHandler(handler_code, "<saga-compensation-test>");
+
+    const request = HttpRequestView{ .method = "GET", .url = "/", .headers = .empty, .body = null };
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    const path = try durable_executor.buildDurableOplogPath(rt, key);
+    defer allocator.free(path);
+    return .{
+        .status = response.status,
+        .body = try allocator.dupe(u8, response.body),
+        .oplog = try zq.file_io.readFile(allocator, path, 1024 * 1024),
+    };
+}
+
+test "workflow.saga does not report clean compensation when compensator is non-callable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var durable_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("saga:non-callable", () => saga([
+        \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: 42 },
+        \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
+        \\  ]));
+        \\}
+    ;
+    const out = try runSagaForTest(allocator, durable_buf[0..durable_len], "saga:non-callable", handler_code);
+
+    try std.testing.expectEqual(@as(u16, 402), out.status);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensated\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensationSkipped\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:reserve") == null);
+}
+
+test "workflow.saga still reports successful compensation when compensator runs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var durable_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("saga:callable", () => saga([
+        \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: () => Response.json({ undone: true }) },
+        \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
+        \\  ]));
+        \\}
+    ;
+    const out = try runSagaForTest(allocator, durable_buf[0..durable_len], "saga:callable", handler_code);
+
+    try std.testing.expectEqual(@as(u16, 402), out.status);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensated\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "compensationSkipped") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:reserve") != null);
 }
 
 /// Bounds the size of a `fanout()` call array. `dispatchAllToPartsArray` below
