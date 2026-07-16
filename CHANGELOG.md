@@ -6,6 +6,99 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-16
+
+Security, memory-correctness and expert-agent release. The diagnostic rule
+registry and semantics registry are unchanged from 0.17.0 (same policy hash
+`3e0ca140...` and semantics hash `f7b6a0fb...`), so no proof obligation moved -
+but the engine, runtime and type checker all did. Upgrade if you deploy
+self-extracting binaries: this release closes an attestation hole and a
+long-standing use-after-free in runtime teardown.
+
+### Security
+
+- The embedded runtime policy is now covered by the signed proof receipt. The
+  JWS committed to the contract and bytecode hashes but never to payload
+  section 4 - the env/egress/cache/sql allowlist the sandbox actually enforces.
+  Two claim names looked like they covered it and did not: `policy_sha256` is
+  the analyzer's rule-registry hash and `capability_hash` is the
+  clock/crypto/random matrix. Section 4's only guard was CRC-32, which the
+  source already described as "an accidental-corruption check, not an integrity
+  control", so an attacker with write access to the artifact could widen egress,
+  recompute the CRC, and keep serving a valid `Zigttp-Attest` envelope while
+  enforcing the widened policy. A new `runtime_policy_sha256` claim binds the
+  exact serialized section-4 bytes, and startup fails closed on a mismatch.
+  **Artifacts built before this release carry an unpinned claim and are refused
+  with a rebuild message; rebuild and redeploy them.** Stripping the attestation
+  entirely still works and remains honest: no headers, no claim.
+- Malformed embedded contracts now fail closed. A contract that would not parse
+  was logged and ignored, silently disabling env-var validation, the route
+  pre-filter, proof-cache eligibility and attestation setup. An absent contract
+  is still legal; only present-but-unparseable is fatal.
+- In-process system targets (`--system`) are now sandboxed by their own
+  contract-derived policy instead of inheriting the entry handler's. A target
+  declaring narrower egress silently ran with the orchestrator's wider
+  allowlist; a target whose contract cannot be extracted is now refused rather
+  than falling back to inheritance.
+- The edge server (`-Dedge`) now bounds the *encoded* size of a chunked body and
+  parses it resumably. It capped only the decoded payload, so many tiny chunks
+  carrying large chunk-extension size-lines could drive unbounded buffer growth
+  while staying under `max_body_size`, and it reparsed the whole body from byte
+  zero on every read. The main server already did both; the cap rule now lives
+  in one place and both servers use it. Also closes a bypass in the main server:
+  the cap was only checked when parsing was incomplete, so a read that both
+  crossed the cap and finished the body was never checked.
+
+### Fixed
+
+- Use-after-free in runtime teardown, the root cause of the Linux glibc heap
+  corruption ("double free or corruption (fasttop)",
+  "malloc_consolidate(): unaligned fastbin chunk") that had 27 tests gated off
+  on Linux with no isolated cause. `Context.deinit` freed tracked builtins in
+  registration order, but builtins form a *graph*: nine held a `.prototype`
+  pointing at an object the same teardown had already freed, and
+  `destroyBuiltin` then dereferenced the freed header. Teardown is now two-phase
+  - scrub every root's slots, then free - which is allocation-free and
+  order-independent. All 27 tests are un-gated. Deployed binaries were latent
+  rather than aborting (`runtime_cli` uses `smp_allocator`, never
+  `c_allocator`), but it was UB on every teardown.
+- Responses with 1xx, 204 or 304 statuses no longer emit a body or a
+  `Content-Length`. Framing derived Content-Length from the body for every
+  status and suppressed the body only for HEAD, so `Response.json(data,
+  {status: 204})` shipped a 204 with a JSON body - a keep-alive framing hazard
+  per RFC 9112 6.2. 1xx statuses also rendered as `HTTP/1.1 100 Unknown`.
+- `&&`, `||` and `??` now infer the operand types they actually return
+  (`A | B`, and `NonNullable<A> | B`) instead of `boolean` and a discarded
+  fallback. This was unsound in both directions: `const s: string = x && y` was
+  falsely rejected, while `const b: boolean = x && y` was accepted and held a
+  string at runtime. Union construction now flattens and dedupes, and a latent
+  silent truncation that dropped union members past a fixed 32-member cap is
+  gone.
+- `io.race()` returns each thunk's final fetch instead of an intermediate one. A
+  thunk performing two fetches (auth, then the real request) registered two
+  descriptors and the intermediate response could win, because the winner was
+  chosen by descriptor order rather than by thunk. Declaration-order (not
+  wall-clock) selection is unchanged - that determinism is what makes `race()`
+  replayable.
+- Dead-run quarantine no longer fails open on filesystem errors. The existence
+  check reported EACCES/EIO/OOM as "missing", defeating a recovery path that
+  documents itself as fail-closed and letting quarantined work re-run. It now
+  separates ENOENT from "cannot tell".
+- `zigttp queue` replay and discard are serialized with a file lock. Both were
+  unlocked read-check-act, and since the queue runs inside the live server while
+  the verbs dispatch from separate one-shot processes, an interleaving let both
+  "succeed" - re-queueing work the operator had discarded.
+
+### Added
+
+- `zigttp ledger stats`: a subcommand that aggregates every persisted
+  `session_summary` for the current workspace into the three cross-session
+  metrics STRATEGY.md stakes but never measured - expert success rate (fraction
+  of sessions that reached a verified proof), median round-trips to first green
+  proof, and median proven-path ratio. Reads the last summary row per session
+  (so a `--resume-extended` session reflects its final state), skips sessions
+  without one, and is best-effort on unreadable files. (#9, #11)
+
 ### Changed
 
 - Contract upgrades now diff every canonical monotonic proof property. Losses
@@ -20,25 +113,6 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   experimental `gpt-4o-mini` backend with a 128,000-token context window,
   16,384-token output capability, and zigttp's existing 8,192-token request
   policy.
-
-## [0.18.0] - 2026-07-13
-
-Expert-agent convergence release: the `zigttp expert` loop is the sole surface
-touched. The engine, runtime, and analyzer contract are unchanged from 0.17.0
-(same policy hash and semantics hash).
-
-### Added
-
-- `zigttp ledger stats`: a subcommand that aggregates every persisted
-  `session_summary` for the current workspace into the three cross-session
-  metrics STRATEGY.md stakes but never measured - expert success rate (fraction
-  of sessions that reached a verified proof), median round-trips to first green
-  proof, and median proven-path ratio. Reads the last summary row per session
-  (so a `--resume-extended` session reflects its final state), skips sessions
-  without one, and is best-effort on unreadable files. (#9, #11)
-
-### Changed
-
 - The expert default model is now Claude Sonnet (`claude-sonnet-4-6`), the
   measured 7/7 first-draft-correct baseline, replacing Haiku. Haiku stays
   reachable via `--model` and the `ZIGTTP_CODEGEN_MODEL` harness knob. (#5)
