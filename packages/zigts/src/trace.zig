@@ -418,7 +418,10 @@ pub const RequestTraceGroup = struct {
 /// Parse a JSONL trace file into grouped request traces.
 pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]RequestTraceGroup {
     var groups: std.ArrayList(RequestTraceGroup) = .empty;
-    errdefer groups.deinit(allocator);
+    errdefer {
+        for (groups.items) |group| allocator.free(group.io_calls);
+        groups.deinit(allocator);
+    }
 
     var current_io: std.ArrayList(IoEntry) = .empty;
     defer current_io.deinit(allocator);
@@ -430,7 +433,8 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const entry = parseTraceLine(line) catch continue;
+        if (!try std.json.validate(allocator, line)) return error.InvalidTraceJson;
+        const entry = try parseTraceLine(line);
         switch (entry) {
             .request => |req| {
                 if (current_request != null) {
@@ -2044,6 +2048,44 @@ test "parseTraceFile groups by request" {
     try std.testing.expectEqualStrings("POST", groups[1].request.method);
     try std.testing.expectEqual(@as(usize, 0), groups[1].io_calls.len);
     try std.testing.expectEqual(@as(u16, 201), groups[1].response.?.status);
+}
+
+test "parseTraceFile rejects malformed recorded values" {
+    const source =
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"meta\",\"duration_us\":1,\"handler\":\"h.ts\",\"pool_slot\":0,\"io_count\":0}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/malformed\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[],\"result\":not-json}\n";
+
+    try std.testing.expectError(
+        error.InvalidTraceJson,
+        parseTraceFile(std.testing.allocator, source),
+    );
+}
+
+test "parseTraceFile preserves optional absence and recorded undefined" {
+    const source =
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[]}\n" ++
+        "{\"type\":\"io\",\"seq\":1,\"module\":\"env\",\"fn\":\"env\",\"args\":[],\"result\":null}\n";
+
+    const groups = try parseTraceFile(std.testing.allocator, source);
+    defer {
+        for (groups) |group| std.testing.allocator.free(group.io_calls);
+        std.testing.allocator.free(groups);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), groups.len);
+    try std.testing.expectEqual(@as(usize, 2), groups[0].io_calls.len);
+    try std.testing.expectEqualStrings("null", groups[0].io_calls[0].result_json);
+    try std.testing.expectEqualStrings("null", groups[0].io_calls[1].result_json);
+
+    const zigts = @import("root.zig");
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const ctx = try zigts.createContext(test_arena.allocator(), .{ .nursery_size = 4096 });
+    defer zigts.destroyContext(ctx);
+    try std.testing.expect(jsonToJSValue(ctx, groups[0].io_calls[1].result_json).isUndefined());
 }
 
 test "jsonToJSValue primitives" {
