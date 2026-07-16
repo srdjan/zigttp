@@ -5924,7 +5924,6 @@ test "HandlerPool basic operations" {
 // Uses testing.allocator directly so leaks fail rather than being absorbed
 // by an arena.
 test "HandlerPool teardown leaves no leaks under testing.allocator" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const handler_code = "function handler(req) { return Response.text('ok'); }";
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
@@ -5945,7 +5944,6 @@ test "HandlerPool teardown leaves no leaks under testing.allocator" {
 }
 
 test "HandlerPool cached pattern dispatch transfers ownership without leaks" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const handler_code =
         \\function handler(request) {
@@ -6595,7 +6593,6 @@ test "JSX rendering works" {
 }
 
 test "HandlerPool exhaustion and recovery" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const handler_code = "function handler(req) { return Response.text('ok'); }";
@@ -6630,7 +6627,6 @@ test "HandlerPool exhaustion and recovery" {
 }
 
 test "HandlerPool owned response survives pooled reuse" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const handler_code =
@@ -6667,18 +6663,7 @@ test "HandlerPool owned response survives pooled reuse" {
     try std.testing.expectEqualStrings("second", second_response.body);
 }
 
-// Linux glibc currently aborts a small runtime test bucket with heap
-// corruption ("double free or corruption (fasttop)" /
-// "malloc_consolidate(): unaligned fastbin chunk"). The known repros cover
-// five HandlerPool lifecycle tests, the JIT overflow-slot literal test, and the
-// loadCodeNoHandler benchmark smoke below. macOS does not detect the same
-// corruption, and the prior Linux-only investigation did not isolate a root
-// cause. Keep these gated on Linux until we can debug them under rr/valgrind on
-// a Linux host.
-const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
-
 test "HandlerPool borrowed response pins runtime until release" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const handler_code =
@@ -6718,7 +6703,6 @@ test "HandlerPool borrowed response pins runtime until release" {
 }
 
 test "HandlerPool pooled teardown survives repeated pool lifecycles" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     const handler_code =
         \\function handler(req) {
@@ -6798,7 +6782,6 @@ test "HandlerPool pooled teardown survives repeated pool lifecycles" {
 }
 
 test "HandlerPool does not leak request data across pooled requests" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     // The handler reflects every request-scoped input back into the response.
@@ -6870,7 +6853,6 @@ test "HandlerPool does not leak request data across pooled requests" {
 }
 
 test "JIT object literal overflow slots remain valid" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {
         return error.SkipZigTest;
     }
@@ -6911,7 +6893,6 @@ test "JIT object literal overflow slots remain valid" {
 }
 
 test "loadCodeNoHandler supports benchmark-style scripts" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const script =
@@ -6973,7 +6954,6 @@ test "loadCodeNoHandler supports imported benchmark-style scripts" {
 }
 
 test "HandlerPool high contention stress" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     // Allow disabling JIT for this test via env var during debugging.

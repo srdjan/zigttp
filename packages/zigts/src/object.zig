@@ -1575,6 +1575,12 @@ pub const JSObject = extern struct {
     /// that destroy a single, freshly-created, not-yet-shared object (tests,
     /// OOM errdefer paths) should keep using plain destroyFull.
     pub fn destroyFullTracked(self: *JSObject, allocator: std.mem.Allocator, seen: ?*FunctionBytecodeSeen) void {
+        self.destroyFunctionData(allocator, seen);
+        // Free overflow slots and object
+        self.destroy(allocator);
+    }
+
+    fn destroyFunctionData(self: *JSObject, allocator: std.mem.Allocator, seen: ?*FunctionBytecodeSeen) void {
         // Free function data if this is a function
         if (self.class_id == .function and self.flags.is_callable) {
             const is_bytecode_val = self.inline_slots[Slots.FUNC_IS_BYTECODE];
@@ -1599,13 +1605,16 @@ pub const JSObject = extern struct {
                 }
             }
         }
-        // Free overflow slots and object
-        self.destroy(allocator);
     }
 
-    /// Destroy a builtin object and all its function properties
-    /// Used for cleaning up Math, JSON, Object, etc. during Context.deinit
-    pub fn destroyBuiltin(self: *JSObject, allocator: std.mem.Allocator, pool: *const HiddenClassPool) void {
+    /// Clear a builtin object's property slots, destroying untracked owned
+    /// function properties and strings without destroying the object itself.
+    /// Context.deinit scrubs every tracked root before freeing any root object.
+    pub fn scrubBuiltin(self: *JSObject, allocator: std.mem.Allocator, pool: *const HiddenClassPool) void {
+        // Function metadata lives in reserved property slots, so release it
+        // before the scrub makes those slots unreachable.
+        self.destroyFunctionData(allocator, null);
+
         // Iterate through all property slots
         const prop_count = pool.getPropertyCount(self.hidden_class_idx);
         var slot_idx: u16 = 0;
@@ -1617,27 +1626,30 @@ pub const JSObject = extern struct {
             else
                 continue;
             const val = slot_ref.*;
+            slot_ref.* = value.JSValue.undefined_val;
 
             // If property is a function object, destroy it recursively
             // (functions like Response constructor may have their own method properties)
             if (val.isObject()) {
                 const obj = val.toPtr(JSObject);
                 if (obj.class_id == .function) {
-                    // Clear slot first to avoid double-destroy when aliases exist.
-                    slot_ref.* = value.JSValue.undefined_val;
-                    obj.destroyBuiltin(allocator, pool);
+                    obj.scrubBuiltin(allocator, pool);
+                    obj.destroy(allocator);
                 }
             } else if (val.isString()) {
                 // Free string values (e.g., Fragment constant)
-                slot_ref.* = value.JSValue.undefined_val;
                 const str = val.toPtr(string.JSString);
                 if (!str.flags.is_unique) {
                     string.freeString(allocator, str);
                 }
             }
         }
-        // Destroy the builtin object itself (use destroyFull to handle NativeFunctionData)
-        self.destroyFull(allocator);
+    }
+
+    /// Destroy a standalone builtin object after cleaning up its owned slots.
+    pub fn destroyBuiltin(self: *JSObject, allocator: std.mem.Allocator, pool: *const HiddenClassPool) void {
+        self.scrubBuiltin(allocator, pool);
+        self.destroy(allocator);
     }
 
     /// Create a native function object

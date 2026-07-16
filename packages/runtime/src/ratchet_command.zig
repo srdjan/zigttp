@@ -23,7 +23,6 @@
 //! follow-up. The current `check` exits 1 on any unmet declaration; that
 //! is the mechanically-correct default for a ratchet.
 
-const builtin = @import("builtin");
 const std = @import("std");
 const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
@@ -36,7 +35,6 @@ const HandlerProperties = zigts.handler_contract.HandlerProperties;
 /// explicit at the call site instead of borrowing the misleading
 /// `default_output_limit` constant from the pi tools.
 const handler_source_limit: usize = 10 * 1024 * 1024;
-const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
 
 pub const RatchetError = error{
     UnknownSubcommand,
@@ -558,7 +556,6 @@ test "runCheck fails NonRatchetableSpec when every declared name is non-monotoni
 }
 
 test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

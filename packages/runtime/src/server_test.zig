@@ -20,7 +20,6 @@
 //! accept-path or E2E coverage where noted.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const server = @import("server.zig");
 const engine = @import("engine_adapter.zig");
@@ -32,12 +31,6 @@ const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 const HttpResponse = http_types.HttpResponse;
-
-// Generational-GC heap corruption guard, mirrored from zruntime.zig: the
-// server_test's HandlerPool-backed cases are flaky under linux glibc malloc
-// only. Keep the same gate so this suite stays green on CI without masking real
-// bugs on macOS.
-const skip_linux_glibc_heap_corruption_tests = builtin.os.tag == .linux;
 
 /// Build an owned GET request with no body. Caller deinits.
 fn getRequest(allocator: std.mem.Allocator, url: []const u8) !HttpRequestOwned {
@@ -98,7 +91,6 @@ test "Server owns a finite WebSocket worker budget by default" {
 // ===========================================================================
 
 test "executeHandler returns 200 with the handler body" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -121,7 +113,6 @@ test "executeHandler returns 200 with the handler body" {
 }
 
 test "executeHandler echoes request method and url back to the handler" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     // `req.url` is the raw path here (the subset has no `new URL`); the runtime
     // surfaces the request line as method + url.
@@ -146,7 +137,6 @@ test "executeHandler echoes request method and url back to the handler" {
 }
 
 test "pool occupancy is zero before and after a completed request" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -175,7 +165,6 @@ test "pool occupancy is zero before and after a completed request" {
 // ===========================================================================
 
 test "assert guard rejection short-circuits with the guard response" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     // `assert cond, response` is the supported statement form: on a failed
     // condition the handler returns the guard response instead of falling
@@ -200,7 +189,6 @@ test "assert guard rejection short-circuits with the guard response" {
 }
 
 test "B6: handler returning a non-Response primitive yields 500, not silent empty 200" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -222,7 +210,6 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
 }
 
 test "handler returning a string body yields a 200 with that body" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // The non-object/string branch of extractResponseInternal is a supported,
     // documented path: a bare string return becomes the response body.
     const allocator = std.heap.c_allocator;
@@ -246,7 +233,6 @@ test "handler returning a string body yields a 200 with that body" {
 }
 
 test "executeHandlerBorrowed releases the runtime even when the handler errors" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -287,7 +273,6 @@ test "coverage note: keep-alive socket path is exercised in server.zig" {
 // ===========================================================================
 
 test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // Verifies that request_timeout_ms is enforced via cooperative back-edge
     // checking in the interpreter. The infinite loop in the handler body triggers
     // error.RequestTimeout within 50ms, proving the deadline path is wired.
@@ -339,7 +324,6 @@ test "B3: Server.shutdown() stops the server and drains in-flight requests" {
 }
 
 test "coverage note: health/readiness socket path is exercised in server.zig" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // The health/readiness probes intercept in server.zig before the JS handler.
     // The real accept-path coverage lives in server.zig's socket-level probe
     // test. This local note keeps the pool field expectations visible without
@@ -360,7 +344,6 @@ test "coverage note: health/readiness socket path is exercised in server.zig" {
 }
 
 test "B1: panic isolation: HandlerPanicked leaves pool reusable (needs test-root panic override)" {
-    if (skip_linux_glibc_heap_corruption_tests) return error.SkipZigTest;
     // Full panic isolation requires the binary root to declare:
     //   pub const panic = std.debug.FullPanic(panic_recovery.handlePanic);
     // which is in main.zig and cli_main.zig but NOT in the test runner root.
