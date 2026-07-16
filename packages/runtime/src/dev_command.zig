@@ -117,13 +117,16 @@ fn propagateChildExit(term: std.process.Child.Term) void {
 
 /// Decide the parent exit code for a finished serve child, split out from
 /// `propagateChildExit` so it is unit-testable without `std.process.exit`.
-/// Only a non-zero `.exited` status propagates: a signal termination (the
-/// usual Ctrl+C, delivered to the whole process group) returns null so
-/// stopping a healthy session stays exit 0.
+/// Non-zero exits and fatal signals propagate. SIGINT remains a clean stop so
+/// Ctrl+C keeps its interactive dev/studio behavior.
 fn childExitCode(term: std.process.Child.Term) ?u8 {
     return switch (term) {
         .exited => |code| if (code != 0) code else null,
-        .signal, .stopped, .unknown => null,
+        .signal => |signal| if (signal == .INT)
+            null
+        else
+            128 + @as(u8, @intCast(@intFromEnum(signal))),
+        .stopped, .unknown => null,
     };
 }
 
@@ -520,9 +523,13 @@ test "childExitCode propagates a failed serve child but not a clean stop" {
     // must surface code N to the dev/studio parent.
     try std.testing.expectEqual(@as(?u8, 1), childExitCode(.{ .exited = 1 }));
     try std.testing.expectEqual(@as(?u8, 2), childExitCode(.{ .exited = 2 }));
-    // A clean exit and a signal stop (Ctrl+C of a healthy session) stay 0.
+    // A clean exit and SIGINT (Ctrl+C of a healthy session) stay 0.
     try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .exited = 0 }));
     try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .signal = .INT }));
+    // Fatal child-only signals must not make dev/studio report success.
+    try std.testing.expectEqual(@as(?u8, 139), childExitCode(.{ .signal = .SEGV }));
+    try std.testing.expectEqual(@as(?u8, 134), childExitCode(.{ .signal = .ABRT }));
+    try std.testing.expectEqual(@as(?u8, 137), childExitCode(.{ .signal = .KILL }));
 }
 
 test "runDevPreflight reports analyzer failure before starting dev loop" {
