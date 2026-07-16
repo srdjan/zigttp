@@ -37,6 +37,12 @@ const type_map_mod = @import("type_map.zig");
 const service_types_mod = @import("service_types.zig");
 const modules_mod = @import("modules/root.zig");
 const ir_mod = @import("parser/ir.zig");
+const handler_contract_mod = @import("handler_contract.zig");
+const manifest_registry_mod = @import("manifest_registry.zig");
+const bytecode_mod = @import("bytecode.zig");
+const stripper_mod = @import("stripper.zig");
+const compat_mod = @import("compat.zig");
+const string_mod = @import("string.zig");
 
 const NodeIndex = ir_mod.NodeIndex;
 const IrView = ir_mod.IrView;
@@ -50,6 +56,10 @@ const TypeEnv = type_env_mod.TypeEnv;
 const TypePool = type_pool_mod.TypePool;
 const TypeMap = type_map_mod.TypeMap;
 const ServiceTypeContext = service_types_mod.ServiceTypeContext;
+const HandlerContract = handler_contract_mod.HandlerContract;
+const VerificationInfo = handler_contract_mod.VerificationInfo;
+const ContractBuilder = handler_contract_mod.ContractBuilder;
+const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
 
 // ---------------------------------------------------------------------------
 // Phase 1: Parsed
@@ -305,6 +315,279 @@ pub const TypeEnvStorage = struct {
 };
 
 // ---------------------------------------------------------------------------
+// One-shot contract extraction
+// ---------------------------------------------------------------------------
+
+pub const ContractTypeCheckFn = *const fn (*TypeChecker, NodeIndex) anyerror!u32;
+
+pub const ExtractContractOptions = struct {
+    strict: bool = true,
+    dispatch: ?*const PatternDispatchTable = null,
+    has_default_response: bool = false,
+    verification: ?VerificationInfo = null,
+    type_map: ?*const TypeMap = null,
+    service_type_context: ?*const ServiceTypeContext = null,
+    manifest_registry: ?*const manifest_registry_mod.Registry = null,
+    type_check: ContractTypeCheckFn = runContractTypeCheck,
+    build_time: ?[]const u8 = null,
+    git_commit: []const u8 = "unknown",
+    version: ?[]const u8 = null,
+    read_file: ?modules_mod.module_graph.ReadFileFn = null,
+};
+
+fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
+    return type_checker.check(root);
+}
+
+/// Build an owned handler contract from an already-parsed module.
+pub fn extractContractFromParsed(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+) !HandlerContract {
+    const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
+    const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
+
+    var type_pool = TypePool.init(allocator);
+    defer type_pool.deinit(allocator);
+
+    var type_env = TypeEnv.init(allocator, &type_pool);
+    defer type_env.deinit();
+    modules_mod.populateModuleTypes(&type_env, &type_pool, allocator);
+    if (opts.type_map) |type_map| {
+        type_env.populateFromTypeMap(type_map);
+    }
+
+    var type_checker = TypeChecker.init(
+        allocator,
+        parsed.ir_view,
+        parsed.atoms,
+        &type_env,
+        opts.service_type_context,
+    );
+    defer type_checker.deinit();
+    _ = try opts.type_check(&type_checker, parsed.root);
+
+    var builder = ContractBuilder.init(
+        allocator,
+        parsed.ir_view,
+        parsed.atoms,
+        &type_env,
+        &type_checker,
+    );
+    builder.manifest_registry = opts.manifest_registry;
+    defer builder.deinit();
+
+    var contract = try builder.build(
+        filename,
+        handler_loc,
+        handler_fn,
+        parsed.root,
+        opts.dispatch,
+        opts.has_default_response,
+        opts.verification,
+    );
+    errdefer contract.deinit(allocator);
+    try type_checker.ensureHealthy();
+    return contract;
+}
+
+/// Strip TypeScript/TSX when needed, parse and resolve the source, then return
+/// an owned handler contract. The caller must deinit the returned contract.
+pub fn extractContract(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+) !HandlerContract {
+    var source_to_parse = source;
+    var strip_result: ?stripper_mod.StripResult = null;
+    defer if (strip_result) |*result| result.deinit();
+
+    const is_ts = std.mem.endsWith(u8, filename, ".ts");
+    const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
+    if (is_ts or is_tsx) {
+        var timestamp_buf: [24]u8 = undefined;
+        const build_time = opts.build_time orelse formatIsoTimestamp(&timestamp_buf, blk: {
+            const milliseconds = compat_mod.realtimeNowMs() catch break :blk 0;
+            break :blk @divTrunc(milliseconds, 1000);
+        });
+        strip_result = try stripper_mod.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{
+                .build_time = build_time,
+                .git_commit = opts.git_commit,
+                .version = opts.version,
+                .env_vars = null,
+            },
+        });
+        const stripped = strip_result orelse unreachable;
+        source_to_parse = stripped.code;
+    }
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var js_parser = parser_mod.JsParser.init(allocator, source_to_parse);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
+        js_parser.tokenizer.enableJsx();
+    }
+
+    const root = try js_parser.parse();
+    _ = parser_mod.optimizeIR(
+        allocator,
+        &js_parser.nodes,
+        &js_parser.constants,
+        root,
+    ) catch {};
+
+    const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = ParsedModule.fromExisting(ir_view, root, &atoms);
+    const effective_type_map = if (strip_result) |*result| &result.type_map else opts.type_map;
+    var contract_opts = opts;
+    contract_opts.type_map = effective_type_map;
+    if (hasFileImports(ir_view)) {
+        const read_file = opts.read_file orelse return error.FileImportReaderRequired;
+        return extractMultiModuleContract(
+            allocator,
+            source_to_parse,
+            filename,
+            read_file,
+            &atoms,
+            contract_opts,
+        );
+    }
+
+    var type_env_storage: TypeEnvStorage = .{};
+    defer type_env_storage.deinit(allocator);
+    if (effective_type_map) |type_map| {
+        try type_env_storage.init(allocator, type_map);
+    }
+
+    var resolved = try resolve(allocator, parsed, .{
+        .type_env = type_env_storage.envPtr(),
+        .service_type_context = opts.service_type_context,
+        .strict = opts.strict,
+    });
+    defer resolved.deinit();
+
+    if (resolved.bool_error_count > 0 or
+        resolved.type_error_count > 0 or
+        resolved.strict_error_count > 0)
+    {
+        return error.SoundModeViolation;
+    }
+
+    return extractContractFromParsed(allocator, parsed, filename, contract_opts);
+}
+
+fn hasFileImports(ir_view: IrView) bool {
+    for (0..ir_view.nodeCount()) |idx| {
+        const tag = ir_view.getTag(@intCast(idx)) orelse continue;
+        if (tag != .import_decl) continue;
+
+        const import_decl = ir_view.getImportDecl(@intCast(idx)) orelse continue;
+        const module_name = ir_view.getString(import_decl.module_idx) orelse continue;
+        switch (modules_mod.resolver.resolve(module_name)) {
+            .file => return true,
+            .virtual, .unknown => {},
+        }
+    }
+    return false;
+}
+
+fn extractMultiModuleContract(
+    allocator: std.mem.Allocator,
+    entry_source: []const u8,
+    entry_filename: []const u8,
+    read_file: modules_mod.module_graph.ReadFileFn,
+    atoms: *AtomTable,
+    opts: ExtractContractOptions,
+) !HandlerContract {
+    var graph = modules_mod.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(entry_filename, entry_source, read_file);
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var module_compiler = modules_mod.ModuleCompiler.init(allocator, atoms, &strings);
+    var compile_result = try module_compiler.compileAll(&graph);
+    defer compile_result.deinit();
+    defer {
+        for (compile_result.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
+    }
+
+    var merged = try handler_contract_mod.initMergedContract(allocator, entry_filename);
+    errdefer merged.deinit(allocator);
+
+    const entry_index = compile_result.modules.len - 1;
+    for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
+        const graph_idx = graph.execution_order[idx];
+        const module = &graph.module_list.items[graph_idx];
+        const is_entry = idx == entry_index;
+        const module_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const parsed = ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+
+        var module_opts = opts;
+        module_opts.type_map = if (is_entry) opts.type_map else null;
+        module_opts.read_file = null;
+        if (!is_entry) {
+            module_opts.dispatch = null;
+            module_opts.has_default_response = false;
+            module_opts.verification = null;
+        }
+
+        var type_env_storage: TypeEnvStorage = .{};
+        defer type_env_storage.deinit(allocator);
+        if (module_opts.type_map) |type_map| {
+            try type_env_storage.init(allocator, type_map);
+        }
+        var resolved = try resolve(allocator, parsed, .{
+            .type_env = type_env_storage.envPtr(),
+            .service_type_context = module_opts.service_type_context,
+            .strict = module_opts.strict,
+        });
+        defer resolved.deinit();
+        if (resolved.bool_error_count > 0 or
+            resolved.type_error_count > 0 or
+            resolved.strict_error_count > 0)
+        {
+            return error.SoundModeViolation;
+        }
+
+        var module_contract = try extractContractFromParsed(allocator, parsed, module.path, module_opts);
+        defer module_contract.deinit(allocator);
+        try handler_contract_mod.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
+    }
+
+    return merged;
+}
+
+/// Format seconds since epoch as UTC ISO-8601 with second precision.
+/// The 24-byte buffer leaves room for the full u16 year range.
+pub fn formatIsoTimestamp(buf: *[24]u8, seconds_since_epoch: i64) []const u8 {
+    const total_secs: u64 = @intCast(@max(0, seconds_since_epoch));
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = total_secs };
+    const epoch_day = epoch_seconds.getEpochDay();
+    const day_seconds = epoch_seconds.getDaySeconds();
+    const year_day = epoch_day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        @as(u16, @intCast(year_day.year)),
+        @as(u4, @intFromEnum(month_day.month)),
+        @as(u5, month_day.day_index + 1),
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -484,4 +767,120 @@ test "pipeline.resolve runs strict checker without type context" {
         if (diag.kind == .avoidable_let) saw_avoidable_let = true;
     }
     try testing.expect(saw_avoidable_let);
+}
+
+test "extractContract strips TypeScript and honors strict opt out" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  let message: string = "ok";
+        \\  return Response.text(message);
+        \\}
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "handler.ts", .{
+        .strict = false,
+        .version = "test",
+    });
+    defer contract.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("handler.ts", contract.handler.path);
+}
+
+test "extractContract parses TSX" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const body = <main>ok</main>;
+        \\  _ = body;
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var contract = try extractContract(testing.allocator, source, "handler.tsx", .{
+        .strict = false,
+        .version = "test",
+    });
+    defer contract.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("handler.tsx", contract.handler.path);
+}
+
+test "extractContract rejects boolean diagnostics with strict disabled" {
+    const source =
+        \\if ({}) { const unreachable: boolean = true; }
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+    ;
+
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(testing.allocator, source, "handler.ts", .{
+            .strict = false,
+            .version = "test",
+        }),
+    );
+}
+
+test "extractContract merges capabilities from relative imports" {
+    const allocator = testing.allocator;
+    const file_io = @import("file_io.zig");
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+
+    const dependency_path = try std.fmt.allocPrint(allocator, "{s}/dependency.ts", .{dir});
+    defer allocator.free(dependency_path);
+    try file_io.writeFile(
+        allocator,
+        dependency_path,
+        "export function request() { return fetchSync('http://localhost:1'); }",
+    );
+
+    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.ts", .{dir});
+    defer allocator.free(entry_path);
+    const source =
+        "import { request } from './dependency.ts'; function handler(req) { return request(req, undefined); }";
+
+    var contract = try extractContract(allocator, source, entry_path, .{
+        .strict = false,
+        .version = "test",
+        .read_file = file_io.readFileForModuleGraph,
+    });
+    defer contract.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), contract.egress.hosts.items.len);
+    try testing.expectEqualStrings("localhost", contract.egress.hosts.items[0]);
+
+    try file_io.writeFile(
+        allocator,
+        dependency_path,
+        "if ({}) { const unreachable = true; } export function request() { return fetchSync('http://localhost:1'); }",
+    );
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(allocator, source, entry_path, .{
+            .strict = false,
+            .version = "test",
+            .read_file = file_io.readFileForModuleGraph,
+        }),
+    );
+
+    try file_io.writeFile(
+        allocator,
+        dependency_path,
+        "export function request() { let response = fetchSync('http://localhost:1'); return response; }",
+    );
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(allocator, source, entry_path, .{
+            .strict = true,
+            .version = "test",
+            .read_file = file_io.readFileForModuleGraph,
+        }),
+    );
 }

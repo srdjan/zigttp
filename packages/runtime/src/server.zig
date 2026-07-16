@@ -1974,32 +1974,31 @@ pub const Server = struct {
         // prewarming the handler pool. This rejects artifact hash drift before
         // appended bytecode is loaded into any runtime.
         if (self.config.contract_json) |json| {
-            const raw_opt: ?contract_runtime.RawRuntimeContract =
-                contract_runtime.parseContractJson(self.allocator, json) catch |err| blk: {
-                    std.log.warn("Failed to parse embedded contract: {} (continuing without)", .{err});
-                    break :blk null;
-                };
-            if (raw_opt) |raw| {
-                self.contract = contract_runtime.validate(raw, .{
-                    .bytecode = self.embedded_bytecode,
-                }) catch |err| {
-                    switch (err) {
-                        error.CapabilityMatrixMismatch => std.log.err(
-                            "sandbox: capability matrix drift - rebuild the handler contract against this runtime",
-                            .{},
-                        ),
-                        error.PolicyHashMismatch => std.log.err(
-                            "sandbox: policy hash drift - rebuild the handler contract against this runtime",
-                            .{},
-                        ),
-                        error.ArtifactHashMismatch => std.log.err(
-                            "sandbox: embedded bytecode does not match contract artifact hash",
-                            .{},
-                        ),
-                    }
-                    return err;
-                };
-            }
+            const raw = contract_runtime.parseContractJson(self.allocator, json) catch |err| {
+                if (!builtin.is_test) {
+                    std.log.err("sandbox: embedded handler artifact contract is malformed; binary will not serve: {}", .{err});
+                }
+                return err;
+            };
+            self.contract = contract_runtime.validate(raw, .{
+                .bytecode = self.embedded_bytecode,
+            }) catch |err| {
+                switch (err) {
+                    error.CapabilityMatrixMismatch => std.log.err(
+                        "sandbox: capability matrix drift - rebuild the handler contract against this runtime",
+                        .{},
+                    ),
+                    error.PolicyHashMismatch => std.log.err(
+                        "sandbox: policy hash drift - rebuild the handler contract against this runtime",
+                        .{},
+                    ),
+                    error.ArtifactHashMismatch => std.log.err(
+                        "sandbox: embedded bytecode does not match contract artifact hash",
+                        .{},
+                    ),
+                }
+                return err;
+            };
         }
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
