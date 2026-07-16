@@ -81,7 +81,10 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Init
 
     if (parsed.extension_name) |name| {
         try validateProjectName(name);
-        try scaffoldExtension(allocator, name);
+        scaffoldExtension(allocator, name) catch |err| {
+            if (err == error.ScaffoldTargetExists) std.process.exit(1);
+            return err;
+        };
         printInitExtensionNextSteps(name);
         return .{};
     }
@@ -90,7 +93,10 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Init
     try validateProjectName(name);
     const template = parseTemplate(parsed.template_name) orelse return error.InvalidTemplate;
 
-    try scaffoldProject(allocator, name, template);
+    scaffoldProject(allocator, name, template) catch |err| {
+        if (err == error.ScaffoldTargetExists) std.process.exit(1);
+        return err;
+    };
     if (parsed.enter_expert) {
         printInitExpertHandoff(name);
         return .{ .enter_expert = true, .project_name = name };
@@ -113,55 +119,118 @@ fn validateProjectName(name: []const u8) !void {
     }
 }
 
+fn scaffoldPaths(allocator: std.mem.Allocator, name: []const u8, relative_paths: []const []const u8) ![][]u8 {
+    const paths = try allocator.alloc([]u8, relative_paths.len);
+    errdefer allocator.free(paths);
+
+    var initialized: usize = 0;
+    errdefer for (paths[0..initialized]) |path| allocator.free(path);
+    for (relative_paths, 0..) |relative_path, i| {
+        paths[i] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ name, relative_path });
+        initialized += 1;
+    }
+    return paths;
+}
+
+fn freeScaffoldPaths(allocator: std.mem.Allocator, paths: [][]u8) void {
+    for (paths) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
+fn refuseExistingTargets(io: std.Io, paths: []const []const u8) !void {
+    for (paths) |path| {
+        std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        reportScaffoldConflict(path);
+        return error.ScaffoldTargetExists;
+    }
+}
+
+fn createScaffoldDir(io: std.Io, path: []const u8) !bool {
+    return try std.Io.Dir.cwd().createDirPathStatus(io, path, .default_dir) == .created;
+}
+
+fn rollbackScaffoldFiles(io: std.Io, paths: []const []const u8) void {
+    var i = paths.len;
+    while (i > 0) {
+        i -= 1;
+        std.Io.Dir.cwd().deleteFile(io, paths[i]) catch {};
+    }
+}
+
+fn reportScaffoldConflict(path: []const u8) void {
+    std.debug.print(
+        "error: '{s}' already exists. Pick a different name or remove the conflicting file; zigttp init will not overwrite it.\n",
+        .{path},
+    );
+}
+
 pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template: Template) !void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    // Refuse to scaffold over an existing project. `zigttp.json` is the
-    // marker; any other contents in the directory are left alone.
-    const manifest_path = try std.fmt.allocPrint(allocator, "{s}/zigttp.json", .{name});
-    defer allocator.free(manifest_path);
-    if (std.Io.Dir.access(std.Io.Dir.cwd(), io, manifest_path, .{})) {
-        std.debug.print(
-            "error: '{s}/zigttp.json' already exists. Pick a different name or remove the existing project.\n",
-            .{name},
-        );
-        std.process.exit(1);
-    } else |_| {}
+    // Refuse the whole scaffold before writing if any target file exists.
+    // Unrelated contents in a pre-existing directory are left alone.
+    const relative_paths = [_][]const u8{
+        "zigttp.json",
+        handlerPathForTemplate(template),
+        "tests/handler.test.jsonl",
+        ".gitignore",
+        "README.md",
+        "public/.keep",
+    };
+    const paths = try scaffoldPaths(allocator, name, &relative_paths);
+    defer freeScaffoldPaths(allocator, paths);
+    try refuseExistingTargets(io, paths);
 
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, name);
+    const project_dir_created = try createScaffoldDir(io, name);
+    errdefer if (project_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{name});
     defer allocator.free(src_dir);
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, src_dir);
+    const src_dir_created = try createScaffoldDir(io, src_dir);
+    errdefer if (src_dir_created) std.Io.Dir.cwd().deleteDir(io, src_dir) catch {};
     const tests_dir = try std.fmt.allocPrint(allocator, "{s}/tests", .{name});
     defer allocator.free(tests_dir);
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, tests_dir);
+    const tests_dir_created = try createScaffoldDir(io, tests_dir);
+    errdefer if (tests_dir_created) std.Io.Dir.cwd().deleteDir(io, tests_dir) catch {};
     const public_dir = try std.fmt.allocPrint(allocator, "{s}/public", .{name});
     defer allocator.free(public_dir);
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, public_dir);
+    const public_dir_created = try createScaffoldDir(io, public_dir);
+    errdefer if (public_dir_created) std.Io.Dir.cwd().deleteDir(io, public_dir) catch {};
 
-    try writeProjectFile(allocator, name, "zigttp.json", switch (template) {
+    var files_written: usize = 0;
+    errdefer rollbackScaffoldFiles(io, paths[0..files_written]);
+
+    try writeProjectFile(allocator, paths[0], switch (template) {
         .basic, .api => defaultManifest,
         .htmx => htmxManifest,
     });
-    try writeProjectFile(allocator, name, handlerPathForTemplate(template), switch (template) {
+    files_written += 1;
+    try writeProjectFile(allocator, paths[1], switch (template) {
         .basic => basicHandler,
         .api => apiHandler,
         .htmx => htmxHandler,
     });
-    try writeProjectFile(allocator, name, "tests/handler.test.jsonl", switch (template) {
+    files_written += 1;
+    try writeProjectFile(allocator, paths[2], switch (template) {
         .basic => basicTests,
         .api => apiTests,
         .htmx => htmxTests,
     });
-    try writeProjectFile(allocator, name, ".gitignore", gitignoreSource);
-    try writeProjectFile(allocator, name, "README.md", switch (template) {
+    files_written += 1;
+    try writeProjectFile(allocator, paths[3], gitignoreSource);
+    files_written += 1;
+    try writeProjectFile(allocator, paths[4], switch (template) {
         .basic => basicReadme,
         .api => apiReadme,
         .htmx => htmxReadme,
     });
-    try writeProjectFile(allocator, name, "public/.keep", "");
+    files_written += 1;
+    try writeProjectFile(allocator, paths[5], "");
+    files_written += 1;
 }
 
 fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
@@ -169,46 +238,61 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    const marker_path = try std.fmt.allocPrint(allocator, "{s}/zigttp-module.json", .{name});
-    defer allocator.free(marker_path);
-    if (std.Io.Dir.access(std.Io.Dir.cwd(), io, marker_path, .{})) {
-        std.debug.print(
-            "error: '{s}/zigttp-module.json' already exists. Pick a different name or remove the existing extension.\n",
-            .{name},
-        );
-        std.process.exit(1);
-    } else |_| {}
+    const relative_paths = [_][]const u8{
+        "zigttp-module.json",
+        "src/root.zig",
+        "build.zig",
+        "build.zig.zon",
+        "handler.ts",
+        "README.md",
+        ".gitignore",
+    };
+    const paths = try scaffoldPaths(allocator, name, &relative_paths);
+    defer freeScaffoldPaths(allocator, paths);
+    try refuseExistingTargets(io, paths);
 
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, name);
+    const extension_dir_created = try createScaffoldDir(io, name);
+    errdefer if (extension_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
     const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{name});
     defer allocator.free(src_dir);
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, src_dir);
+    const src_dir_created = try createScaffoldDir(io, src_dir);
+    errdefer if (src_dir_created) std.Io.Dir.cwd().deleteDir(io, src_dir) catch {};
+
+    var files_written: usize = 0;
+    errdefer rollbackScaffoldFiles(io, paths[0..files_written]);
 
     const manifest = try renderExtensionTemplate(allocator, io, extension_manifest_template, name);
     defer allocator.free(manifest);
-    try writeProjectFile(allocator, name, "zigttp-module.json", manifest);
+    try writeProjectFile(allocator, paths[0], manifest);
+    files_written += 1;
 
     const root_zig = try renderExtensionTemplate(allocator, io, extension_root_zig_template, name);
     defer allocator.free(root_zig);
-    try writeProjectFile(allocator, name, "src/root.zig", root_zig);
+    try writeProjectFile(allocator, paths[1], root_zig);
+    files_written += 1;
 
     const build_zig = try renderExtensionTemplate(allocator, io, extension_build_zig_template, name);
     defer allocator.free(build_zig);
-    try writeProjectFile(allocator, name, "build.zig", build_zig);
+    try writeProjectFile(allocator, paths[2], build_zig);
+    files_written += 1;
 
     const build_zon = try renderExtensionTemplate(allocator, io, extension_build_zon_template, name);
     defer allocator.free(build_zon);
-    try writeProjectFile(allocator, name, "build.zig.zon", build_zon);
+    try writeProjectFile(allocator, paths[3], build_zon);
+    files_written += 1;
 
     const handler_ts = try renderExtensionTemplate(allocator, io, extension_handler_ts_template, name);
     defer allocator.free(handler_ts);
-    try writeProjectFile(allocator, name, "handler.ts", handler_ts);
+    try writeProjectFile(allocator, paths[4], handler_ts);
+    files_written += 1;
 
     const readme = try renderExtensionTemplate(allocator, io, extension_readme_template, name);
     defer allocator.free(readme);
-    try writeProjectFile(allocator, name, "README.md", readme);
+    try writeProjectFile(allocator, paths[5], readme);
+    files_written += 1;
 
-    try writeProjectFile(allocator, name, ".gitignore", gitignoreSource);
+    try writeProjectFile(allocator, paths[6], gitignoreSource);
+    files_written += 1;
 }
 
 /// Substitute the placeholder `{{name}}` with the supplied extension name.
@@ -389,10 +473,14 @@ fn starterPathForTemplate(template: Template) []const u8 {
     };
 }
 
-fn writeProjectFile(allocator: std.mem.Allocator, project_name: []const u8, relative_path: []const u8, data: []const u8) !void {
-    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_name, relative_path });
-    defer allocator.free(full_path);
-    try zigts.file_io.writeFile(allocator, full_path, data);
+fn writeProjectFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    zigts.file_io.writeFileCreateExclusive(allocator, path, data) catch |err| {
+        if (err == error.PathAlreadyExists) {
+            reportScaffoldConflict(path);
+            return error.ScaffoldTargetExists;
+        }
+        return err;
+    };
 }
 
 const defaultManifest =
@@ -853,11 +941,7 @@ test "init --extension package name stays within Zig manifest limit" {
     try testing.expect(std.mem.indexOfScalar(u8, package_name, '-') == null);
 }
 
-test "init --extension refuses to overwrite an existing extension" {
-    // Sanity: the scaffolder exits the process when zigttp-module.json
-    // already exists. The exit-on-conflict path itself can't be tested
-    // in-process without exiting the test runner, so we only assert that
-    // the first scaffold succeeds and the marker is present afterwards.
+test "init --extension preserves a pre-existing build.zig" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -870,8 +954,78 @@ test "init --extension refuses to overwrite an existing extension" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try scaffoldExtension(testing.allocator, "alpha");
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "alpha/zigttp-module.json", .{});
+    try std.Io.Dir.cwd().createDirPath(io, "alpha");
+    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "alpha/build.zig", "user build\n");
+
+    try testing.expectError(error.ScaffoldTargetExists, scaffoldExtension(testing.allocator, "alpha"));
+    const build_zig = try zigts.file_io.readFile(testing.allocator, "alpha/build.zig", 1024);
+    defer testing.allocator.free(build_zig);
+    try testing.expectEqualStrings("user build\n", build_zig);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "alpha/zigttp-module.json", .{}));
+}
+
+test "init preserves a pre-existing README" {
+    const testing = std.testing;
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "demo");
+    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/README.md", "user readme\n");
+
+    try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
+    const readme = try zigts.file_io.readFile(testing.allocator, "demo/README.md", 1024);
+    defer testing.allocator.free(readme);
+    try testing.expectEqualStrings("user readme\n", readme);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{}));
+}
+
+test "init preserves a pre-existing handler" {
+    const testing = std.testing;
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "demo/src");
+    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/src/handler.ts", "user handler\n");
+
+    try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
+    const handler = try zigts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 1024);
+    defer testing.allocator.free(handler);
+    try testing.expectEqualStrings("user handler\n", handler);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{}));
+}
+
+test "init scaffolds into a clean existing directory" {
+    const testing = std.testing;
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "demo");
+    try scaffoldProject(testing.allocator, "demo", .basic);
+
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/src/handler.ts", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/README.md", .{});
 }
 
 test "initCommand scaffolds the v1 project layout" {

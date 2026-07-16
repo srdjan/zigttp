@@ -131,11 +131,30 @@ pub const PayloadInput = struct {
     policy_section: ?[]const u8 = null,
 };
 
+const ArtifactWriteCapability = struct {
+    context: ?*anyopaque = null,
+    write_all: *const fn (?*anyopaque, std.c.fd_t, []const u8) anyerror!void = writeAllCapability,
+
+    fn writeAll(self: ArtifactWriteCapability, fd: std.c.fd_t, data: []const u8) !void {
+        try self.write_all(self.context, fd, data);
+    }
+};
+
 pub fn create(
     allocator: std.mem.Allocator,
     base_binary_path: []const u8,
     output_path: []const u8,
     input: PayloadInput,
+) !void {
+    return createWithWriter(allocator, base_binary_path, output_path, input, .{});
+}
+
+fn createWithWriter(
+    allocator: std.mem.Allocator,
+    base_binary_path: []const u8,
+    output_path: []const u8,
+    input: PayloadInput,
+    writer: ArtifactWriteCapability,
 ) !void {
     // Read base binary (100MB limit matches payload sanity check)
     const base_data = try readFile(allocator, base_binary_path, 100 * 1024 * 1024);
@@ -165,17 +184,39 @@ pub fn create(
     std.mem.writeInt(u32, trailer[20..24], checksum, .little);
     std.mem.writeInt(u64, trailer[24..32], MAGIC, .little);
 
-    // Write output: base binary + payload + trailer
+    // Write a sibling temp file completely before atomically replacing the
+    // reusable artifact path. A failed write therefore leaves the old binary.
+    const output_dir = std.fs.path.dirname(output_path) orelse ".";
+    const output_base = std.fs.path.basename(output_path);
+    const tmp_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.{s}.tmp.{d}.{d}",
+        .{ output_dir, output_base, std.c.getpid(), @intFromPtr(payload.ptr) },
+    );
+    defer allocator.free(tmp_path);
+    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_path_z);
+
+    const out_fd = std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        tmp_path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+        0o755,
+    ) catch return error.OpenFailed;
+    errdefer _ = std.c.unlink(tmp_path_z);
+
+    {
+        defer std.Io.Threaded.closeFd(out_fd);
+        try writer.writeAll(out_fd, base_data[0..clean_size]);
+        try writer.writeAll(out_fd, payload);
+        try writer.writeAll(out_fd, &trailer);
+        if (std.c.fchmod(out_fd, 0o755) != 0) return error.SetModeFailed;
+        if (std.c.fsync(out_fd) != 0) return error.WriteFailure;
+    }
+
     const output_path_z = try allocator.dupeZ(u8, output_path);
     defer allocator.free(output_path_z);
-
-    const out_fd = std.c.open(output_path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o755));
-    if (out_fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(out_fd);
-
-    try writeAll(out_fd, base_data[0..clean_size]);
-    try writeAll(out_fd, payload);
-    try writeAll(out_fd, &trailer);
+    if (std.c.rename(tmp_path_z, output_path_z) != 0) return error.RenameFailed;
 }
 
 /// Return the size of the binary without any appended payload.
@@ -504,6 +545,10 @@ fn getFileSize(fd: std.c.fd_t) ?u64 {
 
 const readFile = zigts.file_io.readFile;
 
+fn writeAllCapability(_: ?*anyopaque, fd: std.c.fd_t, data: []const u8) !void {
+    try writeAll(fd, data);
+}
+
 fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
     var total: usize = 0;
     while (total < data.len) {
@@ -552,6 +597,102 @@ fn readU32(data: []const u8, pos: *usize) !usize {
 }
 
 // -- Tests --
+
+const FailingArtifactWriter = struct {
+    remaining: usize,
+
+    fn write(context: ?*anyopaque, fd: std.c.fd_t, data: []const u8) !void {
+        const self: *FailingArtifactWriter = @ptrCast(@alignCast(context.?));
+        const amount = @min(self.remaining, data.len);
+        if (amount > 0) try writeAll(fd, data[0..amount]);
+        self.remaining -= amount;
+        if (amount != data.len) return error.InjectedWriteFailure;
+    }
+};
+
+fn selfExtractTestPath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, name: []const u8) ![]u8 {
+    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(dir);
+    return std.fs.path.join(allocator, &.{ dir, name });
+}
+
+test "create preserves the previous artifact when a payload write fails" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "base.sh");
+    defer allocator.free(base_path);
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    const base = "#!/bin/sh\nexit 0\n";
+    const old_artifact = "previous runnable artifact\n";
+    try zigts.file_io.writeFile(allocator, base_path, base);
+    try zigts.file_io.writeFile(allocator, output_path, old_artifact);
+
+    const policy = handler_policy.RuntimePolicy{};
+    var failing = FailingArtifactWriter{ .remaining = base.len + 1 };
+    try std.testing.expectError(error.InjectedWriteFailure, createWithWriter(
+        allocator,
+        base_path,
+        output_path,
+        .{ .bytecode = "payload", .policy = &policy },
+        .{ .context = &failing, .write_all = FailingArtifactWriter.write },
+    ));
+
+    const contents = try readFile(allocator, output_path, 1024);
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings(old_artifact, contents);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const output_dir = std.fs.path.dirname(output_path).?;
+    var dir = try std.Io.Dir.cwd().openDir(io, output_dir, .{ .iterate = true });
+    defer dir.close(io);
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        try std.testing.expect(!std.mem.startsWith(u8, entry.name, ".artifact.tmp."));
+    }
+}
+
+test "create produces a runnable mode 0755 artifact" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "base.sh");
+    defer allocator.free(base_path);
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
+    defer allocator.free(output_path);
+    try zigts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
+
+    const policy = handler_policy.RuntimePolicy{};
+    try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
+
+    const output_path_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const stat = try zigts.file_io.fstatFd(fd);
+    try std.testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{output_path},
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    switch (try child.wait(io)) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        else => try std.testing.expect(false),
+    }
+}
 
 test "roundtrip: serialize and parse payload" {
     const allocator = std.testing.allocator;
