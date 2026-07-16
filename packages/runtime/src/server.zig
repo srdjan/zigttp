@@ -40,6 +40,7 @@ const attest_header_strings = @import("attest/header_strings.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
+const self_extract = @import("self_extract.zig");
 const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -1412,6 +1413,10 @@ pub const ServerConfig = struct {
     /// and emits them on every HTTP response.
     attestation_jws: ?[]const u8 = null,
 
+    /// SHA-256 of the exact serialized runtime-policy section read from a
+    /// self-extract payload. Null for dev/live reload, which has no section 4.
+    policy_section_sha256: ?[32]u8 = null,
+
     /// Skip startup env validation (for testing/development)
     skip_env_check: bool = false,
 
@@ -1904,6 +1909,66 @@ pub const Server = struct {
         return std.ascii.eqlIgnoreCase(&live_hex, claim_hex);
     }
 
+    /// Validate the signed runtime-policy claim against the exact section-4
+    /// bytes parsed from a self-extract artifact. Unlike live contract hashes,
+    /// this claim cannot be unpinned: the deployed artifact always has section
+    /// 4, so an all-zero claim means it predates policy binding.
+    fn validateRuntimePolicyClaim(section_sha256: [32]u8, claim_hex: []const u8) !void {
+        if (std.mem.eql(u8, claim_hex, attest_envelope.unpinned_runtime_policy_sha256)) {
+            return error.RuntimePolicyClaimUnpinned;
+        }
+        if (claim_hex.len != 64) return error.RuntimePolicyClaimMismatch;
+        const section_hex = std.fmt.bytesToHex(section_sha256, .lower);
+        if (!std.ascii.eqlIgnoreCase(&section_hex, claim_hex)) {
+            return error.RuntimePolicyClaimMismatch;
+        }
+    }
+
+    fn validateEmbeddedRuntimePolicyAttestation(self: *Self) !void {
+        const jws = self.config.attestation_jws orelse return;
+        const section_sha256 = self.config.policy_section_sha256 orelse switch (self.config.handler) {
+            .appended_payload => {
+                if (!builtin.is_test) {
+                    std.log.err(
+                        "attestation: embedded runtime policy hash is missing; rebuild the artifact before serving",
+                        .{},
+                    );
+                }
+                return error.RuntimePolicySectionHashMissing;
+            },
+            else => return,
+        };
+        var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "attestation: embedded JWS failed self-verification ({s}); refusing to serve",
+                    .{@errorName(err)},
+                );
+            }
+            return error.InvalidEmbeddedAttestation;
+        };
+        defer verify_result.deinit();
+
+        validateRuntimePolicyClaim(
+            section_sha256,
+            verify_result.claims.runtime_policy_sha256,
+        ) catch |err| {
+            if (!builtin.is_test) {
+                switch (err) {
+                    error.RuntimePolicyClaimUnpinned => std.log.err(
+                        "attestation: artifact predates runtime policy binding and must be rebuilt; refusing to serve",
+                        .{},
+                    ),
+                    error.RuntimePolicyClaimMismatch => std.log.err(
+                        "attestation: embedded runtime policy does not match the signed claim; refusing to serve",
+                        .{},
+                    ),
+                }
+            }
+            return err;
+        };
+    }
+
     pub fn installDevAttestation(
         self: *Self,
         contract_json: []const u8,
@@ -2072,6 +2137,11 @@ pub const Server = struct {
                 };
             }
         }
+
+        // Self-extract artifacts carry the enforcement policy as section 4.
+        // Bind those exact bytes before any runtime is prewarmed. Dev/live
+        // reload leaves policy_section_sha256 null and is intentionally exempt.
+        try self.validateEmbeddedRuntimePolicyAttestation();
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
@@ -3652,4 +3722,132 @@ test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-close
     try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, &([_]u8{'0'} ** 64)));
     // A malformed (non-64-char) claim is rejected.
     try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, "abc"));
+}
+
+fn runtimePolicyClaimsForTest(runtime_policy_sha256: []const u8) attest_envelope.Claims {
+    return .{
+        .contract_sha256 = "0" ** 64,
+        .bytecode_sha256 = "0" ** 64,
+        .policy_sha256 = "0" ** 64,
+        .capability_hash = "0" ** 64,
+        .runtime_policy_sha256 = runtime_policy_sha256,
+        .compiler_version = "test",
+        .signed_at_unix = 0,
+        .property_summary = "",
+        .routes_count = 0,
+    };
+}
+
+fn serverForRuntimePolicyPayloadTest(
+    allocator: std.mem.Allocator,
+    payload: *const self_extract.Payload,
+) !Server {
+    return Server.init(allocator, .{
+        .handler = .{ .appended_payload = .{
+            .bytecode = payload.bytecode,
+            .dep_bytecodes = payload.dep_bytecodes,
+            .contract_json = payload.contract_json,
+        } },
+        .attestation_jws = payload.attestation_jws,
+        .policy_section_sha256 = payload.policy_section_sha256,
+        .pool_size = 1,
+        .log_requests = false,
+    });
+}
+
+test "self-extract runtime policy binding rejects a widened policy" {
+    const allocator = std.testing.allocator;
+    const original_policy = engine.RuntimePolicy{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} },
+    };
+    const original_policy_section = try self_extract.serializePolicy(allocator, &original_policy);
+    defer allocator.free(original_policy_section);
+    var original_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(original_policy_section, &original_digest, .{});
+    const original_hex = std.fmt.bytesToHex(original_digest, .lower);
+
+    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x42} ** 32);
+    var receipt = try attest_envelope.sign(
+        allocator,
+        runtimePolicyClaimsForTest(&original_hex),
+        key_pair,
+    );
+    defer receipt.deinit(allocator);
+
+    const widened_policy = engine.RuntimePolicy{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{
+            "api.allowed.example",
+            "evil.example",
+        } },
+    };
+    const serialized = try self_extract.serializePayload(allocator, .{
+        .bytecode = "bytecode",
+        .policy = &widened_policy,
+        .attestation = receipt.jws_compact,
+    });
+    defer allocator.free(serialized);
+    const payload = (try self_extract.parse(allocator, serialized)).?;
+    defer payload.deinit(allocator);
+    var server = try serverForRuntimePolicyPayloadTest(allocator, &payload);
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.RuntimePolicyClaimMismatch,
+        server.start(),
+    );
+}
+
+test "self-extract runtime policy binding rejects an unpinned receipt" {
+    const allocator = std.testing.allocator;
+    const policy = engine.RuntimePolicy{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} },
+    };
+    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x24} ** 32);
+    var receipt = try attest_envelope.sign(
+        allocator,
+        runtimePolicyClaimsForTest(attest_envelope.unpinned_runtime_policy_sha256),
+        key_pair,
+    );
+    defer receipt.deinit(allocator);
+    const serialized = try self_extract.serializePayload(allocator, .{
+        .bytecode = "bytecode",
+        .policy = &policy,
+        .attestation = receipt.jws_compact,
+    });
+    defer allocator.free(serialized);
+    const payload = (try self_extract.parse(allocator, serialized)).?;
+    defer payload.deinit(allocator);
+    var server = try serverForRuntimePolicyPayloadTest(allocator, &payload);
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.RuntimePolicyClaimUnpinned,
+        server.start(),
+    );
+}
+
+test "attested appended payload requires a parsed runtime policy hash" {
+    const allocator = std.testing.allocator;
+    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x18} ** 32);
+    var receipt = try attest_envelope.sign(
+        allocator,
+        runtimePolicyClaimsForTest("a" ** 64),
+        key_pair,
+    );
+    defer receipt.deinit(allocator);
+    var server = try Server.init(allocator, .{
+        .handler = .{ .appended_payload = .{
+            .bytecode = "bytecode",
+            .dep_bytecodes = &.{},
+        } },
+        .attestation_jws = receipt.jws_compact,
+        .pool_size = 1,
+        .log_requests = false,
+    });
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.RuntimePolicySectionHashMissing,
+        server.start(),
+    );
 }

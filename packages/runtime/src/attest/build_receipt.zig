@@ -20,6 +20,7 @@ pub fn buildJws(
     contract_json: []const u8,
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
+    runtime_policy_sha256: []const u8,
 ) ![]u8 {
     const loaded = identity.loadOrCreate(allocator) catch |err| {
         std.log.err(
@@ -31,7 +32,14 @@ pub fn buildJws(
     if (loaded.source == .generated) {
         std.log.info("attest: minted persistent identity (fingerprint {s})", .{loaded.fingerprint_hex[0..16]});
     }
-    return try buildJwsWithKey(allocator, contract_json, bytecode, contract, loaded.key_pair);
+    return try buildJwsWithKey(
+        allocator,
+        contract_json,
+        bytecode,
+        contract,
+        runtime_policy_sha256,
+        loaded.key_pair,
+    );
 }
 
 /// Produces a compact JWS for local dev receipts. Dev servers may run with a
@@ -43,7 +51,14 @@ pub fn buildDevJws(
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
 ) ![]u8 {
-    return try buildJwsWithKey(allocator, contract_json, bytecode, contract, loadPersistentOrEphemeralKey(allocator));
+    return try buildJwsWithKey(
+        allocator,
+        contract_json,
+        bytecode,
+        contract,
+        envelope.unpinned_runtime_policy_sha256,
+        loadPersistentOrEphemeralKey(allocator),
+    );
 }
 
 fn buildJwsWithKey(
@@ -51,6 +66,7 @@ fn buildJwsWithKey(
     contract_json: []const u8,
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
+    runtime_policy_sha256: []const u8,
     key_pair: Ed25519.KeyPair,
 ) ![]u8 {
     var contract_sha: [32]u8 = undefined;
@@ -80,6 +96,7 @@ fn buildJwsWithKey(
         .bytecode_sha256 = &bytecode_sha_hex,
         .policy_sha256 = &policy_sha_hex,
         .capability_hash = &capability_hash_hex,
+        .runtime_policy_sha256 = runtime_policy_sha256,
         .compiler_version = compiler_version_tag,
         .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
         .property_summary = property_summary,

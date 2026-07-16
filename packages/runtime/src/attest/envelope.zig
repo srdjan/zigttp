@@ -1,9 +1,10 @@
 //! Proof receipt envelope.
 //!
 //! Produces and verifies a compact JWS (RFC 7515 Section 7.1) that commits
-//! to a handler build's contract hash, bytecode hash, policy hash, and a
-//! human-readable property summary. Ed25519 signatures, public key embedded
-//! in the protected header so the JWS is self-contained.
+//! to a handler build's contract hash, bytecode hash, analyzer policy hash,
+//! serialized runtime policy hash, and a human-readable property summary.
+//! Ed25519 signatures, public key embedded in the protected header so the JWS
+//! is self-contained.
 //!
 //! Trust model: this confirms "whoever held this private key signed
 //! these claims," not "this key belongs to the legitimate operator."
@@ -16,6 +17,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
 pub const version_tag: []const u8 = "zigttp-attest-v1";
+pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
 
 /// Forty-byte payload caller assembles; sign() embeds it into the JWS.
 /// Hex fields are 64-character lowercase strings (the form `bytesToHex`
@@ -25,6 +27,7 @@ pub const Claims = struct {
     bytecode_sha256: []const u8,
     policy_sha256: []const u8,
     capability_hash: []const u8,
+    runtime_policy_sha256: []const u8 = unpinned_runtime_policy_sha256,
     compiler_version: []const u8,
     signed_at_unix: i64,
     property_summary: []const u8,
@@ -103,6 +106,7 @@ pub fn sign(
     try validateHexField(claims.bytecode_sha256);
     try validateHexField(claims.policy_sha256);
     try validateHexField(claims.capability_hash);
+    try validateHexField(claims.runtime_policy_sha256);
 
     const public_key_bytes = key_pair.public_key.bytes;
     const pubkey_b64 = encodeBase64Owned(allocator, &public_key_bytes) catch return error.OutOfMemory;
@@ -240,6 +244,7 @@ const wire_key = struct {
     const bytecode_sha256 = "bytecodeSha256";
     const policy_sha256 = "policySha256";
     const capability_hash = "capabilityHash";
+    const runtime_policy_sha256 = "runtimePolicySha256";
     const compiler_version = "compilerVersion";
     const signed_at = "signedAt";
     const property_summary = "propertySummary";
@@ -258,6 +263,7 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
             "\"" ++ wire_key.bytecode_sha256 ++ "\":\"{s}\"," ++
             "\"" ++ wire_key.policy_sha256 ++ "\":\"{s}\"," ++
             "\"" ++ wire_key.capability_hash ++ "\":\"{s}\"," ++
+            "\"" ++ wire_key.runtime_policy_sha256 ++ "\":\"{s}\"," ++
             "\"" ++ wire_key.compiler_version ++ "\":\"{s}\"," ++
             "\"" ++ wire_key.signed_at ++ "\":{d}," ++
             "\"" ++ wire_key.property_summary ++ "\":\"{s}\"," ++
@@ -272,6 +278,7 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
             claims.bytecode_sha256,
             claims.policy_sha256,
             claims.capability_hash,
+            claims.runtime_policy_sha256,
             claims.compiler_version,
             claims.signed_at_unix,
             claims.property_summary,
@@ -328,6 +335,12 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .bytecode_sha256 = try dupString(allocator, obj, wire_key.bytecode_sha256),
         .policy_sha256 = try dupString(allocator, obj, wire_key.policy_sha256),
         .capability_hash = try dupString(allocator, obj, wire_key.capability_hash),
+        .runtime_policy_sha256 = try dupStringDefault(
+            allocator,
+            obj,
+            wire_key.runtime_policy_sha256,
+            unpinned_runtime_policy_sha256,
+        ),
         .compiler_version = try dupString(allocator, obj, wire_key.compiler_version),
         .property_summary = try dupString(allocator, obj, wire_key.property_summary),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
@@ -386,6 +399,7 @@ fn testClaims() Claims {
         .bytecode_sha256 = "b" ** 64,
         .policy_sha256 = "c" ** 64,
         .capability_hash = "d" ** 64,
+        .runtime_policy_sha256 = "e" ** 64,
         .compiler_version = "0.0.0-test",
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
@@ -410,6 +424,7 @@ test "sign then verify recovers the same claims" {
     try std.testing.expectEqualStrings("b" ** 64, result.claims.bytecode_sha256);
     try std.testing.expectEqualStrings("c" ** 64, result.claims.policy_sha256);
     try std.testing.expectEqualStrings("d" ** 64, result.claims.capability_hash);
+    try std.testing.expectEqualStrings("e" ** 64, result.claims.runtime_policy_sha256);
     try std.testing.expectEqualStrings("0.0.0-test", result.claims.compiler_version);
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), result.claims.signed_at_unix);
@@ -419,6 +434,58 @@ test "sign then verify recovers the same claims" {
     try std.testing.expect(result.claims.durable_workflow_idempotent);
     try std.testing.expect(result.claims.durable_workflow_fault_covered);
     try std.testing.expectEqualSlices(u8, &kp.public_key.bytes, &result.public_key);
+}
+
+fn signPayloadJsonForTest(
+    allocator: std.mem.Allocator,
+    payload_json: []const u8,
+    key_pair: Ed25519.KeyPair,
+) ![]u8 {
+    const public_key_bytes = key_pair.public_key.bytes;
+    const pubkey_b64 = try encodeBase64Owned(allocator, &public_key_bytes);
+    defer allocator.free(pubkey_b64);
+    const header_json = try buildHeaderJson(
+        allocator,
+        keyFingerprint(public_key_bytes),
+        pubkey_b64,
+    );
+    defer allocator.free(header_json);
+    const header_b64 = try encodeBase64Owned(allocator, header_json);
+    defer allocator.free(header_b64);
+    const payload_b64 = try encodeBase64Owned(allocator, payload_json);
+    defer allocator.free(payload_b64);
+    const signing_input = try joinDot(allocator, header_b64, payload_b64);
+    defer allocator.free(signing_input);
+    const signature = key_pair.sign(signing_input, null) catch unreachable;
+    const signature_bytes = signature.toBytes();
+    const signature_b64 = try encodeBase64Owned(allocator, &signature_bytes);
+    defer allocator.free(signature_b64);
+    return joinDot(allocator, signing_input, signature_b64);
+}
+
+test "verify defaults a missing runtime policy claim to unpinned" {
+    const allocator = std.testing.allocator;
+    const payload =
+        "{\"v\":\"zigttp-attest-v1\"," ++
+        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
+        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
+        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"compilerVersion\":\"0.0.0-test\"," ++
+        "\"signedAt\":1700000000," ++
+        "\"propertySummary\":\"pure\"," ++
+        "\"routesCount\":1}";
+    const key_pair = try keyPairFromSeed(test_seed);
+    const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
+    defer allocator.free(jws);
+
+    var result = try verify(allocator, jws);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings(
+        unpinned_runtime_policy_sha256,
+        result.claims.runtime_policy_sha256,
+    );
 }
 
 test "parseClaims defaults missing durable workflow fields" {
@@ -440,12 +507,14 @@ test "parseClaims defaults missing durable workflow fields" {
         allocator.free(claims.bytecode_sha256);
         allocator.free(claims.policy_sha256);
         allocator.free(claims.capability_hash);
+        allocator.free(claims.runtime_policy_sha256);
         allocator.free(claims.compiler_version);
         allocator.free(claims.property_summary);
         allocator.free(claims.durable_workflow_proof_level);
     }
 
     try std.testing.expectEqualStrings("none", claims.durable_workflow_proof_level);
+    try std.testing.expectEqualStrings(unpinned_runtime_policy_sha256, claims.runtime_policy_sha256);
     try std.testing.expect(!claims.durable_workflow_retry_safe);
     try std.testing.expect(!claims.durable_workflow_idempotent);
     try std.testing.expect(!claims.durable_workflow_fault_covered);

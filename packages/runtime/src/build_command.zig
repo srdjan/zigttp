@@ -417,8 +417,8 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
 }
 
 /// Produces a compact JWS committing to (contract_json, bytecode,
-/// rule-registry policy, capability matrix) for the current build. Caller owns
-/// the returned bytes.
+/// rule-registry policy, capability matrix, serialized runtime policy) for the
+/// current build. Caller owns the returned bytes.
 /// Returns null when the compile did not yield a HandlerContract; we cannot
 /// sign chips we never derived.
 fn buildAttestationJws(
@@ -426,8 +426,15 @@ fn buildAttestationJws(
     contract_json: []const u8,
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
+    runtime_policy_sha256: []const u8,
 ) !?[]u8 {
-    return try attest_build_receipt.buildJws(allocator, contract_json, bytecode, contract);
+    return try attest_build_receipt.buildJws(
+        allocator,
+        contract_json,
+        bytecode,
+        contract,
+        runtime_policy_sha256,
+    );
 }
 
 fn serializeContractJson(
@@ -467,6 +474,7 @@ const ArtifactTailCapabilities = struct {
         contract_json: []const u8,
         bytecode: []const u8,
         contract: *const zigts.HandlerContract,
+        runtime_policy_sha256: []const u8,
     ) anyerror!?[]u8,
     create_artifact: *const fn (
         context: ?*anyopaque,
@@ -491,8 +499,15 @@ fn signContractCapability(
     contract_json: []const u8,
     bytecode: []const u8,
     contract: *const zigts.HandlerContract,
+    runtime_policy_sha256: []const u8,
 ) !?[]u8 {
-    return buildAttestationJws(allocator, contract_json, bytecode, contract);
+    return buildAttestationJws(
+        allocator,
+        contract_json,
+        bytecode,
+        contract,
+        runtime_policy_sha256,
+    );
 }
 
 fn createArtifactCapability(
@@ -540,6 +555,13 @@ fn writeArtifactTail(
         null;
     defer if (contract_json) |json| allocator.free(json);
 
+    const policy = if (input.contract) |contract|
+        zigts.handler_policy.contractToRuntimePolicy(contract)
+    else
+        zigts.handler_policy.RuntimePolicy{};
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
     const attestation_jws: ?[]u8 = blk: {
         if (!input.attest_requested) break :blk null;
         const json = contract_json orelse {
@@ -547,20 +569,20 @@ fn writeArtifactTail(
             break :blk null;
         };
         const contract = input.contract orelse break :blk null;
+        var runtime_policy_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
+        const runtime_policy_sha256 = std.fmt.bytesToHex(runtime_policy_digest, .lower);
         break :blk try capabilities.sign_contract(
             capabilities.context,
             allocator,
             json,
             input.bytecode,
             contract,
+            &runtime_policy_sha256,
         );
     };
     defer if (attestation_jws) |attestation| allocator.free(attestation);
 
-    const policy = if (input.contract) |contract|
-        zigts.handler_policy.contractToRuntimePolicy(contract)
-    else
-        zigts.handler_policy.RuntimePolicy{};
     try capabilities.create_artifact(
         capabilities.context,
         allocator,
@@ -571,6 +593,7 @@ fn writeArtifactTail(
             .dep_bytecodes = input.dep_bytecodes,
             .contract_json = contract_json,
             .policy = &policy,
+            .policy_section = policy_section,
             .attestation = attestation_jws,
         },
     );
@@ -809,6 +832,8 @@ const ArtifactTailProbe = struct {
     create_calls: usize = 0,
     created_with_contract: bool = false,
     created_with_attestation: bool = false,
+    signed_runtime_policy_sha256: ?[64]u8 = null,
+    created_runtime_policy_sha256: ?[64]u8 = null,
 
     fn fromContext(context: ?*anyopaque) *ArtifactTailProbe {
         return @ptrCast(@alignCast(context.?));
@@ -830,9 +855,14 @@ const ArtifactTailProbe = struct {
         _: []const u8,
         _: []const u8,
         _: *const zigts.HandlerContract,
+        runtime_policy_sha256: []const u8,
     ) !?[]u8 {
         const self = fromContext(context);
         self.sign_calls += 1;
+        if (runtime_policy_sha256.len != 64) return error.InvalidRuntimePolicyHash;
+        var copied: [64]u8 = undefined;
+        @memcpy(&copied, runtime_policy_sha256);
+        self.signed_runtime_policy_sha256 = copied;
         return try allocator.dupe(u8, "test-attestation");
     }
 
@@ -847,6 +877,10 @@ const ArtifactTailProbe = struct {
         self.create_calls += 1;
         self.created_with_contract = payload.contract_json != null;
         self.created_with_attestation = payload.attestation != null;
+        const policy_section = payload.policy_section orelse return error.MissingPolicySection;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(policy_section, &digest, .{});
+        self.created_runtime_policy_sha256 = std.fmt.bytesToHex(digest, .lower);
     }
 
     fn capabilities(self: *ArtifactTailProbe) ArtifactTailCapabilities {
@@ -980,6 +1014,14 @@ test "artifact tail embeds complete contracts and signs only when requested" {
         try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
         try std.testing.expect(probe.created_with_contract);
         try std.testing.expectEqual(attest_requested, probe.created_with_attestation);
+        try std.testing.expect(probe.created_runtime_policy_sha256 != null);
+        if (attest_requested) {
+            try std.testing.expectEqualSlices(
+                u8,
+                &probe.created_runtime_policy_sha256.?,
+                &probe.signed_runtime_policy_sha256.?,
+            );
+        }
     }
 }
 
