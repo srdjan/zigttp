@@ -822,6 +822,39 @@ test "durable recovery: the untracked startup path honors a standing dead-run re
     try testing.expectEqualStrings(oplog, oplog_after);
 }
 
+test "durable recovery: dead-run lookup errors fail closed without retrying" {
+    const allocator = testing.allocator;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const durable_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(durable_dir);
+
+    const run_key = "lookup-error:dead-run";
+    const filename = try std.fmt.allocPrint(allocator, "durable-{x}.jsonl", .{std.hash.Fnv1a_64.hash(run_key)});
+    defer allocator.free(filename);
+    const oplog_path = try std.fs.path.join(allocator, &.{ durable_dir, filename });
+    defer allocator.free(oplog_path);
+    const oplog =
+        "{\"type\":\"durable_run\",\"key\":\"lookup-error:dead-run\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n";
+    try zq.file_io.writeFile(allocator, oplog_path, oplog);
+
+    const dead_runs_path = try std.fs.path.join(allocator, &.{ durable_dir, "dead-runs" });
+    defer allocator.free(dead_runs_path);
+    try zq.file_io.writeFile(allocator, dead_runs_path, "not a directory");
+
+    var tracker = RetryTracker.init(allocator);
+    defer tracker.deinit();
+    const config = ServerConfig{
+        .handler = .{ .file_path = "/nonexistent/handler-for-dead-run-lookup-error-test.ts" },
+        .runtime_config = .{ .durable_oplog_dir = durable_dir },
+    };
+
+    try testing.expectEqual(@as(u32, 0), try recoverIncompleteOplogsTracked(allocator, config, &tracker));
+    try testing.expect(tracker.map.get(filename) == null);
+}
+
 test "durable recovery: recoverOne completes real JS execution without double-freeing bytecode" {
     // Regression: recoverOne re-executes the handler to completion (unlike
     // this file's other tests, which stop short of real JS execution - see
