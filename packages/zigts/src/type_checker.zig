@@ -1346,7 +1346,12 @@ pub const TypeChecker = struct {
 
         return switch (bin.op) {
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op, .eq, .neq => pool.idx_boolean,
-            .and_op, .or_op => pool.idx_boolean,
+            .and_op, .or_op => {
+                const lt = self.inferType(bin.left);
+                const rt = self.inferType(bin.right);
+                if (lt == null_type_idx or rt == null_type_idx) return null_type_idx;
+                return pool.addUnion(self.allocator, &.{ lt, rt });
+            },
             .sub, .mul, .div, .mod, .pow => pool.idx_number,
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => pool.idx_number,
             .add => {
@@ -1361,7 +1366,9 @@ pub const TypeChecker = struct {
                 const rt = self.inferType(bin.right);
                 const lt_tag = pool.getTag(lt);
                 if (lt_tag == .t_nullable) {
-                    return pool.getNullableInner(lt);
+                    const inner = pool.getNullableInner(lt);
+                    if (rt == null_type_idx) return null_type_idx;
+                    return pool.addUnion(self.allocator, &.{ inner, rt });
                 }
                 if (lt_tag == .t_undefined) return rt;
                 if (lt != null_type_idx) return lt; // non-nullable ?? anything -> left
@@ -2367,6 +2374,63 @@ test "TypeChecker: annotation rejects incompatible type" {
     try checkTypedSource(
         \\const bad: number = "oops";
     , 1, 0);
+}
+
+test "TypeChecker: logical and preserves matching operand type" {
+    try checkTypedSource(
+        \\const x: string = "x";
+        \\const y: string = "y";
+        \\const s: string = x && y;
+    , 0, 0);
+}
+
+test "TypeChecker: logical and rejects boolean annotation for string operands" {
+    try checkTypedSource(
+        \\const x: string = "x";
+        \\const y: string = "y";
+        \\const b: boolean = x && y;
+    , 1, 0);
+}
+
+test "TypeChecker: logical operators infer operand union" {
+    try checkTypedSource(
+        \\function combine(x: string, y: number) {
+        \\  const and_result: string | number = x && y;
+        \\  const or_result: string | number = x || y;
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: logical and flattens operand union for exact annotation" {
+    try checkTypedSource(
+        \\const value: string | number = "x";
+        \\const flag: boolean = true;
+        \\const result: string | number | boolean = value && flag;
+    , 0, 0);
+}
+
+test "TypeChecker: nullish coalescing includes fallback in nullable result" {
+    try checkTypedSource(
+        \\function maybe(): string | undefined { return undefined; }
+        \\const s: string = maybe() ?? 42;
+        \\const v: string | number = maybe() ?? 42;
+    , 1, 0);
+}
+
+test "TypeChecker: non-nullable nullish coalescing keeps left type" {
+    try checkTypedSource(
+        \\function defaultValue(value: string) {
+        \\  const result: string = value ?? 42;
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: undefined nullish coalescing returns fallback type" {
+    try checkTypedSource(
+        \\function defaultValue(fallback: number) {
+        \\  const result: number = undefined ?? fallback;
+        \\}
+    , 0, 0);
 }
 
 test "TypeChecker: rejects assignment to readonly property" {
