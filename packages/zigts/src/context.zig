@@ -1080,27 +1080,34 @@ pub const Context = struct {
         self.bytecode_roots.deinit(self.allocator);
         self.cached_bytecode.deinit(self.allocator);
 
-        // Destroy prototypes with destroyBuiltin to clean up their method properties
+        // Scrub every tracked builtin root before freeing any root. Builtins form
+        // a graph, so freeing in registration order would leave dangling slots.
         if (self.hidden_class_pool) |pool| {
-            if (self.array_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
-            if (self.string_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
-            if (self.object_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
-            if (self.function_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
-            if (self.generator_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
-            if (self.result_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.array_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
+            if (self.string_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
+            if (self.object_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
+            if (self.function_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
+            if (self.generator_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
+            if (self.result_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
 
-            // Destroy registered builtin objects (Math, JSON, console, etc.)
-            // Each builtin is destroyed with destroyBuiltin which also cleans up its function properties
             for (self.builtin_objects.items) |obj| {
-                obj.destroyBuiltin(self.allocator, pool);
+                obj.scrubBuiltin(self.allocator, pool);
             }
 
-            // Destroy global object directly (all function properties are in builtin_objects)
-            // Don't use destroyBuiltin because properties reference already-freed objects
-            // Fragment is null (not a string), so no string cleanup needed
-            if (self.global_obj) |g| {
-                g.destroy(self.allocator);
+            // All tracked slots are pointer-free; root destruction is now
+            // allocation-free and independent of registration order.
+            if (self.array_prototype) |proto| proto.destroy(self.allocator);
+            if (self.string_prototype) |proto| proto.destroy(self.allocator);
+            if (self.object_prototype) |proto| proto.destroy(self.allocator);
+            if (self.function_prototype) |proto| proto.destroy(self.allocator);
+            if (self.generator_prototype) |proto| proto.destroy(self.allocator);
+            if (self.result_prototype) |proto| proto.destroy(self.allocator);
+
+            for (self.builtin_objects.items) |obj| {
+                obj.destroy(self.allocator);
             }
+
+            if (self.global_obj) |g| g.destroy(self.allocator);
         }
         self.builtin_objects.deinit(self.allocator);
         if (self.http_strings) |cache| {

@@ -1033,8 +1033,6 @@ pub const HandlerPool = struct {
 const testing = std.testing;
 
 test "WorkerRuntimeLease deinit is a no-op after quarantine" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -1066,8 +1064,6 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
 }
 
 test "acquireForRequest waits out contention up to the timeout, not a retry cap" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -1108,8 +1104,6 @@ test "acquireForRequest waits out contention up to the timeout, not a retry cap"
 }
 
 test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -1130,8 +1124,6 @@ test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
 }
 
 test "reuse_unbounded runtime recycles once its dynamic atom count reaches the threshold" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -1163,8 +1155,6 @@ test "reuse_unbounded runtime recycles once its dynamic atom count reaches the t
 }
 
 test "reuse_unbounded runtime under the atom threshold is not recycled" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
@@ -1191,8 +1181,6 @@ test "reuse_unbounded runtime under the atom threshold is not recycled" {
 }
 
 test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instead of crashing" {
-    if (builtin.os.tag == .linux) return error.SkipZigTest;
-
     const allocator = std.heap.c_allocator;
 
     // Build a minimal but valid handler FunctionBytecode with one int constant
