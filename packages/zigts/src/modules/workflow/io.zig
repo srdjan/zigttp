@@ -338,12 +338,18 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
         if (!collection_done) freeDescriptors(&descriptor_buf, collector.count, ctx.allocator);
     }
 
+    var desc_for_thunk: [MAX_PARALLEL]?u32 = @splat(null);
     for (0..count) |i| {
+        const before = collector.count;
         const thunk = arr.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
         if (!thunk.isObject()) {
             return util.throwError(ctx, "TypeError", "race() expects an array of functions");
         }
         _ = try callbacks.call_thunk_fn(callbacks.runtime_ptr, thunk);
+        if (collector.count > before) {
+            // Match parallel(): earlier fetches are effects; the last is the value.
+            desc_for_thunk[i] = collector.count - 1;
+        }
     }
     collection_done = true;
 
@@ -364,19 +370,23 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
         results[0..desc_count],
     );
 
-    // Phase 3: Pick the first successful result in declaration order.
+    // Phase 3: Pick the first successful thunk in declaration order.
     // All threads have already joined in execute_fetches_fn, so "first"
     // means first in the caller's array, not first by wall-clock time.
-    var winner_idx: ?usize = null;
-    for (0..desc_count) |i| {
-        if (results[i].ok) {
-            winner_idx = i;
+    var first_thunk_idx: ?usize = null;
+    var winner_thunk_idx: ?usize = null;
+    for (0..count) |i| {
+        const desc_idx = desc_for_thunk[i] orelse continue;
+        if (first_thunk_idx == null) first_thunk_idx = i;
+        if (results[desc_idx].ok) {
+            winner_thunk_idx = i;
             break;
         }
     }
 
-    // If no successful result, return the first error response
-    const idx = winner_idx orelse 0;
+    // If no thunk succeeded, return the first thunk's final error response.
+    const thunk_idx = winner_thunk_idx orelse first_thunk_idx orelse unreachable;
+    const idx = desc_for_thunk[thunk_idx] orelse unreachable;
     const resp_val = callbacks.build_response_fn(callbacks.runtime_ptr, &results[idx]) catch value.JSValue.undefined_val;
 
     // Clean up all results and descriptors
@@ -653,4 +663,108 @@ test "parallel: a thrown thunk propagates instead of being swallowed" {
         parallelNative(ctx, value.JSValue.undefined_val, &.{arr.toValue()}),
     );
     try std.testing.expect(parallel_collector == null);
+}
+
+const RaceTestState = struct {
+    fetches_per_thunk: []const u8,
+    result_ok: []const bool,
+    thunk_index: usize = 0,
+
+    fn callThunk(runtime_ptr: *anyopaque, _: value.JSValue) anyerror!value.JSValue {
+        const self: *RaceTestState = @ptrCast(@alignCast(runtime_ptr));
+        const fetch_count = self.fetches_per_thunk[self.thunk_index];
+        self.thunk_index += 1;
+
+        const col = parallel_collector.?;
+        for (0..fetch_count) |_| {
+            col.descriptors[col.count] = .{
+                .url = try col.allocator.dupe(u8, "https://x"),
+                .method = .GET,
+                .body = null,
+                .headers = .empty,
+                .max_response_bytes = 1024,
+            };
+            col.count += 1;
+        }
+        return value.JSValue.undefined_val;
+    }
+
+    fn exec(runtime_ptr: *anyopaque, _: []const FetchDescriptor, results: []FetchResult) void {
+        const self: *RaceTestState = @ptrCast(@alignCast(runtime_ptr));
+        for (results, 0..) |*result, i| {
+            result.ok = self.result_ok[i];
+            result.status = @intCast(200 + i);
+        }
+    }
+
+    fn build(_: *anyopaque, result: *const FetchResult) anyerror!value.JSValue {
+        return value.JSValue.fromInt(result.status);
+    }
+};
+
+fn runRaceTest(fetches_per_thunk: []const u8, result_ok: []const bool) !value.JSValue {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../../gc.zig");
+    const heap_mod = @import("../../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    var state = RaceTestState{
+        .fetches_per_thunk = fetches_per_thunk,
+        .result_ok = result_ok,
+    };
+    const callbacks = try allocator.create(IoCallbacks);
+    callbacks.* = .{
+        .call_thunk_fn = RaceTestState.callThunk,
+        .execute_fetches_fn = RaceTestState.exec,
+        .build_response_fn = RaceTestState.build,
+        .runtime_ptr = &state,
+    };
+    ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(callbacks), &IoCallbacks.deinitOpaque);
+
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    const arr = try ctx.createArray();
+    defer arr.destroy(allocator);
+    var thunks: [MAX_PARALLEL]*object.JSObject = undefined;
+    for (0..fetches_per_thunk.len) |i| {
+        thunks[i] = try ctx.createObject(ctx.object_prototype);
+        try arr.arrayPush(ctx.allocator, thunks[i].toValue());
+    }
+    defer for (thunks[0..fetches_per_thunk.len]) |thunk| thunk.destroy(allocator);
+
+    return raceNative(ctx, value.JSValue.undefined_val, &.{arr.toValue()});
+}
+
+test "race: a thunk resolves to its final fetch" {
+    const result = try runRaceTest(&.{ 2, 0 }, &.{ true, true });
+    try std.testing.expectEqual(value.JSValue.fromInt(201), result);
+}
+
+test "race: a second thunk can win" {
+    const result = try runRaceTest(&.{ 1, 1 }, &.{ false, true });
+    try std.testing.expectEqual(value.JSValue.fromInt(201), result);
+}
+
+test "race: all failing thunks return the first thunk error" {
+    const result = try runRaceTest(&.{ 1, 1 }, &.{ false, false });
+    try std.testing.expectEqual(value.JSValue.fromInt(200), result);
+}
+
+test "race: single-fetch thunks keep declaration-order semantics" {
+    const result = try runRaceTest(&.{ 1, 1, 1 }, &.{ true, true, true });
+    try std.testing.expectEqual(value.JSValue.fromInt(200), result);
 }
