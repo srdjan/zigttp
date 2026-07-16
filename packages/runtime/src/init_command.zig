@@ -137,8 +137,11 @@ fn freeScaffoldPaths(allocator: std.mem.Allocator, paths: [][]u8) void {
     allocator.free(paths);
 }
 
-fn refuseExistingTargets(io: std.Io, paths: []const []const u8) !void {
+fn refuseExistingTargets(io: std.Io, paths: []const []const u8, preserved_path: ?[]const u8) !void {
     for (paths) |path| {
+        if (preserved_path) |preserved| {
+            if (std.mem.eql(u8, path, preserved)) continue;
+        }
         std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
@@ -152,10 +155,13 @@ fn createScaffoldDir(io: std.Io, path: []const u8) !bool {
     return try std.Io.Dir.cwd().createDirPathStatus(io, path, .default_dir) == .created;
 }
 
-fn rollbackScaffoldFiles(io: std.Io, paths: []const []const u8) void {
+fn rollbackScaffoldFiles(io: std.Io, paths: []const []const u8, preserved_path: ?[]const u8) void {
     var i = paths.len;
     while (i > 0) {
         i -= 1;
+        if (preserved_path) |preserved| {
+            if (std.mem.eql(u8, paths[i], preserved)) continue;
+        }
         std.Io.Dir.cwd().deleteFile(io, paths[i]) catch {};
     }
 }
@@ -172,8 +178,8 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    // Refuse the whole scaffold before writing if any target file exists.
-    // Unrelated contents in a pre-existing directory are left alone.
+    // Named init scaffolds refuse every existing target before writing. The
+    // in-place studio preflight preserves a caller-owned .gitignore.
     const relative_paths = [_][]const u8{
         "zigttp.json",
         handlerPathForTemplate(template),
@@ -184,7 +190,16 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     };
     const paths = try scaffoldPaths(allocator, name, &relative_paths);
     defer freeScaffoldPaths(allocator, paths);
-    try refuseExistingTargets(io, paths);
+    const in_place_preflight = std.mem.eql(u8, name, ".");
+    const preserve_gitignore = if (in_place_preflight) blk: {
+        std.Io.Dir.access(std.Io.Dir.cwd(), io, paths[3], .{}) catch |err| switch (err) {
+            error.FileNotFound => break :blk false,
+            else => return err,
+        };
+        break :blk true;
+    } else false;
+    const preserved_path: ?[]const u8 = if (preserve_gitignore) paths[3] else null;
+    try refuseExistingTargets(io, paths, preserved_path);
 
     const project_dir_created = try createScaffoldDir(io, name);
     errdefer if (project_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
@@ -202,7 +217,7 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     errdefer if (public_dir_created) std.Io.Dir.cwd().deleteDir(io, public_dir) catch {};
 
     var files_written: usize = 0;
-    errdefer rollbackScaffoldFiles(io, paths[0..files_written]);
+    errdefer rollbackScaffoldFiles(io, paths[0..files_written], preserved_path);
 
     try writeProjectFile(allocator, paths[0], switch (template) {
         .basic, .api => defaultManifest,
@@ -221,7 +236,7 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
         .htmx => htmxTests,
     });
     files_written += 1;
-    try writeProjectFile(allocator, paths[3], gitignoreSource);
+    if (!preserve_gitignore) try writeProjectFile(allocator, paths[3], gitignoreSource);
     files_written += 1;
     try writeProjectFile(allocator, paths[4], switch (template) {
         .basic => basicReadme,
@@ -249,7 +264,7 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
     };
     const paths = try scaffoldPaths(allocator, name, &relative_paths);
     defer freeScaffoldPaths(allocator, paths);
-    try refuseExistingTargets(io, paths);
+    try refuseExistingTargets(io, paths, null);
 
     const extension_dir_created = try createScaffoldDir(io, name);
     errdefer if (extension_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
@@ -259,7 +274,7 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
     errdefer if (src_dir_created) std.Io.Dir.cwd().deleteDir(io, src_dir) catch {};
 
     var files_written: usize = 0;
-    errdefer rollbackScaffoldFiles(io, paths[0..files_written]);
+    errdefer rollbackScaffoldFiles(io, paths[0..files_written], null);
 
     const manifest = try renderExtensionTemplate(allocator, io, extension_manifest_template, name);
     defer allocator.free(manifest);
@@ -984,6 +999,50 @@ test "init preserves a pre-existing README" {
     defer testing.allocator.free(readme);
     try testing.expectEqualStrings("user readme\n", readme);
     try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{}));
+}
+
+test "studio scaffold preserves a pre-existing gitignore in a dotfile-only cwd" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zigts.file_io.writeFileCreateExclusive(testing.allocator, ".gitignore", "user rules\n");
+    try scaffoldProject(testing.allocator, ".", .basic);
+
+    const contents = try zigts.file_io.readFile(testing.allocator, ".gitignore", 1024);
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("user rules\n", contents);
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+}
+
+test "init refuses a pre-existing gitignore in a named project" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "demo");
+    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/.gitignore", "user rules\n");
+    try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
+
+    const contents = try zigts.file_io.readFile(testing.allocator, "demo/.gitignore", 1024);
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("user rules\n", contents);
 }
 
 test "init preserves a pre-existing handler" {

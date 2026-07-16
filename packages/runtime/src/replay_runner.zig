@@ -31,8 +31,8 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     const groups = loaded.groups;
 
     if (groups.len == 0) {
-        std.log.info("No traces found in '{s}'\n", .{replay_path});
-        return;
+        if (!builtin.is_test) std.log.err("Replay fixture '{s}' contains no request traces", .{replay_path});
+        return error.InvalidReplayFixture;
     }
 
     const handler_source = handler_loader.load(allocator, config.handler) catch |err| {
@@ -82,9 +82,6 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     if (summary.identical == summary.total) {
         std.log.info("\nAll {d} traces passed.\n", .{summary.total});
         return;
-    }
-    for (results.items) |result| {
-        if (result.err != null) return error.ReplayExecutionFailed;
     }
     return error.ReplayVerificationFailed;
 }
@@ -558,6 +555,15 @@ const replay_exit_test_trace =
     \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
 ;
 
+const replay_mismatch_and_error_trace =
+    \\{"type":"request","method":"GET","url":"/mismatch","headers":{},"body":null}
+    \\{"type":"response","status":200,"headers":{},"body":"{\"ok\":true}"}
+    \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+    \\{"type":"request","method":"GET","url":"/error","headers":{},"body":null}
+    \\{"type":"response","status":200,"headers":{},"body":"{\"ok\":true}"}
+    \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+;
+
 fn replayExitTestPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root_buf);
@@ -575,6 +581,105 @@ test "replay mismatch returns verification failure" {
     const trace_path = try replayExitTestPath(allocator, &tmp);
     const config = ServerConfig{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: false }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, config));
+}
+
+test "replay rejects a malformed trace line" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "not json\n" });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.InvalidTraceJson, run(allocator, config));
+}
+
+test "replay rejects an unknown trace entry type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fixture =
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"respones","status":200,"headers":{},"body":"ok"}
+        \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = fixture });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, config));
+}
+
+test "replay rejects a truncated response-less trace" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fixture =
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = fixture });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, config));
+}
+
+test "replay rejects a zero-trace fixture" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "" });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
+        .runtime_config = .{ .replay_file_path = trace_path },
+    };
+
+    try std.testing.expectError(error.InvalidReplayFixture, run(allocator, config));
+}
+
+test "replay trace errors and mismatches are verification failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_mismatch_and_error_trace });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    const config = ServerConfig{
+        .handler = .{ .inline_code =
+        \\function handler(req) {
+        \\  if (req.path === "/error") return missing();
+        \\  return Response.json({ ok: false });
+        \\}
+        },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 

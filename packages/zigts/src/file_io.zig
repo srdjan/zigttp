@@ -129,28 +129,45 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     if (std.c.rename(tmp_path_z, path_z) != 0) return error.WriteFailure;
 }
 
-/// Create a new file without replacing an existing destination. A failed write
-/// removes the file created by this call, so callers never leave partial data.
-pub fn writeFileCreateExclusive(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
+const ExclusiveCommitCapability = struct {
+    context: ?*anyopaque = null,
+    before_link: *const fn (?*anyopaque, []const u8) anyerror!void = noOpBeforeExclusiveLink,
 
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
-        0o600,
-    );
-    errdefer _ = std.c.unlink(path_z);
-    defer std.Io.Threaded.closeFd(fd);
-
-    var total_written: usize = 0;
-    while (total_written < data.len) {
-        const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
-        if (result <= 0) return error.WriteFailure;
-        total_written += @intCast(result);
+    fn beforeLink(self: ExclusiveCommitCapability, path: []const u8) !void {
+        try self.before_link(self.context, path);
     }
-    if (std.c.fsync(fd) != 0) return error.WriteFailure;
+};
+
+fn noOpBeforeExclusiveLink(_: ?*anyopaque, _: []const u8) !void {}
+
+/// Create a new file without replacing an existing destination. The complete
+/// contents are fsynced to a sibling temp, then linked to the destination. The
+/// hard link is atomic and fails if another writer created the destination.
+pub fn writeFileCreateExclusive(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    return writeFileCreateExclusiveWithCommit(allocator, path, data, .{});
+}
+
+fn writeFileCreateExclusiveWithCommit(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    data: []const u8,
+    commit: ExclusiveCommitCapability,
+) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var atomic_file = try std.Io.Dir.cwd().createFileAtomic(io, path, .{
+        .permissions = std.Io.File.Permissions.fromMode(0o600),
+        .replace = false,
+    });
+    defer atomic_file.deinit(io);
+
+    try atomic_file.file.writeStreamingAll(io, data);
+    try atomic_file.file.sync(io);
+
+    try commit.beforeLink(path);
+    try atomic_file.link(io);
 }
 
 pub const FdStat = struct { size: u64, mode: u32 };
@@ -248,6 +265,38 @@ test "writeFileCreateExclusive preserves an existing file" {
     const contents = try readFile(allocator, path, 1024);
     defer allocator.free(contents);
     try testing.expectEqualStrings("original\n", contents);
+}
+
+const ExclusiveRaceTarget = struct {
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+
+    fn create(context: ?*anyopaque, path: []const u8) !void {
+        const self: *ExclusiveRaceTarget = @ptrCast(@alignCast(context.?));
+        try writeFileCreateExclusive(self.allocator, path, self.contents);
+    }
+};
+
+test "writeFileCreateExclusive does not clobber a target that appears before commit" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmpFilePath(allocator, tmp, "race.txt");
+    defer allocator.free(path);
+    var race = ExclusiveRaceTarget{ .allocator = allocator, .contents = "winner\n" };
+
+    try testing.expectError(error.PathAlreadyExists, writeFileCreateExclusiveWithCommit(
+        allocator,
+        path,
+        "loser\n",
+        .{ .context = &race, .before_link = ExclusiveRaceTarget.create },
+    ));
+
+    const contents = try readFile(allocator, path, 1024);
+    defer allocator.free(contents);
+    try testing.expectEqualStrings("winner\n", contents);
 }
 
 test "openAppend creates new files with mode 0600" {

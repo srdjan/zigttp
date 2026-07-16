@@ -343,7 +343,7 @@ fn serveCommandWithDebugPanicPath(
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config) catch |err| {
-            if (err != error.ReplayVerificationFailed and err != error.ReplayExecutionFailed) {
+            if (err != error.ReplayVerificationFailed) {
                 std.log.err("Replay error: {}", .{err});
             }
             std.process.exit(replayExitCode(err));
@@ -1042,8 +1042,10 @@ test "formatAddressInUse names the port and the remedy" {
     try std.testing.expect(std.mem.indexOf(u8, line, "zigttp dev -p") != null);
 }
 
-test "replay exit codes distinguish mismatches from execution errors" {
+test "replay exit codes distinguish verification failures from invalid fixtures" {
     try std.testing.expectEqual(@as(u8, 1), replayExitCode(error.ReplayVerificationFailed));
-    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.ReplayExecutionFailed));
+    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.InvalidReplayFixture));
+    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.InvalidTraceJson));
+    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.InvalidTraceEntry));
     try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.FileNotFound));
 }
