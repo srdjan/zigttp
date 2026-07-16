@@ -81,6 +81,11 @@ pub const Diagnostic = struct {
 // ---------------------------------------------------------------------------
 
 pub const TypeChecker = struct {
+    const CallableMetadata = union(enum) {
+        unavailable,
+        signature: type_env_mod.FunctionSig,
+    };
+
     const CompiledSchemaType = struct {
         name: []const u8,
         type_idx: TypeIndex,
@@ -89,6 +94,7 @@ pub const TypeChecker = struct {
     const ActiveDeclaredType = struct {
         name_atom: u16,
         type_idx: TypeIndex,
+        callable: CallableMetadata = .unavailable,
     };
 
     allocator: std.mem.Allocator,
@@ -101,6 +107,10 @@ pub const TypeChecker = struct {
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
+    /// Callable metadata for declarations keyed by packed(scope_id, slot).
+    /// An explicit `unavailable` entry is significant: it prevents a local
+    /// binding from inheriting an unrelated module signature by bare name.
+    binding_callables: std.AutoHashMapUnmanaged(u32, CallableMetadata),
     /// Declared parameter types keyed by (scope_id, slot). Kept SEPARATE from
     /// `binding_types` deliberately: feeding parameter types into general
     /// identifier inference would subject every `req: Request` argument to
@@ -141,6 +151,7 @@ pub const TypeChecker = struct {
             .diagnostics = .empty,
             .compiled_schemas = .empty,
             .binding_types = .empty,
+            .binding_callables = .empty,
             .param_types = .empty,
             .var_name_ordinals = .empty,
             .active_declared_types = .empty,
@@ -161,6 +172,7 @@ pub const TypeChecker = struct {
         }
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
+        self.binding_callables.deinit(self.allocator);
         self.param_types.deinit(self.allocator);
         self.var_name_ordinals.deinit(self.allocator);
         self.active_declared_types.deinit(self.allocator);
@@ -251,16 +263,18 @@ pub const TypeChecker = struct {
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 const declared = self.bindVarDeclaration(vd.binding);
+                self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
+                    const inferred = self.inferType(vd.init);
+                    self.bindCallableMetadata(vd.binding, self.callableMetadataForExpression(vd.init, inferred));
 
                     // Check: does the initializer type match the declared type?
                     const binding = vd.binding;
                     const key = packBindingKey(binding.scope_id, binding.slot);
-                    const inferred = self.inferType(vd.init);
 
                     if (declared != null_type_idx and inferred != null_type_idx) {
-                        if (!self.env.pool.isAssignableTo(inferred, declared)) {
+                        if (!self.env.isAssignableTo(inferred, declared)) {
                             self.addTypeMismatch(node, declared, inferred);
                         }
                     }
@@ -342,7 +356,7 @@ pub const TypeChecker = struct {
                     // Check return type against declared return type
                     if (self.current_return_type != null_type_idx) {
                         const inferred = self.inferType(ret_val);
-                        if (inferred != null_type_idx and !self.env.pool.isAssignableTo(inferred, self.current_return_type)) {
+                        if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
                             self.addDiagnostic(.{
                                 .severity = .err,
                                 .kind = .return_type_mismatch,
@@ -398,11 +412,16 @@ pub const TypeChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 const func = self.ir_view.getFunction(decl.init) orelse return;
+                self.pushActiveDeclared(decl.binding.name_atom, null_type_idx);
+                const fn_name = self.resolveAtomName(decl.binding.name_atom);
+                const sig = if (fn_name) |name| self.env.getSourceFnSigByName(name) else null;
+                self.bindCallableMetadata(
+                    decl.binding,
+                    if (sig) |s| .{ .signature = s } else .unavailable,
+                );
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
                 // Named declarations resolve signatures by binding identity.
-                const fn_name = self.resolveAtomName(decl.binding.name_atom);
-                const sig = if (fn_name) |name| self.env.getFnSigByName(name) else null;
                 const saved_return = self.current_return_type;
                 if (sig) |s| {
                     // Proof markers (Spec/Proof/Effects capsules) are
@@ -410,8 +429,8 @@ pub const TypeChecker = struct {
                     // value can satisfy; compare returns against the value
                     // type only.
                     self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                    self.registerParamTypes(func, s);
                 }
+                self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
@@ -425,8 +444,8 @@ pub const TypeChecker = struct {
                 const saved_return = self.current_return_type;
                 if (sig) |s| {
                     self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                    self.registerParamTypes(func, s);
                 }
+                self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
@@ -519,7 +538,7 @@ pub const TypeChecker = struct {
                     if (self.binding_types.get(key)) |declared| {
                         if (asgn.op == null) {
                             const val_type = self.inferType(asgn.value);
-                            if (val_type != null_type_idx and !self.env.pool.isAssignableTo(val_type, declared)) {
+                            if (val_type != null_type_idx and !self.env.isAssignableTo(val_type, declared)) {
                                 self.addTypeMismatch(node, declared, val_type);
                             }
                         }
@@ -596,13 +615,15 @@ pub const TypeChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
+                const active_start = self.active_declared_types.items.len;
+                defer self.active_declared_types.items.len = active_start;
                 const loc = self.ir_view.getLoc(node);
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
                 if (sig) |s| {
                     self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                    self.registerParamTypes(func, s);
                 }
+                self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
@@ -1316,8 +1337,8 @@ pub const TypeChecker = struct {
         const matched = blk: {
             for (self.env.pool.getUnionMembers(current)) |member_type| {
                 const field = self.env.pool.lookupRecordField(member_type, prop_name) orelse continue;
-                if (self.env.pool.isAssignableTo(field.type_idx, literal_type) and
-                    self.env.pool.isAssignableTo(literal_type, field.type_idx))
+                if (self.env.isAssignableTo(field.type_idx, literal_type) and
+                    self.env.isAssignableTo(literal_type, field.type_idx))
                 {
                     break :blk member_type;
                 }
@@ -1650,6 +1671,12 @@ pub const TypeChecker = struct {
         if (callee_tag != .identifier) return null_type_idx;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
+        if (self.boundCallableMetadata(binding)) |metadata| {
+            return switch (metadata) {
+                .unavailable => null_type_idx,
+                .signature => |sig| sig.return_type,
+            };
+        }
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         if (std.mem.eql(u8, name, "serviceCall")) {
             const service_call_type = self.inferServiceCallType(call);
@@ -1734,6 +1761,84 @@ pub const TypeChecker = struct {
         }) catch self.markAllocationFailure();
     }
 
+    fn bindCallableMetadata(self: *TypeChecker, binding: ir.BindingRef, metadata: CallableMetadata) void {
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        self.binding_callables.put(self.allocator, key, metadata) catch {
+            self.markAllocationFailure();
+            return;
+        };
+
+        var i = self.active_declared_types.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.active_declared_types.items[i].name_atom == binding.name_atom) {
+                self.active_declared_types.items[i].callable = metadata;
+                return;
+            }
+        }
+    }
+
+    fn boundCallableMetadata(self: *const TypeChecker, binding: ir.BindingRef) ?CallableMetadata {
+        if (binding.kind == .upvalue) {
+            var i = self.active_declared_types.items.len;
+            while (i > 0) {
+                i -= 1;
+                const active = self.active_declared_types.items[i];
+                if (active.name_atom == binding.name_atom) return active.callable;
+            }
+            return null;
+        }
+
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        return self.binding_callables.get(key);
+    }
+
+    fn callableSignatureForBinding(self: *const TypeChecker, binding: ir.BindingRef) ?type_env_mod.FunctionSig {
+        if (self.boundCallableMetadata(binding)) |metadata| {
+            return switch (metadata) {
+                .unavailable => null,
+                .signature => |sig| sig,
+            };
+        }
+
+        const name = self.resolveAtomName(binding.name_atom) orelse return null;
+        return self.env.getFnSigByName(name);
+    }
+
+    fn callableMetadataForExpression(self: *const TypeChecker, node: NodeIndex, inferred: TypeIndex) CallableMetadata {
+        const tag = self.ir_view.getTag(node) orelse return .unavailable;
+        return switch (tag) {
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk .unavailable;
+                const sig = self.callableSignatureForBinding(binding) orelse break :blk .unavailable;
+                break :blk .{ .signature = sig };
+            },
+            .function_expr, .arrow_function => blk: {
+                const loc = self.ir_view.getLoc(node) orelse break :blk .unavailable;
+                const sig = self.env.getFnSigByLoc(loc.line) orelse break :blk .unavailable;
+                break :blk .{ .signature = sig };
+            },
+            else => self.callableMetadataFromType(inferred),
+        };
+    }
+
+    fn callableMetadataFromType(self: *const TypeChecker, type_idx: TypeIndex) CallableMetadata {
+        if (self.env.pool.getTag(type_idx) != .t_function) return .unavailable;
+        const info = self.env.pool.getFunctionInfo(type_idx);
+        if (info.params.len > 16) return .unavailable;
+
+        var sig: type_env_mod.FunctionSig = .{};
+        sig.param_count = @intCast(info.params.len);
+        sig.return_type = info.ret;
+        var required_param_count: u8 = 0;
+        for (info.params, 0..) |param, i| {
+            sig.param_types[i] = param.type_idx;
+            if (!param.optional) required_param_count += 1;
+        }
+        sig.required_param_count = required_param_count;
+        return .{ .signature = sig };
+    }
+
     fn declaredTypeForBinding(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
         if (self.env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |declared| {
             return declared;
@@ -1806,6 +1911,7 @@ pub const TypeChecker = struct {
             const binding = self.ir_view.paramBinding(param_idx) orelse continue;
             const param_type = if (i < sig.param_count) sig.param_types[i] else null_type_idx;
             self.pushActiveDeclared(binding.name_atom, param_type);
+            self.bindCallableMetadata(binding, self.callableMetadataFromType(param_type));
             if (param_type == null_type_idx) continue;
             const key = packBindingKey(binding.scope_id, binding.slot);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
@@ -1863,7 +1969,7 @@ pub const TypeChecker = struct {
                     if (i >= call.args_count) break;
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     const arg_type = self.inferType(arg_idx);
-                    if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param.type_idx)) {
+                    if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.isAssignableTo(arg_type, param.type_idx)) {
                         self.addArgTypeMismatch(arg_idx, param.type_idx, arg_type);
                     }
                 }
@@ -1902,7 +2008,7 @@ pub const TypeChecker = struct {
                 for (0..param_count) |i| {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     const arg_type = self.inferType(arg_idx);
-                    if (arg_type != null_type_idx and param_types[i] != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param_types[i])) {
+                    if (arg_type != null_type_idx and param_types[i] != null_type_idx and !self.env.isAssignableTo(arg_type, param_types[i])) {
                         self.addArgTypeMismatch(arg_idx, param_types[i], arg_type);
                     }
                 }
@@ -1912,9 +2018,13 @@ pub const TypeChecker = struct {
         if (callee_tag != .identifier) return;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return;
-        const name = self.resolveAtomName(binding.name_atom) orelse return;
+        const bound_metadata = self.boundCallableMetadata(binding);
+        const unbound_name = if (bound_metadata == null)
+            self.resolveAtomName(binding.name_atom)
+        else
+            null;
 
-        if (std.mem.eql(u8, name, "serviceCall")) {
+        if (unbound_name) |name| if (std.mem.eql(u8, name, "serviceCall")) {
             const service_context = self.service_type_context orelse return;
             if (call.args_count >= 2) {
                 const service_node = self.ir_view.getListIndex(call.args_start, 0);
@@ -1929,9 +2039,15 @@ pub const TypeChecker = struct {
                     }
                 }
             }
-        }
+        };
 
-        const sig = self.env.getFnSigByName(name) orelse return;
+        const sig = if (bound_metadata) |metadata|
+            switch (metadata) {
+                .unavailable => return,
+                .signature => |signature| signature,
+            }
+        else
+            self.env.getFnSigByName(unbound_name orelse return) orelse return;
 
         // Check argument count
         const required_param_count = sig.required_param_count orelse sig.param_count;
@@ -1946,7 +2062,7 @@ pub const TypeChecker = struct {
             const arg_idx = self.ir_view.getListIndex(call.args_start, i);
             const arg_type = self.inferType(arg_idx);
             if (arg_type != null_type_idx and sig.param_types[i] != null_type_idx) {
-                if (!self.env.pool.isAssignableTo(arg_type, sig.param_types[i])) {
+                if (!self.env.isAssignableTo(arg_type, sig.param_types[i])) {
                     self.addArgTypeMismatch(arg_idx, sig.param_types[i], arg_type);
                 }
             }
@@ -2535,6 +2651,68 @@ test "TypeChecker: correct local annotation in exported handler passes" {
         \\  return Response.json({ value: n });
         \\}
     , 0, 0);
+}
+
+test "TypeChecker: colliding locals use their initializer signatures" {
+    try checkTypedSource(
+        \\function one(value: string): string { return value; }
+        \\function none(): string { return "ok"; }
+        \\function handler() {
+        \\  const request = one;
+        \\  const run = none;
+        \\  const scope = one;
+        \\  const fetch = none;
+        \\  request("request");
+        \\  run();
+        \\  scope("scope");
+        \\  fetch();
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: non-callable colliding locals do not inherit module signatures" {
+    try checkTypedSource(
+        \\function handler(send) {
+        \\  const request = 42;
+        \\  const run = "not callable";
+        \\  send();
+        \\  request();
+        \\  run();
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: module signature aliases preserve required parameter count" {
+    try checkTypedSource(
+        \\import { fetchWithRetry } from "zigttp:fetch";
+        \\function handler() {
+        \\  const request = fetchWithRetry;
+        \\  request("https://example.com");
+        \\}
+    , 0, 0);
+}
+
+test "TypeChecker: user function aliases carry the function signature" {
+    try checkTypedSource(
+        \\function format(value: string, count: number): string { return value; }
+        \\function handler() {
+        \\  const alias = format;
+        \\  alias("ok", 1);
+        \\  alias("missing count");
+        \\  const nested = (local) => {
+        \\    alias("nested missing count");
+        \\  };
+        \\  nested(42);
+        \\}
+    , 2, 0);
+}
+
+test "TypeChecker: genuine module calls retain module argument checking" {
+    try checkTypedSource(
+        \\import { request } from "zigttp:queue";
+        \\request("worker", {});
+        \\request("worker");
+    , 1, 0);
 }
 
 test "TypeChecker: logical and preserves matching operand type" {

@@ -168,7 +168,16 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
             "zigttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
-        .expect_first_draft_pass = true,
+        // Was `true`, but only because the type checker could not see local
+        // annotations. The recorded draft declares `errors: string[]` while
+        // `validateJson().errors` is statically `unknown` (runtime errors are
+        // `{ path, message }` objects), so it now reports:
+        //   ZTS200: type '{ errors: unknown }' is not assignable to '{ errors: string[] }'
+        // The draft never passed; nothing checked it. Recording the honest
+        // outcome instead of re-recording keeps the cassette deterministic and
+        // enrols the case in the [codegen-gap] histogram, where it belongs: the
+        // real gap is teaching the model the shape of validateJson().errors.
+        .expect_first_draft_pass = false,
     },
     .{
         .name = "jwt-auth",

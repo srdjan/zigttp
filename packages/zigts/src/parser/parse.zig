@@ -4881,7 +4881,9 @@ test "export default named function" {
     const program = parser.nodes.get(root).?;
     const export_idx = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
     try std.testing.expectEqual(NodeTag.export_decl, parser.nodes.getTag(export_idx));
-    try std.testing.expectEqual(Node.ExportDecl.ExportKind.default, parser.nodes.getExportDecl(export_idx).?.kind);
+    const ir_view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const export_decl = ir_view.getExportDecl(export_idx).?;
+    try std.testing.expectEqual(Node.ExportDecl.ExportKind.default, export_decl.kind);
 }
 
 test "unsupported: export re-export braces" {
