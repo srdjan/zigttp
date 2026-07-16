@@ -712,6 +712,7 @@ fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
         } },
         .contract_json = payload.contract_json,
         .attestation_jws = payload.attestation_jws,
+        .policy_section_sha256 = payload.policy_section_sha256,
         .port = 3000,
         // The deployed binary runs the interpreter against the appended bytecode,
         // so (like dev/serve) it needs the contract-derived allowlist supplied as
@@ -881,12 +882,14 @@ test "appendedServerConfig wires the embedded capability policy for enforcement"
         .contract_json = null,
         .policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} } },
         .policy_strings = &.{},
+        .policy_section_sha256 = [_]u8{0x5a} ** 32,
         .attestation_jws = null,
     };
     const config = appendedServerConfig(&payload);
     const policy = config.runtime_config.dev_capability_policy orelse return error.EmbeddedPolicyNotWired;
     try std.testing.expect(policy.allowsEgressHost("api.allowed.example"));
     try std.testing.expect(!policy.allowsEgressHost("evil.example"));
+    try std.testing.expectEqualSlices(u8, &payload.policy_section_sha256, &config.policy_section_sha256.?);
 }
 
 test "parseCommonServeFlag: -p consumes next arg as port" {
