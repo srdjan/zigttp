@@ -725,7 +725,11 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
     const steps_root = try ctx.gc_state.addRootTracked(steps_val);
     defer ctx.gc_state.removeRootAt(steps_root);
 
-    const Completed = struct { name: []const u8, compensate_root: usize };
+    const Completed = struct {
+        name: []const u8,
+        compensate_root: usize,
+        compensate_declared: bool,
+    };
     var completed: std.ArrayListUnmanaged(Completed) = .empty;
     defer for (completed.items) |c| ctx.gc_state.removeRootAt(c.compensate_root);
 
@@ -749,7 +753,8 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
         // durableStep calls that can move it. `root_owned` transfers cleanup to
         // `completed`'s defer on success, while errdefer covers an OOM/engine
         // error between here and the append.
-        const compensate_val = if (getDynamicProperty(ctx, step_obj, pool, "compensate")) |c| c else zq.JSValue.undefined_val;
+        const compensate_property = getDynamicProperty(ctx, step_obj, pool, "compensate");
+        const compensate_val = compensate_property orelse zq.JSValue.undefined_val;
         const compensate_root = try ctx.gc_state.addRootTracked(compensate_val);
         var root_owned = true;
         errdefer if (root_owned) ctx.gc_state.removeRootAt(compensate_root);
@@ -768,7 +773,7 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
                 const c = completed.items[j];
                 const compensate = ctx.gc_state.getRoot(c.compensate_root);
                 if (!compensate.isCallable()) {
-                    compensation.skipped = true;
+                    if (c.compensate_declared) compensation.skipped = true;
                     continue;
                 }
                 compensation.ran = true;
@@ -783,7 +788,11 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
             return buildSagaResponse(rt, status, false, name, null, compensation);
         }
 
-        try completed.append(arena, .{ .name = name, .compensate_root = compensate_root });
+        try completed.append(arena, .{
+            .name = name,
+            .compensate_root = compensate_root,
+            .compensate_declared = compensate_property != null,
+        });
         root_owned = false;
     }
 
@@ -801,8 +810,9 @@ fn sagaStepSucceeded(rt: *Runtime, result: zq.JSValue) bool {
 
 /// Build saga's summary Response - always freshly constructed so the live and
 /// replay results are byte-identical. 200 {ok:true} on full success; the failed
-/// step's status with whether compensation ran and whether any was skipped;
-/// 500 {ok:false,failed,compensationFailed} when a compensation itself failed.
+/// step's status with whether every completed step that needed compensation was
+/// compensated; 500 {ok:false,failed,compensationFailed} when compensation
+/// itself failed.
 const SagaCompensation = struct {
     ran: bool = false,
     skipped: bool = false,
@@ -823,7 +833,7 @@ fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, c
         try appendEscapedJson(&body, rt.allocator, c);
         try body.append(rt.allocator, '"');
     } else if (failed != null) {
-        try body.appendSlice(rt.allocator, if (compensation.ran) ",\"compensated\":true" else ",\"compensated\":false");
+        try body.appendSlice(rt.allocator, if (!compensation.skipped) ",\"compensated\":true" else ",\"compensated\":false");
         if (compensation.skipped) {
             try body.appendSlice(rt.allocator, ",\"compensationSkipped\":true");
         }
@@ -858,6 +868,58 @@ fn runSagaForTest(allocator: std.mem.Allocator, durable_dir: []const u8, key: []
     };
 }
 
+test "workflow.saga first-step failure keeps v0.18 compensation body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var durable_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("saga:first-fails", () => saga([
+        \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
+        \\  ]));
+        \\}
+    ;
+    const out = try runSagaForTest(allocator, durable_buf[0..durable_len], "saga:first-fails", handler_code);
+
+    try std.testing.expectEqual(@as(u16, 402), out.status);
+    try std.testing.expectEqualStrings("{\"ok\":false,\"failed\":\"charge\",\"compensated\":true}", out.body);
+}
+
+test "workflow.saga missing compensator is not reported as skipped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var durable_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  const completed = [{ name: "observe", run: () => Response.json({ ok: true }) }];
+        \\  return run("saga:no-compensator", () => saga([
+        \\    ...completed,
+        \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
+        \\  ]));
+        \\}
+    ;
+    const out = try runSagaForTest(allocator, durable_buf[0..durable_len], "saga:no-compensator", handler_code);
+
+    try std.testing.expectEqual(@as(u16, 402), out.status);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensated\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "compensationSkipped") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:observe") == null);
+}
+
 test "workflow.saga does not report clean compensation when compensator is non-callable" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -883,6 +945,33 @@ test "workflow.saga does not report clean compensation when compensator is non-c
     try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensated\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensationSkipped\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:reserve") == null);
+}
+
+test "workflow.saga reports a declared undefined compensator as skipped" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var durable_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\import { saga } from "zigttp:workflow";
+        \\function handler(req) {
+        \\  return run("saga:undefined", () => saga([
+        \\    { name: "observe", run: () => Response.json({ ok: true }), compensate: undefined },
+        \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
+        \\  ]));
+        \\}
+    ;
+    const out = try runSagaForTest(allocator, durable_buf[0..durable_len], "saga:undefined", handler_code);
+
+    try std.testing.expectEqual(@as(u16, 402), out.status);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensated\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.body, "\"compensationSkipped\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.oplog, "undo:observe") == null);
 }
 
 test "workflow.saga still reports successful compensation when compensator runs" {

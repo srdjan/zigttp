@@ -323,6 +323,7 @@ pub fn makeTracingWrapper(
 // ============================================================================
 
 pub const TraceEntry = union(enum) {
+    witness: void,
     durable_run: DurableRunTrace,
     request: RequestTrace,
     io: IoEntry,
@@ -429,6 +430,8 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
     var current_request: ?RequestTrace = null;
     var current_response: ?ResponseTrace = null;
     var current_meta: ?MetaTrace = null;
+    var pending_witness = false;
+    var current_witness = false;
 
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
@@ -438,6 +441,7 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
         switch (entry) {
             .request => |req| {
                 if (current_request != null) {
+                    if (current_response == null and !current_witness) return error.InvalidTraceEntry;
                     try groups.append(allocator, .{
                         .request = current_request.?,
                         .io_calls = try current_io.toOwnedSlice(allocator),
@@ -448,12 +452,15 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
                     current_meta = null;
                 }
                 current_request = req;
+                current_witness = pending_witness;
+                pending_witness = false;
             },
             .io => |io| try current_io.append(allocator, io),
             .response => |resp| current_response = resp,
             .meta => |meta| {
                 current_meta = meta;
                 if (current_request != null) {
+                    if (current_response == null and !current_witness) return error.InvalidTraceEntry;
                     try groups.append(allocator, .{
                         .request = current_request.?,
                         .io_calls = try current_io.toOwnedSlice(allocator),
@@ -463,14 +470,17 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
                     current_request = null;
                     current_response = null;
                     current_meta = null;
+                    current_witness = false;
                 }
             },
+            .witness => pending_witness = true,
             .durable_run, .step_start, .step_result, .wait_timer, .resume_timer, .wait_signal, .resume_signal, .complete => {},
-            .unknown => {},
+            .unknown => return error.InvalidTraceEntry,
         }
     }
 
     if (current_request != null) {
+        if (current_response == null and !current_witness) return error.InvalidTraceEntry;
         try groups.append(allocator, .{
             .request = current_request.?,
             .io_calls = try current_io.toOwnedSlice(allocator),
@@ -485,7 +495,9 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
 pub fn parseTraceLine(line: []const u8) !TraceEntry {
     const type_str = findJsonStringValue(line, "\"type\"") orelse return .unknown;
 
-    if (std.mem.eql(u8, type_str, "durable_run")) {
+    if (std.mem.eql(u8, type_str, "witness")) {
+        return .witness;
+    } else if (std.mem.eql(u8, type_str, "durable_run")) {
         return .{ .durable_run = .{
             .key = findJsonStringValue(line, "\"key\"") orelse "",
         } };
@@ -2053,6 +2065,7 @@ test "parseTraceFile groups by request" {
 test "parseTraceFile rejects malformed recorded values" {
     const source =
         "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"response\",\"status\":200,\"headers\":{},\"body\":\"ok\"}\n" ++
         "{\"type\":\"meta\",\"duration_us\":1,\"handler\":\"h.ts\",\"pool_slot\":0,\"io_count\":0}\n" ++
         "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/malformed\",\"headers\":{},\"body\":null}\n" ++
         "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[],\"result\":not-json}\n";
@@ -2063,8 +2076,32 @@ test "parseTraceFile rejects malformed recorded values" {
     );
 }
 
+test "parseTraceFile rejects unknown trace entry types" {
+    const source =
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"respones","status":200,"headers":{},"body":"ok"}
+        \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+    ;
+    try std.testing.expectError(
+        error.InvalidTraceEntry,
+        parseTraceFile(std.testing.allocator, source),
+    );
+}
+
+test "parseTraceFile rejects response-less traces without a witness tag" {
+    const source =
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"meta","duration_us":1,"handler":"handler.ts","pool_slot":0,"io_count":0}
+    ;
+    try std.testing.expectError(
+        error.InvalidTraceEntry,
+        parseTraceFile(std.testing.allocator, source),
+    );
+}
+
 test "parseTraceFile preserves optional absence and recorded undefined" {
     const source =
+        "{\"type\":\"witness\",\"property\":\"optional-values\"}\n" ++
         "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
         "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[]}\n" ++
         "{\"type\":\"io\",\"seq\":1,\"module\":\"env\",\"fn\":\"env\",\"args\":[],\"result\":null}\n";

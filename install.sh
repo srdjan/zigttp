@@ -12,49 +12,61 @@ set -eu
 REPO="srdjan/zigttp"
 INSTALL_DIR="${ZIGTTP_INSTALL_DIR:-$HOME/.zigttp}"
 BIN_DIR="${INSTALL_DIR}/bin"
-TMPDIR=""
+INSTALL_TMPDIR=""
 ZIGTTP_STAGE=""
 ZIGTS_STAGE=""
 RUNTIME_STAGE=""
 BACKUP_DIR=""
+TRANSACTION_DIR=""
 ROLLBACK_NEEDED=0
+LOCK_FILE=""
+LOCK_CANDIDATE=""
+LOCK_HELD=0
+REAP_FILE=""
+REAP_HELD=0
 
 main() {
+    mkdir -p "$BIN_DIR"
+    trap cleanup 0
+    trap 'exit 1' 1 2 15
+    acquire_install_lock
+    cleanup_stale_transaction_files
+
     detect_platform
     resolve_version
     check_existing
 
     printf "Installing zigttp %s (%s/%s) to %s\n" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
 
-    TMPDIR=$(mktemp -d)
-    trap cleanup 0
-    trap 'exit 1' 1 2 15
+    INSTALL_TMPDIR=$(mktemp -d)
 
     TARBALL="zigttp-${VERSION}-${OS}-${ARCH}.tar.gz"
     CHECKSUM="${TARBALL}.sha256"
     BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
-    download "${BASE_URL}/${TARBALL}" "${TMPDIR}/${TARBALL}"
-    download "${BASE_URL}/${CHECKSUM}" "${TMPDIR}/${CHECKSUM}"
+    download "${BASE_URL}/${TARBALL}" "${INSTALL_TMPDIR}/${TARBALL}"
+    download "${BASE_URL}/${CHECKSUM}" "${INSTALL_TMPDIR}/${CHECKSUM}"
 
-    verify_checksum "${TMPDIR}/${TARBALL}" "${TMPDIR}/${CHECKSUM}"
-    validate_archive_paths "${TMPDIR}/${TARBALL}" "zigttp-${VERSION}-${OS}-${ARCH}"
+    verify_checksum "${INSTALL_TMPDIR}/${TARBALL}" "${INSTALL_TMPDIR}/${CHECKSUM}"
+    validate_archive_paths "${INSTALL_TMPDIR}/${TARBALL}" "zigttp-${VERSION}-${OS}-${ARCH}"
 
     mkdir -p "$BIN_DIR"
-    EXTRACT_DIR="${TMPDIR}/extract"
+    EXTRACT_DIR="${INSTALL_TMPDIR}/extract"
     PAYLOAD_DIR="${EXTRACT_DIR}/zigttp-${VERSION}-${OS}-${ARCH}"
     mkdir -p "$EXTRACT_DIR"
-    tar xzf "${TMPDIR}/${TARBALL}" -C "$EXTRACT_DIR"
+    tar xzf "${INSTALL_TMPDIR}/${TARBALL}" -C "$EXTRACT_DIR"
 
     if [ ! -d "$PAYLOAD_DIR" ]; then
         printf "Error: release archive did not contain %s\n" "$(basename "$PAYLOAD_DIR")" >&2
         exit 1
     fi
 
-    ZIGTTP_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-zigttp.XXXXXX")
-    ZIGTS_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-zigts.XXXXXX")
-    RUNTIME_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-runtime.XXXXXX")
-    BACKUP_DIR=$(mktemp -d "${BIN_DIR}/.zigttp-backup.XXXXXX")
+    TRANSACTION_DIR=$(mktemp -d "${BIN_DIR}/.zigttp-transaction.XXXXXX")
+    ZIGTTP_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zigttp.XXXXXX")
+    ZIGTS_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zigts.XXXXXX")
+    RUNTIME_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-runtime.XXXXXX")
+    BACKUP_DIR="${TRANSACTION_DIR}/backup"
+    mkdir "$BACKUP_DIR"
 
     stage_binary "$PAYLOAD_DIR" zigttp "$ZIGTTP_STAGE"
     stage_binary "$PAYLOAD_DIR" zigts "$ZIGTS_STAGE"
@@ -64,6 +76,7 @@ main() {
     verify_binary "$RUNTIME_STAGE" zigttp-runtime staged
     backup_installed_binaries
 
+    : > "${TRANSACTION_DIR}/swap-started"
     ROLLBACK_NEEDED=1
     swap_binary "$ZIGTTP_STAGE" zigttp
     swap_binary "$ZIGTS_STAGE" zigts
@@ -71,6 +84,7 @@ main() {
     verify_binary "${BIN_DIR}/zigttp" zigttp installed
     verify_binary "${BIN_DIR}/zigts" zigts installed
     verify_binary "${BIN_DIR}/zigttp-runtime" zigttp-runtime installed
+    rm -f "${TRANSACTION_DIR}/swap-started"
     ROLLBACK_NEEDED=0
 
     printf "\nInstalled zigttp %s to %s\n" "$VERSION" "$BIN_DIR"
@@ -176,8 +190,152 @@ stage_binary() {
         exit 1
     fi
 
-    cp -p "$src" "$staged"
-    chmod +x "$staged"
+    mode=$(file_mode "$src") || {
+        printf "Error: could not read release mode for %s\n" "$name" >&2
+        exit 1
+    }
+    # The mktemp-created stage keeps the installer user's ownership. Copy only
+    # the bytes, then apply the archive mode explicitly.
+    cp "$src" "$staged"
+    chmod "$mode" "$staged"
+}
+
+file_mode() {
+    mode_source="$1"
+    if mode=$(stat -c '%a' "$mode_source" 2>/dev/null); then
+        case "$mode" in
+            ''|*[!0-7]*) ;;
+            *) printf '%s\n' "$mode"; return ;;
+        esac
+    fi
+    mode=$(stat -f '%Lp' "$mode_source" 2>/dev/null) || return 1
+    case "$mode" in
+        ''|*[!0-7]*) return 1 ;;
+        *) printf '%s\n' "$mode" ;;
+    esac
+}
+
+cleanup_stale_transaction_files() {
+    # Staging must stay beside the destination so each mv is same-filesystem
+    # and atomic. Recover a transaction interrupted during its swap before
+    # deleting its debris; pre-transaction leftovers from older installers can
+    # be removed directly.
+    for transaction_dir in "${BIN_DIR}"/.zigttp-transaction.*; do
+        [ -d "$transaction_dir" ] || continue
+        if [ -f "${transaction_dir}/swap-started" ]; then
+            recover_stale_transaction "$transaction_dir"
+        fi
+        rm -rf "$transaction_dir"
+    done
+    rm -f "${BIN_DIR}"/.zigttp-stage-zigttp.*
+    rm -f "${BIN_DIR}"/.zigttp-stage-zigts.*
+    rm -f "${BIN_DIR}"/.zigttp-stage-runtime.*
+    rm -rf "${BIN_DIR}"/.zigttp-backup.*
+    rm -f "${BIN_DIR}"/.zigttp-install-lock-candidate.*
+    rm -rf "${BIN_DIR}"/.zigttp-install-reap.*
+}
+
+recover_stale_transaction() {
+    transaction_dir="$1"
+    transaction_backup="${transaction_dir}/backup"
+
+    for name in zigttp zigts zigttp-runtime; do
+        backup="${transaction_backup}/${name}"
+        dest="${BIN_DIR}/${name}"
+        if [ -f "$backup" ]; then
+            restore_stage="${transaction_dir}/restore-${name}"
+            cp -p "$backup" "$restore_stage"
+            mv "$restore_stage" "$dest"
+        elif [ -f "${transaction_dir}/absent-${name}" ]; then
+            rm -f "$dest"
+        else
+            printf "Error: incomplete stale installer transaction at %s\n" "$transaction_dir" >&2
+            return 1
+        fi
+    done
+}
+
+acquire_install_lock() {
+    LOCK_FILE="${BIN_DIR}/.zigttp-install-lock"
+    LOCK_CANDIDATE=$(mktemp "${BIN_DIR}/.zigttp-install-lock-candidate.XXXXXX")
+    printf '%s\n' "$$" > "$LOCK_CANDIDATE"
+
+    while :; do
+        if ln "$LOCK_CANDIDATE" "$LOCK_FILE" 2>/dev/null; then
+            rm -f "$LOCK_CANDIDATE"
+            LOCK_CANDIDATE=""
+            LOCK_HELD=1
+            return
+        fi
+
+        lock_pid=""
+        if ! IFS= read -r lock_pid < "$LOCK_FILE"; then
+            printf "Error: another zigttp installer owns %s\n" "$LOCK_FILE" >&2
+            exit 1
+        fi
+        case "$lock_pid" in
+            ''|*[!0-9]*)
+                printf "Error: invalid installer lock at %s\n" "$LOCK_FILE" >&2
+                exit 1
+                ;;
+        esac
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            printf "Error: another zigttp installer is running (pid %s)\n" "$lock_pid" >&2
+            exit 1
+        fi
+
+        acquire_recovery_claim "$lock_pid"
+
+        current_pid=""
+        if IFS= read -r current_pid < "$LOCK_FILE" &&
+            [ "$current_pid" = "$lock_pid" ] &&
+            ! kill -0 "$current_pid" 2>/dev/null; then
+            rm -f "$LOCK_FILE"
+        fi
+        release_recovery_claim
+    done
+}
+
+acquire_recovery_claim() {
+    stale_pid="$1"
+    REAP_FILE="${BIN_DIR}/.zigttp-install-reap.${stale_pid}"
+
+    while ! ln "$LOCK_CANDIDATE" "$REAP_FILE" 2>/dev/null; do
+        reaper_pid=""
+        if ! IFS= read -r reaper_pid < "$REAP_FILE"; then
+            printf "Error: another zigttp installer is recovering stale state\n" >&2
+            exit 1
+        fi
+        case "$reaper_pid" in
+            ''|*[!0-9]*)
+                printf "Error: invalid installer recovery claim at %s\n" "$REAP_FILE" >&2
+                exit 1
+                ;;
+        esac
+        if kill -0 "$reaper_pid" 2>/dev/null; then
+            printf "Error: another zigttp installer is recovering stale state (pid %s)\n" "$reaper_pid" >&2
+            exit 1
+        fi
+
+        current_reaper_pid=""
+        if IFS= read -r current_reaper_pid < "$REAP_FILE" &&
+            [ "$current_reaper_pid" = "$reaper_pid" ] &&
+            ! kill -0 "$current_reaper_pid" 2>/dev/null; then
+            rm -f "$REAP_FILE"
+        fi
+    done
+    REAP_HELD=1
+}
+
+release_recovery_claim() {
+    reaper_pid=""
+    if [ "$REAP_HELD" = "1" ] &&
+        IFS= read -r reaper_pid < "$REAP_FILE" &&
+        [ "$reaper_pid" = "$$" ]; then
+        rm -f "$REAP_FILE"
+    fi
+    REAP_FILE=""
+    REAP_HELD=0
 }
 
 verify_binary() {
@@ -195,6 +353,8 @@ backup_installed_binaries() {
     for name in zigttp zigts zigttp-runtime; do
         if [ -e "${BIN_DIR}/${name}" ] || [ -L "${BIN_DIR}/${name}" ]; then
             cp -p "${BIN_DIR}/${name}" "${BACKUP_DIR}/${name}"
+        else
+            : > "${TRANSACTION_DIR}/absent-${name}"
         fi
     done
 }
@@ -211,12 +371,15 @@ restore_binary() {
     backup="${BACKUP_DIR}/${name}"
 
     if [ -f "$backup" ]; then
-        if ! mv "$backup" "$dest"; then
+        restore_stage="${TRANSACTION_DIR}/restore-${name}"
+        if ! cp -p "$backup" "$restore_stage" || ! mv "$restore_stage" "$dest"; then
             printf "Error: could not restore %s after failed install\n" "$name" >&2
+            return 1
         fi
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
         if ! rm -f "$dest"; then
             printf "Error: could not remove newly installed %s after failed install\n" "$name" >&2
+            return 1
         fi
     fi
 }
@@ -225,26 +388,45 @@ cleanup() {
     cleanup_status=$?
     trap - 0 1 2 15
 
+    rollback_failed=0
     if [ "$ROLLBACK_NEEDED" = "1" ]; then
-        restore_binary zigttp
-        restore_binary zigts
-        restore_binary zigttp-runtime
+        if ! restore_binary zigttp; then rollback_failed=1; fi
+        if ! restore_binary zigts; then rollback_failed=1; fi
+        if ! restore_binary zigttp-runtime; then rollback_failed=1; fi
+        if [ "$rollback_failed" = "1" ]; then cleanup_status=1; fi
     fi
 
-    if [ -n "$ZIGTTP_STAGE" ]; then
-        rm -f "$ZIGTTP_STAGE" || :
+    if [ "$rollback_failed" = "0" ]; then
+        if [ -n "$ZIGTTP_STAGE" ]; then
+            rm -f "$ZIGTTP_STAGE" || :
+        fi
+        if [ -n "$ZIGTS_STAGE" ]; then
+            rm -f "$ZIGTS_STAGE" || :
+        fi
+        if [ -n "$RUNTIME_STAGE" ]; then
+            rm -f "$RUNTIME_STAGE" || :
+        fi
+        if [ -n "$BACKUP_DIR" ]; then
+            rm -rf "$BACKUP_DIR" || :
+        fi
+        if [ -n "$TRANSACTION_DIR" ]; then
+            rm -rf "$TRANSACTION_DIR" || :
+        fi
     fi
-    if [ -n "$ZIGTS_STAGE" ]; then
-        rm -f "$ZIGTS_STAGE" || :
+    if [ -n "$INSTALL_TMPDIR" ]; then
+        rm -rf "$INSTALL_TMPDIR" || :
     fi
-    if [ -n "$RUNTIME_STAGE" ]; then
-        rm -f "$RUNTIME_STAGE" || :
+    if [ "$REAP_HELD" = "1" ]; then
+        release_recovery_claim
     fi
-    if [ -n "$BACKUP_DIR" ]; then
-        rm -rf "$BACKUP_DIR" || :
+    if [ -n "$LOCK_CANDIDATE" ]; then
+        rm -f "$LOCK_CANDIDATE" || :
     fi
-    if [ -n "$TMPDIR" ]; then
-        rm -rf "$TMPDIR" || :
+    if [ "$LOCK_HELD" = "1" ]; then
+        lock_pid=""
+        if IFS= read -r lock_pid < "$LOCK_FILE" && [ "$lock_pid" = "$$" ]; then
+            rm -f "$LOCK_FILE" || :
+        fi
     fi
 
     exit "$cleanup_status"

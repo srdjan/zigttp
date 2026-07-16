@@ -210,7 +210,6 @@ fn createWithWriter(
         try writer.writeAll(out_fd, base_data[0..clean_size]);
         try writer.writeAll(out_fd, payload);
         try writer.writeAll(out_fd, &trailer);
-        if (std.c.fchmod(out_fd, 0o755) != 0) return error.SetModeFailed;
         if (std.c.fsync(out_fd) != 0) return error.WriteFailure;
     }
 
@@ -669,6 +668,9 @@ test "create produces a runnable mode 0755 artifact" {
     defer allocator.free(output_path);
     try zigts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
 
+    const previous_umask = std.c.umask(0o022);
+    defer _ = std.c.umask(previous_umask);
+
     const policy = handler_policy.RuntimePolicy{};
     try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
 
@@ -692,6 +694,32 @@ test "create produces a runnable mode 0755 artifact" {
         .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
         else => try std.testing.expect(false),
     }
+}
+
+test "create respects umask while keeping the artifact executable" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base_path = try selfExtractTestPath(allocator, tmp, "base.sh");
+    defer allocator.free(base_path);
+    const output_path = try selfExtractTestPath(allocator, tmp, "artifact-umask");
+    defer allocator.free(output_path);
+    try zigts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
+
+    const previous_umask = std.c.umask(0o077);
+    defer _ = std.c.umask(previous_umask);
+
+    const policy = handler_policy.RuntimePolicy{};
+    try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
+
+    const output_path_z = try allocator.dupeZ(u8, output_path);
+    defer allocator.free(output_path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const stat = try zigts.file_io.fstatFd(fd);
+    try std.testing.expectEqual(@as(u32, 0o700), stat.mode & 0o777);
 }
 
 test "roundtrip: serialize and parse payload" {
