@@ -12,6 +12,12 @@ set -eu
 REPO="srdjan/zigttp"
 INSTALL_DIR="${ZIGTTP_INSTALL_DIR:-$HOME/.zigttp}"
 BIN_DIR="${INSTALL_DIR}/bin"
+TMPDIR=""
+ZIGTTP_STAGE=""
+ZIGTS_STAGE=""
+RUNTIME_STAGE=""
+BACKUP_DIR=""
+ROLLBACK_NEEDED=0
 
 main() {
     detect_platform
@@ -21,7 +27,8 @@ main() {
     printf "Installing zigttp %s (%s/%s) to %s\n" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
 
     TMPDIR=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR"' EXIT
+    trap cleanup 0
+    trap 'exit 1' 1 2 15
 
     TARBALL="zigttp-${VERSION}-${OS}-${ARCH}.tar.gz"
     CHECKSUM="${TARBALL}.sha256"
@@ -44,9 +51,27 @@ main() {
         exit 1
     fi
 
-    install_binary "$PAYLOAD_DIR" zigttp
-    install_binary "$PAYLOAD_DIR" zigts
-    install_binary "$PAYLOAD_DIR" zigttp-runtime
+    ZIGTTP_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-zigttp.XXXXXX")
+    ZIGTS_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-zigts.XXXXXX")
+    RUNTIME_STAGE=$(mktemp "${BIN_DIR}/.zigttp-stage-runtime.XXXXXX")
+    BACKUP_DIR=$(mktemp -d "${BIN_DIR}/.zigttp-backup.XXXXXX")
+
+    stage_binary "$PAYLOAD_DIR" zigttp "$ZIGTTP_STAGE"
+    stage_binary "$PAYLOAD_DIR" zigts "$ZIGTS_STAGE"
+    stage_binary "$PAYLOAD_DIR" zigttp-runtime "$RUNTIME_STAGE"
+    verify_binary "$ZIGTTP_STAGE" zigttp staged
+    verify_binary "$ZIGTS_STAGE" zigts staged
+    verify_binary "$RUNTIME_STAGE" zigttp-runtime staged
+    backup_installed_binaries
+
+    ROLLBACK_NEEDED=1
+    swap_binary "$ZIGTTP_STAGE" zigttp
+    swap_binary "$ZIGTS_STAGE" zigts
+    swap_binary "$RUNTIME_STAGE" zigttp-runtime
+    verify_binary "${BIN_DIR}/zigttp" zigttp installed
+    verify_binary "${BIN_DIR}/zigts" zigts installed
+    verify_binary "${BIN_DIR}/zigttp-runtime" zigttp-runtime installed
+    ROLLBACK_NEEDED=0
 
     printf "\nInstalled zigttp %s to %s\n" "$VERSION" "$BIN_DIR"
     printf "  zigttp: %s/zigttp\n" "$BIN_DIR"
@@ -140,28 +165,116 @@ first_release_tag() {
     fi
 }
 
-install_binary() {
+stage_binary() {
     payload_dir="$1"
     name="$2"
+    staged="$3"
     src="${payload_dir}/${name}"
-    dest="${BIN_DIR}/${name}"
 
     if [ ! -f "$src" ]; then
         printf "Error: release archive missing %s\n" "$name" >&2
         exit 1
     fi
 
-    cp "$src" "$dest"
-    chmod +x "$dest"
+    cp -p "$src" "$staged"
+    chmod +x "$staged"
+}
+
+verify_binary() {
+    path="$1"
+    name="$2"
+    state="$3"
+
+    if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+        printf "Error: %s binary is missing or not executable: %s\n" "$state" "$name" >&2
+        return 1
+    fi
+}
+
+backup_installed_binaries() {
+    for name in zigttp zigts zigttp-runtime; do
+        if [ -e "${BIN_DIR}/${name}" ] || [ -L "${BIN_DIR}/${name}" ]; then
+            cp -p "${BIN_DIR}/${name}" "${BACKUP_DIR}/${name}"
+        fi
+    done
+}
+
+swap_binary() {
+    staged="$1"
+    name="$2"
+    mv "$staged" "${BIN_DIR}/${name}"
+}
+
+restore_binary() {
+    name="$1"
+    dest="${BIN_DIR}/${name}"
+    backup="${BACKUP_DIR}/${name}"
+
+    if [ -f "$backup" ]; then
+        if ! mv "$backup" "$dest"; then
+            printf "Error: could not restore %s after failed install\n" "$name" >&2
+        fi
+    elif [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! rm -f "$dest"; then
+            printf "Error: could not remove newly installed %s after failed install\n" "$name" >&2
+        fi
+    fi
+}
+
+cleanup() {
+    cleanup_status=$?
+    trap - 0 1 2 15
+
+    if [ "$ROLLBACK_NEEDED" = "1" ]; then
+        restore_binary zigttp
+        restore_binary zigts
+        restore_binary zigttp-runtime
+    fi
+
+    if [ -n "$ZIGTTP_STAGE" ]; then
+        rm -f "$ZIGTTP_STAGE" || :
+    fi
+    if [ -n "$ZIGTS_STAGE" ]; then
+        rm -f "$ZIGTS_STAGE" || :
+    fi
+    if [ -n "$RUNTIME_STAGE" ]; then
+        rm -f "$RUNTIME_STAGE" || :
+    fi
+    if [ -n "$BACKUP_DIR" ]; then
+        rm -rf "$BACKUP_DIR" || :
+    fi
+    if [ -n "$TMPDIR" ]; then
+        rm -rf "$TMPDIR" || :
+    fi
+
+    exit "$cleanup_status"
+}
+
+binary_has_expected_version() {
+    name="$1"
+    prefix="$2"
+
+    if [ ! -x "${BIN_DIR}/${name}" ]; then
+        return 1
+    fi
+    if ! version_output=$("${BIN_DIR}/${name}" version 2>&1); then
+        return 1
+    fi
+
+    [ "$version_output" = "${prefix} ${VERSION}" ] ||
+        [ "$version_output" = "${prefix} ${VERSION#v}" ]
 }
 
 check_existing() {
+    if binary_has_expected_version zigttp zigttp &&
+        binary_has_expected_version zigts zigts &&
+        binary_has_expected_version zigttp-runtime zigttp; then
+        printf "zigttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
+        exit 0
+    fi
+
     if [ -x "${BIN_DIR}/zigttp" ]; then
         CURRENT=$("${BIN_DIR}/zigttp" version 2>/dev/null | sed 's/^zigttp //' || echo "unknown")
-        if [ "$CURRENT" = "$VERSION" ] || [ "$CURRENT" = "${VERSION#v}" ]; then
-            printf "zigttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
-            exit 0
-        fi
         printf "Upgrading zigttp from %s to %s\n" "$CURRENT" "$VERSION"
     fi
 }
