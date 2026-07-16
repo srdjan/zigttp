@@ -570,17 +570,20 @@ pub const TypeEnv = struct {
             .t_union => {
                 // Copy members before the loop (see t_intersection above).
                 const live = self.pool.getUnionMembers(idx);
-                var members: [32]TypeIndex = undefined;
-                const count = @min(live.len, 32);
-                @memcpy(members[0..count], live[0..count]);
-                var new_members: [32]TypeIndex = undefined;
+                const new_members = self.allocator.alloc(TypeIndex, live.len) catch {
+                    if (self.pool.failure == null) self.pool.failure = error.OutOfMemory;
+                    return null_type_idx;
+                };
+                defer self.allocator.free(new_members);
+                @memcpy(new_members, live);
                 var changed = false;
-                for (members[0..count], 0..) |m, i| {
-                    new_members[i] = self.tryInstantiateGenericApp(m);
-                    if (new_members[i] != m) changed = true;
+                for (new_members) |*member| {
+                    const m = member.*;
+                    member.* = self.tryInstantiateGenericApp(m);
+                    if (member.* != m) changed = true;
                 }
                 if (!changed) return idx;
-                return self.pool.addUnion(self.allocator, new_members[0..count]);
+                return self.pool.addUnion(self.allocator, new_members);
             },
             else => return idx,
         }
@@ -1208,6 +1211,75 @@ test "TypeEnv resolveType instantiates generic alias inline" {
     const fields = pool.getRecordFields(resolved);
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
+}
+
+test "TypeEnv instantiates every member of a normalized union wider than scratch buffers" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Manually register: type Box<T> = { value: T }.
+    env.pushGenericScope();
+    _ = env.addGenericParam("T");
+    const value_name = pool.addName(allocator, "value");
+    const body = pool.addRecord(allocator, &.{.{
+        .name_start = value_name.start,
+        .name_len = value_name.len,
+        .type_idx = env.resolveType("T"),
+        .optional = false,
+    }});
+    env.popGenericScope();
+    env.generic_aliases.put(allocator, env.internName("Box"), .{
+        .param_names = .{ env.internName("T"), undefined, undefined, undefined, undefined, undefined, undefined, undefined },
+        .param_count = 1,
+        .body = body,
+    }) catch unreachable;
+
+    // The first Box forces the union to be rebuilt. The second Box and m33 are
+    // beyond the former 32-member buffer, so this also covers late generic
+    // instantiation and preservation of every trailing member.
+    const resolved = env.resolveType(
+        \\(Box<string> |
+        \\ "m01" | "m02" | "m03" | "m04" | "m05" | "m06" | "m07" | "m08" |
+        \\ "m09" | "m10" | "m11" | "m12" | "m13" | "m14" | "m15" | "m16" |
+        \\ "m17" | "m18" | "m19" | "m20" | "m21" | "m22" | "m23" | "m24" |
+        \\ "m25" | "m26" | "m27" | "m28" | "m29" | "m30" | "m31" | "m32") |
+        \\ "m33" | Box<number>
+    );
+
+    try pool.ensureHealthy();
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(resolved).?);
+    const members = pool.getUnionMembers(resolved);
+    try std.testing.expectEqual(@as(usize, 35), members.len);
+
+    var literal_count: usize = 0;
+    var saw_last_literal = false;
+    var saw_string_box = false;
+    var saw_number_box = false;
+    for (members) |member| {
+        switch (pool.getTag(member).?) {
+            .t_literal_string => {
+                literal_count += 1;
+                if (std.mem.eql(u8, pool.getLiteralStringValue(member).?, "m33")) {
+                    saw_last_literal = true;
+                }
+            },
+            .t_record => {
+                const fields = pool.getRecordFields(member);
+                try std.testing.expectEqual(@as(usize, 1), fields.len);
+                if (fields[0].type_idx == pool.idx_string) saw_string_box = true;
+                if (fields[0].type_idx == pool.idx_number) saw_number_box = true;
+            },
+            else => return error.UnexpectedUnionMember,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 33), literal_count);
+    try std.testing.expect(saw_last_literal);
+    try std.testing.expect(saw_string_box);
+    try std.testing.expect(saw_number_box);
 }
 
 test "TypeEnv intersection alias type AB = A & B" {

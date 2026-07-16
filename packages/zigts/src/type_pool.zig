@@ -326,19 +326,86 @@ pub const TypePool = struct {
         });
     }
 
-    /// Create a union type from members.
+    const UnionMemberScan = struct {
+        deduped: [16]TypeIndex = undefined,
+        deduped_count: usize = 0,
+        flattened_count: usize = 0,
+        dedup_overflow: bool = false,
+    };
+
+    fn scanUnionMembers(
+        self: *const TypePool,
+        union_members: []const TypeIndex,
+        scan: *UnionMemberScan,
+    ) bool {
+        for (union_members) |member| {
+            if (self.getTag(member) == .t_union) {
+                if (!self.scanUnionMembers(self.getUnionMembers(member), scan)) return false;
+                continue;
+            }
+
+            scan.flattened_count = std.math.add(usize, scan.flattened_count, 1) catch return false;
+            if (scan.dedup_overflow) continue;
+            if (std.mem.findScalar(TypeIndex, scan.deduped[0..scan.deduped_count], member) != null) continue;
+            if (scan.deduped_count == scan.deduped.len) {
+                scan.dedup_overflow = true;
+                continue;
+            }
+            scan.deduped[scan.deduped_count] = member;
+            scan.deduped_count += 1;
+        }
+        return true;
+    }
+
+    fn appendFlattenedUnionMembersAssumeCapacity(self: *TypePool, union_members: []const TypeIndex) void {
+        for (union_members) |member| {
+            if (self.getTag(member) == .t_union) {
+                self.appendFlattenedUnionMembersAssumeCapacity(self.getUnionMembers(member));
+            } else {
+                self.members.appendAssumeCapacity(member);
+            }
+        }
+    }
+
+    /// Create a union type from members. A sole member is returned unchanged.
+    /// With multiple inputs, nested unions are flattened. Exact-index duplicates
+    /// collapse while the sixteen-member distinct scratch buffer suffices; on
+    /// overflow, the raw flattened sequence is retained losslessly.
     pub fn addUnion(self: *TypePool, allocator: std.mem.Allocator, union_members: []const TypeIndex) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
-        // Flatten single-member unions
         if (union_members.len == 1) return union_members[0];
-        const start = self.members.items.len;
-        if (!fitsU16Range(start, union_members.len)) {
+
+        var scan: UnionMemberScan = .{};
+        if (!self.scanUnionMembers(union_members, &scan)) {
             return self.failIndex(error.TypePoolCapacityExceeded);
         }
-        self.members.appendSlice(allocator, union_members) catch return self.failIndex(error.OutOfMemory);
+        if (!scan.dedup_overflow) {
+            if (scan.deduped_count == 1) return scan.deduped[0];
+
+            const start = self.members.items.len;
+            if (!fitsU16Range(start, scan.deduped_count)) {
+                return self.failIndex(error.TypePoolCapacityExceeded);
+            }
+            self.members.appendSlice(allocator, scan.deduped[0..scan.deduped_count]) catch return self.failIndex(error.OutOfMemory);
+            return self.addNode(allocator, .{
+                .tag = .t_union,
+                .data = .{ .a = @intCast(start), .b = @intCast(scan.deduped_count) },
+            });
+        }
+
+        // More than sixteen distinct members cannot be deduplicated in the
+        // bounded scratch buffer. Fall back to the raw flattened sequence so
+        // no source-union member is silently dropped: every member must remain
+        // assignable to the target for isAssignableTo to accept the union.
+        const start = self.members.items.len;
+        if (!fitsU16Range(start, scan.flattened_count)) {
+            return self.failIndex(error.TypePoolCapacityExceeded);
+        }
+        self.members.ensureUnusedCapacity(allocator, scan.flattened_count) catch return self.failIndex(error.OutOfMemory);
+        self.appendFlattenedUnionMembersAssumeCapacity(union_members);
         return self.addNode(allocator, .{
             .tag = .t_union,
-            .data = .{ .a = @intCast(start), .b = @intCast(union_members.len) },
+            .data = .{ .a = @intCast(start), .b = @intCast(scan.flattened_count) },
         });
     }
 
@@ -2026,6 +2093,81 @@ test "TypePool single member union flattens" {
 
     const u = pool.addUnion(allocator, &.{pool.idx_string});
     try std.testing.expectEqual(pool.idx_string, u);
+}
+
+test "addUnion preserves a sole union member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const inner = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_number });
+    const outer = pool.addUnion(allocator, &.{inner});
+
+    try std.testing.expectEqual(inner, outer);
+}
+
+test "addUnion flattens nested unions" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const string_or_number = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_number });
+    const nested = pool.addUnion(allocator, &.{ string_or_number, pool.idx_boolean });
+    const direct = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_number, pool.idx_boolean });
+
+    try std.testing.expectEqualSlices(TypeIndex, pool.getUnionMembers(direct), pool.getUnionMembers(nested));
+    try std.testing.expect(pool.isAssignableTo(nested, direct));
+    try std.testing.expect(pool.isAssignableTo(direct, nested));
+}
+
+test "addUnion collapses duplicate members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_string });
+    try std.testing.expectEqual(pool.idx_string, idx);
+}
+
+test "addUnion overflow fallback keeps every flattened member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var distinct: [17]TypeIndex = undefined;
+    for (&distinct, 0..) |*member, i| {
+        member.* = pool.addLiteralNumber(allocator, @intCast(i));
+    }
+
+    const first_sixteen = pool.addUnion(allocator, distinct[0..16]);
+    const wide = pool.addUnion(allocator, &.{ first_sixteen, distinct[16] });
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(wide).?);
+    try std.testing.expectEqualSlices(TypeIndex, distinct[0..], pool.getUnionMembers(wide));
+}
+
+test "addUnion applies capacity guard after flattening" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var distinct: [17]TypeIndex = undefined;
+    for (&distinct, 0..) |*member, i| {
+        member.* = pool.addLiteralNumber(allocator, @intCast(i));
+    }
+
+    const max_member_count = std.math.maxInt(u16);
+    const wide_members = try allocator.alloc(TypeIndex, max_member_count);
+    defer allocator.free(wide_members);
+    for (wide_members, 0..) |*member, i| {
+        member.* = distinct[i % distinct.len];
+    }
+
+    const wide = pool.addUnion(allocator, wide_members);
+    try std.testing.expectEqual(@as(usize, max_member_count), pool.getUnionMembers(wide).len);
+
+    const overflow = pool.addUnion(allocator, &.{ wide, pool.idx_boolean });
+    try std.testing.expectEqual(null_type_idx, overflow);
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }
 
 test "isAssignableTo basics" {

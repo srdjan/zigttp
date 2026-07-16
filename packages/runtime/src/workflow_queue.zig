@@ -3,6 +3,7 @@ const zq = @import("zigts");
 const http_types = @import("http_types.zig");
 const codec = @import("workflow_queue_envelope.zig");
 const atomic_file = @import("atomic_file.zig");
+const RecordLock = @import("durable_dead_runs.zig").RecordLock;
 
 const Allocator = std.mem.Allocator;
 const HttpHeader = http_types.HttpHeader;
@@ -198,6 +199,8 @@ pub fn replayDead(allocator: Allocator, durable_dir: []const u8, id: []const u8)
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
     try ensureQueueDirs(&p);
+    var lock = try acquireItemLock(allocator, p.root, id);
+    defer lock.release();
 
     if (try fileExists(p.done_file)) return error.WorkflowQueueResultAlreadyDone;
     if (try fileExists(p.pending_file)) return error.WorkflowQueueItemAlreadyPending;
@@ -229,6 +232,8 @@ pub fn replayDead(allocator: Allocator, durable_dir: []const u8, id: []const u8)
 pub fn discardDead(allocator: Allocator, durable_dir: []const u8, id: []const u8) !void {
     var p = try queuePaths(allocator, durable_dir, id);
     defer p.deinit();
+    var lock = try acquireItemLock(allocator, p.root, id);
+    defer lock.release();
     if (!(try fileExists(p.dead_file))) return error.WorkflowQueueDeadLetterMissing;
     atomic_file.deleteIfExists(p.dead_file);
 }
@@ -575,6 +580,14 @@ fn queuePaths(allocator: Allocator, durable_dir: []const u8, id: []const u8) !Qu
         .done_file = done_file,
         .dead_file = dead_file,
     };
+}
+
+fn acquireItemLock(allocator: Allocator, root: []const u8, id: []const u8) !RecordLock {
+    const lock_name = try std.fmt.allocPrint(allocator, "{s}.lock", .{id});
+    defer allocator.free(lock_name);
+    const lock_file = try std.fs.path.join(allocator, &.{ root, lock_name });
+    defer allocator.free(lock_file);
+    return RecordLock.acquire(root, lock_file);
 }
 
 fn ensureQueueDirs(p: *const QueuePaths) !void {
@@ -933,6 +946,78 @@ test "workflow queue max attempts dead letter can be replayed" {
     try std.testing.expectEqualStrings("body", request.body.?);
     try std.testing.expectEqual(@as(u32, 1), request.attempts);
     try std.testing.expect(request.last_error == null);
+}
+
+test "workflow queue replay and discard serialize on the same item lock" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const durable_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(durable_dir);
+
+    const view: HttpRequestView = .{
+        .method = "POST",
+        .path = "/child",
+        .url = "/child",
+        .query_params = &.{},
+        .headers = .empty,
+        .body = "body",
+    };
+    const request_payload = try codec.requestEnvelopeJson(allocator, "child", view, .{
+        .created_at_ms = 1,
+        .updated_at_ms = 1,
+    });
+    defer allocator.free(request_payload);
+    const dead_payload = try codec.deadEnvelopeJson(allocator, "boom", 3, "boom", 2, "workflow-queue", request_payload);
+    defer allocator.free(dead_payload);
+
+    var p = try queuePaths(allocator, durable_dir, "item-replay-discard-race");
+    defer p.deinit();
+    try ensureQueueDirs(&p);
+    try atomic_file.writeFileAtomic(allocator, p.dead_file, dead_payload);
+
+    var held_lock = try acquireItemLock(allocator, p.root, "item-replay-discard-race");
+    var started = std.atomic.Value(u32).init(0);
+    var replay_outcome = std.atomic.Value(u8).init(0);
+    var discard_outcome = std.atomic.Value(u8).init(0);
+
+    const Worker = struct {
+        fn replay(dir: []const u8, started_count: *std.atomic.Value(u32), outcome: *std.atomic.Value(u8)) void {
+            _ = started_count.fetchAdd(1, .acq_rel);
+            replayDead(std.heap.c_allocator, dir, "item-replay-discard-race") catch |err| {
+                outcome.store(if (err == error.WorkflowQueueDeadLetterMissing) 2 else 3, .release);
+                return;
+            };
+            outcome.store(1, .release);
+        }
+
+        fn discard(dir: []const u8, started_count: *std.atomic.Value(u32), outcome: *std.atomic.Value(u8)) void {
+            _ = started_count.fetchAdd(1, .acq_rel);
+            discardDead(std.heap.c_allocator, dir, "item-replay-discard-race") catch |err| {
+                outcome.store(if (err == error.WorkflowQueueDeadLetterMissing) 2 else 3, .release);
+                return;
+            };
+            outcome.store(1, .release);
+        }
+    };
+
+    const replay_thread = try std.Thread.spawn(.{}, Worker.replay, .{ durable_dir, &started, &replay_outcome });
+    const discard_thread = try std.Thread.spawn(.{}, Worker.discard, .{ durable_dir, &started, &discard_outcome });
+    while (started.load(.acquire) != 2) std.atomic.spinLoopHint();
+    std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+    const both_blocked = replay_outcome.load(.acquire) == 0 and discard_outcome.load(.acquire) == 0;
+    held_lock.release();
+    replay_thread.join();
+    discard_thread.join();
+
+    try std.testing.expect(both_blocked);
+    const replay_result = replay_outcome.load(.acquire);
+    const discard_result = discard_outcome.load(.acquire);
+    try std.testing.expect(replay_result != 3 and discard_result != 3);
+    try std.testing.expect((replay_result == 1 and discard_result == 2) or
+        (replay_result == 2 and discard_result == 1));
+    try std.testing.expectEqual(replay_result == 1, try fileExists(p.pending_file));
+    try std.testing.expect(!(try fileExists(p.dead_file)));
 }
 
 test "workflow queue claim recovers from a dead letter left behind by an interrupted replay" {

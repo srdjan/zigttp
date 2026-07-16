@@ -84,10 +84,10 @@ fn deadRunPaths(allocator: Allocator, durable_dir: []const u8, id: []const u8) !
 /// `flock` on the record file itself would have a gap here, since
 /// `discardDeadRun`'s atomic rename swaps in a new inode that a
 /// concurrently-held lock on the old fd would no longer protect.
-const RecordLock = struct {
+pub const RecordLock = struct {
     fd: std.c.fd_t,
 
-    fn acquire(dir: []const u8, lock_path: []const u8) !RecordLock {
+    pub fn acquire(dir: []const u8, lock_path: []const u8) !RecordLock {
         try atomic_file.ensureDir(dir);
         const z = try std.heap.c_allocator.dupeZ(u8, lock_path);
         defer std.heap.c_allocator.free(z);
@@ -104,16 +104,21 @@ const RecordLock = struct {
         return .{ .fd = fd };
     }
 
-    fn release(self: *RecordLock) void {
+    pub fn release(self: *RecordLock) void {
         _ = std.c.flock(self.fd, std.posix.LOCK.UN);
         std.Io.Threaded.closeFd(self.fd);
     }
 };
 
-fn fileExists(path: []const u8) bool {
-    const z = std.heap.c_allocator.dupeZ(u8, path) catch return false;
+fn fileExists(path: []const u8) !bool {
+    const z = try std.heap.c_allocator.dupeZ(u8, path);
     defer std.heap.c_allocator.free(z);
-    return std.c.access(z, std.c.F_OK) == 0;
+    const rc = std.c.access(z, std.c.F_OK);
+    if (rc == 0) return true;
+    return switch (std.posix.errno(rc)) {
+        .NOENT => false,
+        else => error.FileExistenceCheckFailed,
+    };
 }
 
 /// Like `atomic_file.deleteIfExists`, but for callers (e.g. `replayDeadRun`)
@@ -137,7 +142,7 @@ pub fn hasDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const u8)
         else => return err,
     };
     defer paths.deinit();
-    return fileExists(paths.file);
+    return try fileExists(paths.file);
 }
 
 fn encodeRecord(
@@ -204,12 +209,12 @@ pub fn writeDeadRun(
 pub fn readDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const u8) !?[]u8 {
     var paths = try deadRunPaths(allocator, durable_dir, id);
     defer paths.deinit();
-    if (!fileExists(paths.file)) return null;
+    if (!(try fileExists(paths.file))) return null;
     return try zq.file_io.readFile(allocator, paths.file, 64 * 1024);
 }
 
 fn readState(allocator: Allocator, path: []const u8) !?[]const u8 {
-    if (!fileExists(path)) return null;
+    if (!(try fileExists(path))) return null;
     const source = try zq.file_io.readFile(allocator, path, 64 * 1024);
     defer allocator.free(source);
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, source, .{}) catch return error.InvalidDeadRunRecord;
@@ -295,7 +300,7 @@ pub fn discardDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const
     defer paths.deinit();
     var lock = try RecordLock.acquire(paths.dir, paths.lock_file);
     defer lock.release();
-    const source = if (fileExists(paths.file))
+    const source = if (try fileExists(paths.file))
         try zq.file_io.readFile(allocator, paths.file, 64 * 1024)
     else
         return error.DeadRunMissing;
@@ -350,6 +355,25 @@ pub fn discardDeadRun(allocator: Allocator, durable_dir: []const u8, id: []const
 test "deadRunId strips the .jsonl suffix" {
     try std.testing.expectEqualStrings("durable-1a2b3c4d", deadRunId("durable-1a2b3c4d.jsonl").?);
     try std.testing.expect(deadRunId("not-an-oplog.txt") == null);
+}
+
+test "hasDeadRun reports absent only for ENOENT" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const durable_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(durable_dir);
+
+    try std.testing.expect(!(try hasDeadRun(allocator, durable_dir, "durable-missing")));
+
+    const dead_runs_path = try std.fs.path.join(allocator, &.{ durable_dir, "dead-runs" });
+    defer allocator.free(dead_runs_path);
+    try zq.file_io.writeFile(allocator, dead_runs_path, "not a directory");
+
+    try std.testing.expectError(
+        error.FileExistenceCheckFailed,
+        hasDeadRun(allocator, durable_dir, "durable-unknown"),
+    );
 }
 
 test "write, list, show, replay, discard round-trip" {

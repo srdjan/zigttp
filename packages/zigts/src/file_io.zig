@@ -129,6 +129,30 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     if (std.c.rename(tmp_path_z, path_z) != 0) return error.WriteFailure;
 }
 
+/// Create a new file without replacing an existing destination. A failed write
+/// removes the file created by this call, so callers never leave partial data.
+pub fn writeFileCreateExclusive(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true },
+        0o600,
+    );
+    errdefer _ = std.c.unlink(path_z);
+    defer std.Io.Threaded.closeFd(fd);
+
+    var total_written: usize = 0;
+    while (total_written < data.len) {
+        const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
+        if (result <= 0) return error.WriteFailure;
+        total_written += @intCast(result);
+    }
+    if (std.c.fsync(fd) != 0) return error.WriteFailure;
+}
+
 pub const FdStat = struct { size: u64, mode: u32 };
 
 /// Size and permission bits of an open fd. `std.c.fstat` is deliberately
@@ -208,6 +232,22 @@ test "writeFile creates new files with mode 0600" {
 
     const mode = try statMode(allocator, path);
     try testing.expectEqual(@as(u32, 0o600), mode & 0o777);
+}
+
+test "writeFileCreateExclusive preserves an existing file" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try tmpFilePath(allocator, tmp, "README.md");
+    defer allocator.free(path);
+    try writeFileCreateExclusive(allocator, path, "original\n");
+    try testing.expectError(error.PathAlreadyExists, writeFileCreateExclusive(allocator, path, "replacement\n"));
+
+    const contents = try readFile(allocator, path, 1024);
+    defer allocator.free(contents);
+    try testing.expectEqualStrings("original\n", contents);
 }
 
 test "openAppend creates new files with mode 0600" {

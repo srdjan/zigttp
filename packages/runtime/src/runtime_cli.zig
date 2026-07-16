@@ -343,8 +343,10 @@ fn serveCommandWithDebugPanicPath(
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config) catch |err| {
-            std.log.err("Replay error: {}", .{err});
-            return;
+            if (err != error.ReplayVerificationFailed and err != error.ReplayExecutionFailed) {
+                std.log.err("Replay error: {}", .{err});
+            }
+            std.process.exit(replayExitCode(err));
         };
         return;
     }
@@ -419,6 +421,10 @@ fn serveCommandWithDebugPanicPath(
             std.process.exit(1);
         };
     }
+}
+
+fn replayExitCode(err: anyerror) u8 {
+    return if (err == error.ReplayVerificationFailed) 1 else 2;
 }
 
 /// Print a server-run failure. A port already in use is the most common
@@ -1034,4 +1040,10 @@ test "formatAddressInUse names the port and the remedy" {
     try std.testing.expect(std.mem.indexOf(u8, line, "3000") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "already in use") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "zigttp dev -p") != null);
+}
+
+test "replay exit codes distinguish mismatches from execution errors" {
+    try std.testing.expectEqual(@as(u8, 1), replayExitCode(error.ReplayVerificationFailed));
+    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.ReplayExecutionFailed));
+    try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.FileNotFound));
 }
