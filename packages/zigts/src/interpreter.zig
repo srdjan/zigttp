@@ -1390,15 +1390,26 @@ pub const Interpreter = struct {
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
 
+                if (comptime std.debug.runtime_safety) {
+                    std.debug.assert(upvalue_count == bc_ptr.upvalue_count);
+                    std.debug.assert(upvalue_count == bc_ptr.upvalue_info.len);
+                }
+
                 const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
                 errdefer self.ctx.allocator.free(upvalues);
 
                 for (0..upvalue_count) |i| {
                     const info = bc_ptr.upvalue_info[i];
                     if (info.is_local) {
+                        if (comptime std.debug.runtime_safety) {
+                            std.debug.assert(info.index < self.current_func.?.local_count);
+                        }
                         upvalues[i] = try frame.captureUpvalue(self, info.index);
                     } else {
                         if (self.current_closure) |closure| {
+                            if (comptime std.debug.runtime_safety) {
+                                std.debug.assert(info.index < closure.upvalues.len);
+                            }
                             upvalues[i] = closure.upvalues[info.index];
                         } else {
                             const uv = try self.ctx.gc_state.acquireUpvalue();
@@ -2931,6 +2942,19 @@ test "End-to-end: closure captures local" {
         .source_map = null,
         .line_table = null,
     };
+
+    const bytecode_verifier = @import("bytecode_verifier.zig");
+    var closure_parent: ?*const bytecode.FunctionBytecode = null;
+    for (func.constants) |constant| {
+        if (!constant.isExternPtr()) continue;
+        const candidate = constant.toExternPtr(bytecode.FunctionBytecode);
+        if (candidate.header.magic == bytecode.MAGIC) {
+            closure_parent = candidate;
+            break;
+        }
+    }
+    const verify_result = bytecode_verifier.verify(closure_parent orelse return error.TestUnexpectedResult);
+    try std.testing.expect(verify_result.valid);
 
     var interp = Interpreter.init(ctx);
     _ = try interp.run(&func);
