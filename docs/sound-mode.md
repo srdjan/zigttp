@@ -143,7 +143,10 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | `{}`, `[]` | object |
 | `() => ...`, `function() {}` | function |
 | `===`, `!==`, `<`, `>`, `<=`, `>=`, `in` | boolean |
-| `&&`, `\|\|` | boolean |
+| `A && B`, `A \|\| B` | `A \| B` |
+| non-nullable `A ?? B` | `A` |
+| `(T \| undefined) ?? B` | `T \| B` |
+| `undefined ?? B` | `B` |
 | `+` (string + any) | string |
 | `+` (number + number) | number |
 | `-`, `*`, `/`, `%`, `**` | number |
