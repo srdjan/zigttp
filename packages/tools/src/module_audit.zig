@@ -116,6 +116,7 @@ const capability_rules = [_]CapabilityRule{
     .{ .capability = "runtime_callback", .helpers = &.{ "runtimeCallbackCapabilityChecked", "getRuntimeCallbackStateChecked" } },
     .{ .capability = "sqlite", .helpers = &.{ "sqliteCapabilityChecked", "getSqliteStateChecked", "openSqliteDbChecked" } },
     .{ .capability = "filesystem", .helpers = &.{"readFileChecked"} },
+    .{ .capability = "network", .helpers = &.{"requireCapability(handle, .network)"} },
     .{ .capability = "policy_check", .helpers = &.{ "allowsEnvChecked", "allowsEnvForActiveModule", "allowsCacheNamespaceChecked", "allowsCacheNamespaceForActiveModule", "allowsSqlQueryChecked", "allowsSqlQueryForActiveModule", "allowsSqlWriteChecked", "allowsSqlWriteForActiveModule" } },
     .{ .capability = "websocket", .helpers = &.{"WebSocketCallbacks"} },
 };
@@ -174,6 +175,54 @@ const forbidden_patterns = [_]ForbiddenPattern{
         .pattern = "Sha256.init",
         .message = "virtual module hashes directly",
         .suggestion = "use sha256Checked instead of Sha256.init",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.net.",
+        .message = "virtual module opens network connections directly",
+        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.Io.net.",
+        .message = "virtual module opens network connections directly",
+        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.http.Client",
+        .message = "virtual module constructs an HTTP client directly",
+        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.posix.socket",
+        .message = "virtual module opens sockets directly",
+        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.process.Child",
+        .message = "virtual module spawns child processes directly",
+        .suggestion = "move process execution outside the virtual module boundary",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.process.spawn",
+        .message = "virtual module spawns child processes directly",
+        .suggestion = "move process execution outside the virtual module boundary",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "execv",
+        .message = "virtual module replaces the current process directly",
+        .suggestion = "move process execution outside the virtual module boundary",
+    },
+    .{
+        .code = "ZVM001",
+        .pattern = "std.posix.fork",
+        .message = "virtual module forks the current process directly",
+        .suggestion = "move process execution outside the virtual module boundary",
     },
 };
 
@@ -767,6 +816,125 @@ test "verify module reports helper use without declared capability" {
     try checkCapabilityHelperDrift(allocator, "packages/zigts/src/modules/test.zig", source, caps.items, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqualStrings("ZVM002", diags.items[0].diag.code);
+}
+
+test "verify module reports network capability use without declaration" {
+    const allocator = std.testing.allocator;
+    var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+    defer {
+        for (diags.items) |*diag| diag.deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    const source =
+        \\pub const binding = mb.ModuleBinding{
+        \\    .specifier = "zigttp:test",
+        \\    .required_capabilities = &.{},
+        \\};
+        \\
+        \\fn useNetwork(handle: *sdk.ModuleHandle) !void {
+        \\    try sdk.requireCapability(handle, .network);
+        \\}
+    ;
+
+    var caps = try parseBindingCapabilities(allocator, source);
+    defer caps.deinit(allocator);
+
+    try checkCapabilityHelperDrift(allocator, "packages/modules/src/net/test.zig", source, caps.items, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings("ZVM002", diags.items[0].diag.code);
+}
+
+test "verify module rejects direct TCP connections" {
+    const allocator = std.testing.allocator;
+    var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+    defer {
+        for (diags.items) |*diag| diag.deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    const source =
+        \\fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
+        \\    _ = try std.net.tcpConnectToHost(allocator, host, port);
+        \\}
+    ;
+
+    try checkForbiddenPatterns(allocator, "packages/modules/src/net/test.zig", source, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings("ZVM001", diags.items[0].diag.code);
+}
+
+test "verify module rejects raw HTTP clients and sockets" {
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        "const stream = try std.Io.net.IpAddress.connect(&address, io, .{});",
+        "var client = std.http.Client{ .allocator = allocator, .io = io };",
+        "const fd = try std.posix.socket(domain, socket_type, protocol);",
+    };
+
+    for (sources) |source| {
+        var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+        defer {
+            for (diags.items) |*diag| diag.deinit(allocator);
+            diags.deinit(allocator);
+        }
+
+        try checkForbiddenPatterns(allocator, "packages/modules/src/net/test.zig", source, &diags);
+        try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+        try std.testing.expectEqualStrings("ZVM001", diags.items[0].diag.code);
+    }
+}
+
+test "verify module rejects child process spawning" {
+    const allocator = std.testing.allocator;
+    var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+    defer {
+        for (diags.items) |*diag| diag.deinit(allocator);
+        diags.deinit(allocator);
+    }
+
+    const source =
+        \\fn spawn(io: std.Io) !void {
+        \\    var child = try std.process.Child.spawn(io, .{ .argv = &.{"tool"} });
+        \\    _ = try child.wait(io);
+        \\}
+    ;
+
+    try checkForbiddenPatterns(allocator, "packages/modules/src/platform/test.zig", source, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings("ZVM001", diags.items[0].diag.code);
+}
+
+test "verify module rejects process spawn exec and fork APIs" {
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        "var child = try std.process.spawn(io, .{ .argv = argv });",
+        "return std.posix.execvpeZ_expandArg0(.no_expand, file, child_argv, envp);",
+        "const pid = try std.posix.fork();",
+    };
+
+    for (sources) |source| {
+        var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+        defer {
+            for (diags.items) |*diag| diag.deinit(allocator);
+            diags.deinit(allocator);
+        }
+
+        try checkForbiddenPatterns(allocator, "packages/modules/src/platform/test.zig", source, &diags);
+        try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+        try std.testing.expectEqualStrings("ZVM001", diags.items[0].diag.code);
+    }
+}
+
+test "sanctioned outbound callback module audits cleanly" {
+    var result = try verifyPaths(
+        std.testing.allocator,
+        &.{"packages/modules/src/net/fetch.zig"},
+        .{},
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
 }
 
 test "registry-driven companion path mapping preserves rooted paths" {
