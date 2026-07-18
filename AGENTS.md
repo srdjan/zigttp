@@ -4,12 +4,14 @@
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
 - `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
 - `packages/zigts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
-- `packages/zigts/src/modules/` implements virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`).
-- `packages/zigts/src/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
+- `packages/modules/` is the peer package implementing most virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/`.
+- `packages/zigts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
+- `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
+- `packages/zigts/src/jit/` contains the tiered JIT compiler (baseline and optimized tiers) for x86-64 and ARM64.
 - `packages/zigts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zigts_cli.zig` for the compiler CLI).
 - `packages/zigttp-sdk/` contains the extension SDK.
-- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`).
+- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `websocket/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
 - `zig-out/` and `.zig-cache/` are generated outputs; don't edit or commit them.
@@ -44,7 +46,7 @@
 - Format Zig code with `zig fmt` and follow existing patterns.
 - Zig identifiers: types in `UpperCamelCase`, functions and variables in `lowerCamelCase`.
 - Files are short, descriptive, and lowercase (e.g., `server.zig`, `zruntime.zig`).
-- Keep APIs explicit: the project uses `Result(T)`-style error handling across the engine/runtime.
+- Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
 ## Testing Guidelines
