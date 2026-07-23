@@ -10,7 +10,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-website_static="$repo_root/../zigttp-website/static"
+website_static="$repo_root/../zttp-website/static"
 if [ ! -d "$website_static" ]; then
   echo "error: website static dir not found at $website_static" >&2
   exit 1
