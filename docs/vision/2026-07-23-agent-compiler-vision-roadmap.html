@@ -1,0 +1,416 @@
+<title>Vision: zigttp expert — The Agent-Compiler</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#fbfaf8; --surface:#ffffff; --surface-2:#f4f2ee; --ink:#1c1a17; --ink-2:#4d4842;
+    --muted:#726b62; --line:#e4e0d8; --accent:#9a5b2c; --accent-text:#7a4620;
+    --accent-soft:#f7ecdd; --ok:#2f6d4f; --ok-soft:#e6f1ea; --warn:#8a6d1f; --warn-soft:#f5eed6;
+    --info:#3a5a8a; --info-soft:#e8eef7; --danger:#8f3a34; --danger-soft:#f6e6e4;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#16140f; --surface:#1e1b16; --surface-2:#252118; --ink:#efe9df; --ink-2:#cabfae;
+      --muted:#9c917f; --line:#332e25; --accent:#e0a35f; --accent-text:#e9b877; --accent-soft:#2c2216;
+      --ok:#7fc39c; --ok-soft:#182620; --warn:#d8bd6b; --warn-soft:#2a2413; --info:#8fb0dd; --info-soft:#161f2c;
+      --danger:#e0928a; --danger-soft:#2a1816;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#16140f; --surface:#1e1b16; --surface-2:#252118; --ink:#efe9df; --ink-2:#cabfae;
+    --muted:#9c917f; --line:#332e25; --accent:#e0a35f; --accent-text:#e9b877; --accent-soft:#2c2216;
+    --ok:#7fc39c; --ok-soft:#182620; --warn:#d8bd6b; --warn-soft:#2a2413; --info:#8fb0dd; --info-soft:#161f2c;
+    --danger:#e0928a; --danger-soft:#2a1816;
+  }
+  :root[data-theme="light"]{
+    --bg:#fbfaf8; --surface:#ffffff; --surface-2:#f4f2ee; --ink:#1c1a17; --ink-2:#4d4842;
+    --muted:#726b62; --line:#e4e0d8; --accent:#9a5b2c; --accent-text:#7a4620; --accent-soft:#f7ecdd;
+    --ok:#2f6d4f; --ok-soft:#e6f1ea; --warn:#8a6d1f; --warn-soft:#f5eed6; --info:#3a5a8a; --info-soft:#e8eef7;
+    --danger:#8f3a34; --danger-soft:#f6e6e4;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;font-size:16px;margin:0;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;font-feature-settings:"kern","liga","cv05"}
+  .wrap{max-width:920px;margin-inline:auto;padding:2.2rem 1.4rem 5rem}
+  p,li{max-width:74ch}
+  a{color:var(--accent-text);text-underline-offset:2px}
+  code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);padding:.08em .36em;border-radius:4px;border:1px solid var(--line)}
+  h1{font-size:2.05rem;line-height:1.16;letter-spacing:-.022em;margin:.2rem 0 .5rem;font-weight:700}
+  h2{font-size:1.4rem;letter-spacing:-.012em;margin:2.8rem 0 .5rem;padding-bottom:.35rem;border-bottom:2px solid var(--line);font-weight:660}
+  h3{font-size:1.12rem;margin:1.4rem 0 .1rem;font-weight:640}
+  h4{font-size:.98rem;margin:1rem 0 .1rem;font-weight:640;color:var(--ink-2)}
+  .eyebrow{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-text);font-weight:640}
+  .lede{font-size:1.1rem;color:var(--ink-2);max-width:76ch}
+  .meta{display:flex;flex-wrap:wrap;gap:.5rem .9rem;margin:1rem 0 .2rem;font-size:.82rem;color:var(--muted)}
+  .meta b{color:var(--ink-2);font-weight:600}
+  .themebtn{position:fixed;top:.8rem;right:.9rem;z-index:10;background:var(--surface);border:1px solid var(--line);
+    color:var(--ink-2);border-radius:999px;padding:.35rem .7rem;font-size:.72rem;cursor:pointer;font-family:var(--sans)}
+  nav.toc{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:.9rem 1.1rem;margin:1.4rem 0 2rem}
+  nav.toc ol{margin:.3rem 0 0;padding-left:1.2rem;columns:2;column-gap:2rem}
+  nav.toc li{margin:.24rem 0;font-size:.92rem}
+  nav.toc a{text-decoration:none}
+  nav.toc a:hover{text-decoration:underline}
+  section{scroll-margin-top:1rem}
+  .callout{border-left:3px solid var(--accent);background:var(--accent-soft);padding:.7rem .95rem;border-radius:0 10px 10px 0;margin:1rem 0}
+  .callout.info{border-color:var(--info);background:var(--info-soft)}
+  .callout.warn{border-color:var(--warn);background:var(--warn-soft)}
+  .callout .k{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--accent-text);display:block;margin-bottom:.2rem}
+  .callout.info .k{color:var(--info)} .callout.warn .k{color:var(--warn)}
+  figure{margin:1.3rem 0;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:1rem;overflow-x:auto}
+  figure svg{display:block;max-width:100%;height:auto;margin-inline:auto}
+  figcaption{font-size:.8rem;color:var(--muted);margin-top:.5rem;text-align:center}
+  table{border-collapse:collapse;width:100%;font-size:.88rem;margin:.7rem 0}
+  th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  td code,th code{font-size:.82em}
+  .pill{display:inline-block;font-size:.68rem;font-weight:700;border-radius:999px;padding:.14rem .55rem;border:1px solid var(--line)}
+  .pill.crit{background:var(--danger-soft);color:var(--danger)} .pill.should{background:var(--warn-soft);color:var(--warn)}
+  .pill.now{background:var(--ok-soft);color:var(--ok)} .pill.next{background:var(--info-soft);color:var(--info)}
+  .pill.later{background:var(--accent-soft);color:var(--accent-text)} .pill.horizon{background:var(--surface-2);color:var(--muted)}
+  .phase{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:1.2rem 1.35rem;margin:1.2rem 0}
+  .phase h3{margin-top:.2rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+  .gate{background:var(--ok-soft);border:1px solid var(--line);border-radius:10px;padding:.6rem .85rem;margin:.7rem 0;font-size:.9rem}
+  .gate .k{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--ok)}
+  .risk{background:var(--danger-soft);border:1px solid var(--line);border-radius:10px;padding:.55rem .85rem;margin:.5rem 0;font-size:.88rem}
+  .risk .k{font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--danger)}
+  .tri-leg{fill:var(--surface);stroke:var(--accent);stroke-width:1.5}
+  .svg-txt{font-family:var(--sans);fill:var(--ink)} .svg-mut{font-family:var(--sans);fill:var(--muted)}
+  .svg-mono{font-family:var(--mono);fill:var(--ink-2)}
+  strong{color:inherit}
+  footer.composition-signal{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.76rem;color:var(--muted)}
+</style>
+
+<button class="themebtn" onclick="(function(){var r=document.documentElement;var d=(r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));r.setAttribute('data-theme',d==='dark'?'light':'dark');})()">◐ theme</button>
+
+<div class="wrap">
+
+<span class="eyebrow">Vision &amp; Roadmap</span>
+<h1>zigttp expert: the agent-compiler</h1>
+<p class="lede">A single co-designed system — a decidable language, a total proof system, and a code-generating agent that authors inside the proof boundary — evolving from the safest way to write a handler into the safest way to write an application. The compiler is not a checker the agent calls; it is the agent's partner and the ground truth of the reward.</p>
+
+<div class="meta">
+  <span><b>Date</b> 2026-07-23</span>
+  <span><b>Scope</b> expert agent · local zigts model · proof system · standalone applications</span>
+  <span><b>Status</b> vision — not a committed plan</span>
+</div>
+
+<nav class="toc">
+  <b style="font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)">Contents</b>
+  <ol>
+    <li><a href="#thesis">The category thesis</a></li>
+    <li><a href="#pillars">The three pillars</a></li>
+    <li><a href="#standalone">Standalone applications</a></li>
+    <li><a href="#roadmap">The roadmap</a></li>
+    <li><a href="#metrics">Metrics evolution</a></li>
+    <li><a href="#risks">Risks &amp; open questions</a></li>
+  </ol>
+</nav>
+
+<!-- ================= THESIS ================= -->
+<section id="thesis">
+<h2>1. The category thesis</h2>
+
+<p>An <strong>agent-compiler</strong> is a single system in which three artifacts are engineered against each other: a restricted language whose safety and correctness properties are <em>decidable</em>; a proof system that is <em>total</em> over that language; and a code-generating agent whose entire authoring loop — goal, feedback, repair, and reward — is expressed in the proof system's vocabulary rather than in natural language. The defining property: <strong>the set of programs the agent can emit converges on the set of programs the compiler can prove.</strong> The agent does not write code and then check it. It authors inside a fence, and the fence is load-bearing for everything else.</p>
+
+<p>This is categorically different from the two things it will be mistaken for.</p>
+
+<h4>Not "an LLM plus a linter"</h4>
+<p>A linter is heuristic, advisory, incomplete, and post-hoc — suggestions over an unbounded language that a model routes around, and "no findings" means nothing. The zigttp verifier is the opposite: the subset bans the constructs that make analysis undecidable (<code>while</code>, arbitrary recursion via classes/<code>this</code>/<code>new</code>, <code>try/catch</code>, <code>async</code>), so the IR tree <em>is</em> the control-flow graph — no back-edges (<code>docs/verification.md:18-27</code>) — and the tree walk that proves response-totality, Result discharge, state isolation, flow labels, and fault coverage is exhaustive, not sampled. "No findings" is a theorem, signed with Ed25519.</p>
+
+<h4>Not "a compiler with an LLM bolted on"</h4>
+<p>In that architecture the compiler is a passive oracle: the agent generates into an unbounded space, gets error strings, and searches blindly. Here the compiler actively structures the search. It supplies the goal as typed data (typed holes: expected type, in-scope bindings, capability budget, undischarged <code>Spec</code> obligations). It supplies feedback as typed data (the comptime-derived rule registry maps diagnostics to <code>RepairIntent</code>, today ~44 of 71 registry entries). It executes a growing fraction of repairs with no model call at all (Phase B model-free apply in <code>repair_plan.zig</code> / <code>auto_repair.zig</code>). And it grades the outcome with a total, deterministic verdict that doubles as a training reward.</p>
+
+<h4>Why zigttp is uniquely positioned</h4>
+<p>Four properties that took years of deliberate restriction to earn and that a general-purpose stack cannot retrofit:</p>
+<ol>
+  <li><strong>Decidability by construction.</strong> The subset was restricted on purpose so correctness is decidable; every restriction maps to a proof it unlocks (<code>zigttp restrictions</code>, <code>docs/restrictions-to-proofs.md</code>). A V8-based competitor would have to un-ship JavaScript to get here.</li>
+  <li><strong>A cheap, deterministic, non-flaky reward <em>channel</em>.</strong> The verifier is total over the subset, deterministic, runs in milliseconds, and compiles to a hermetic wasm64 module (<code>zig build wasm</code>, <code>analyzer_only</code>; wasm64 because NaN-boxing needs 64-bit pointers, so the host needs memory64) — a reward oracle you can run millions of times an hour with zero variance. General RLHF reward models are learned approximations that get hacked; this one is a proof with a <em>versioned soundness history</em>. Two honest limits keep this from being "perfect": the verifier has carried soundness bugs (a taint fail-open lived 14 review passes before its 2026-07-10 fix; JIT-promoted faults are a documented open item), so the training pipeline must version the verifier and relabel on every soundness fix; and even a sound verifier rewards <em>vacuous</em> satisfaction — a handler that returns 501 everywhere is fully green — so the reward must always pair the proof with functional intent (see §2b, §6).</li>
+  <li><strong>A comptime-anchored spec.</strong> The rule registry is comptime-derived from the checkers themselves so it cannot drift; the semantics registry is gated five ways, including z3 SMT equivalence (mechanism 5) and an exclusion audit that machine-refutes over-claims. The reward's <em>meaning</em> is itself proven.</li>
+  <li><strong>One canonical surface form per idiom.</strong> <code>normalize</code> plus the canonical-form property (ZTS612-620) collapses the output distribution to roughly one right way to write each thing — what makes a <em>small</em> model plausible and verified examples reusable.</li>
+</ol>
+
+<div class="callout"><span class="k">The moat</span>
+The moat is not the agent, the model, or the proof system individually — each can be imitated. It is the <strong>closed data loop none of them can exist without the other two</strong>: every expert session emits verifier-labeled, signed, replayable training data for a language whose corpus exists nowhere else. A competitor needs the language to get the verifier, the verifier to label the data, and the data to train the model. Replicating any one piece buys nothing.</div>
+</section>
+
+<!-- ================= PILLARS ================= -->
+<section id="pillars">
+<h2>2. The three pillars — a triangle, not a list</h2>
+
+<figure>
+  <svg viewBox="0 0 640 340" role="img" aria-label="A reinforcing triangle: the skilled agent, the local zigts model, and the proof system, with each edge labeled by how one pillar strengthens another.">
+    <polygon points="320,34 66,300 574,300" fill="none" stroke="var(--line)" stroke-width="1"/>
+    <!-- nodes -->
+    <g>
+      <rect x="238" y="16" width="164" height="46" rx="10" class="tri-leg"/>
+      <text x="320" y="38" text-anchor="middle" class="svg-txt" font-size="13" font-weight="650">Skilled agent</text>
+      <text x="320" y="54" text-anchor="middle" class="svg-mut" font-size="10.5">holes · forms · combinators</text>
+    </g>
+    <g>
+      <rect x="0" y="286" width="176" height="46" rx="10" class="tri-leg"/>
+      <text x="88" y="308" text-anchor="middle" class="svg-txt" font-size="13" font-weight="650">Local zigts model</text>
+      <text x="88" y="324" text-anchor="middle" class="svg-mut" font-size="10.5">fine-tuned · in the loop</text>
+    </g>
+    <g>
+      <rect x="464" y="286" width="176" height="46" rx="10" class="tri-leg"/>
+      <text x="552" y="308" text-anchor="middle" class="svg-txt" font-size="13" font-weight="650">Proof system</text>
+      <text x="552" y="324" text-anchor="middle" class="svg-mut" font-size="10.5">spine + reward signal</text>
+    </g>
+    <!-- edge labels with halo -->
+    <g paint-order="stroke" stroke="var(--surface-2)" stroke-width="4">
+      <text x="150" y="150" text-anchor="middle" class="svg-mono" font-size="10">agent shrinks</text>
+      <text x="150" y="163" text-anchor="middle" class="svg-mono" font-size="10">search → small model</text>
+      <text x="490" y="150" text-anchor="middle" class="svg-mono" font-size="10">proofs = holes +</text>
+      <text x="490" y="163" text-anchor="middle" class="svg-mono" font-size="10">repairs the agent uses</text>
+      <text x="320" y="292" text-anchor="middle" class="svg-mono" font-size="10">proofs label data · model proposes provable code</text>
+    </g>
+    <!-- rotating arrows -->
+    <path d="M250 70 C170 120, 130 180, 110 280" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#tv)"/>
+    <path d="M175 300 C300 270, 360 270, 470 300" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#tv)"/>
+    <path d="M540 280 C520 180, 470 120, 390 70" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#tv)"/>
+    <defs><marker id="tv" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--accent)"/></marker></defs>
+  </svg>
+  <figcaption>Each leg makes the other two cheaper and stronger. Proofs label the data that trains the model; the model proposes code the proofs verify; the agent's holes and forms shrink the search until a small local model suffices. That circulation is the compounding engine.</figcaption>
+</figure>
+
+<h3>2a. The skilled agent — from prompted model to compiler-native loop</h3>
+<p>Today the agent is a well-prompted remote model (<code>expert_persona.zig</code> ~128 KiB system prompt; <code>expert_workflow.zig</code> task classification; 50+ tools; module signatures fetched live) wrapped in a deterministic veto/repair loop (<code>veto.zig</code> edit-simulate dry-runs; <code>repair_plan.zig</code> typed plans; <code>auto_repair.zig</code> retry blocks). That already moved first-draft-correct from 3/6 to 7/7. The next stage inverts the relationship: the compiler stops being scaffolding around generation and becomes the <em>medium</em> of generation.</p>
+<ul>
+  <li><strong>Typed holes become the native unit of work</strong> (ideation survivor 1). <code>hole()</code>/<code>todo()</code> plus <code>check --holes --json</code> turns "write me a handler" into a sequence of machine-readable completion contracts. The loop (<code>loop.zig</code>) stops asking for whole files and starts asking for hole fills — a radically smaller generation problem with a locally checkable answer.</li>
+  <li><strong>Certified forms shrink authoring to parameterization</strong> (survivor 6). <code>resource()</code>/<code>webhook()</code>/<code>proxy()</code> comptime generators mean the common 80% of handlers is "choose a form, fill its holes," with output re-proven by the full pipeline — no trusted-template loophole. With the combinator algebra (survivor 3), most sessions never require open-ended synthesis.</li>
+  <li><strong>The veto/repair loop goes mostly deterministic.</strong> <code>RepairIntent</code> coverage grows toward totality; every diagnostic with a unique canonical fix is applied with no model call. The model is invoked only where genuine choice exists — which also <em>defines the residual task</em> the local model must learn.</li>
+</ul>
+
+<h3>2b. The local zigts model</h3>
+<p><strong>Why local.</strong> The veto loop is millisecond-scale; a remote round-trip is seconds and dollars. The solo-developer persona works offline, on a laptop, on private code whose contracts include its secrets topology (flow labels, env vars, egress hosts) — exactly the material you least want streamed to a third-party API. The tight hole-fill → veto → repair loop is only viable when inference is local. Remote frontier models stay in the system as teacher and fallback, routed by task class via the existing <code>classify()</code> machinery.</p>
+
+<p><strong>The data flywheel: a self-labeling corpus.</strong> The infrastructure already emits everything a training pipeline needs, signed:</p>
+<table>
+  <thead><tr><th>Artifact</th><th>Source</th><th>Training use</th></tr></thead>
+  <tbody>
+    <tr><td>Verified patches</td><td><code>verified_patch_count</code> events, proof receipts</td><td>Positive SFT examples — only turns the verifier blessed</td></tr>
+    <tr><td>Veto transcripts</td><td><code>veto.zig</code> before/after diagnostics + the repair that fixed them</td><td>Preference pairs (rejected vs repaired) — DPO data labeled by a proof, not a human</td></tr>
+    <tr><td>Equivalence receipts</td><td><code>kind=equivalence</code> after each applied edit</td><td>Edit-safety labels (equivalent / additive / breaking) for an edit model</td></tr>
+    <tr><td>Eval cassettes</td><td><code>expert_codegen_record.zig</code></td><td>Frozen regression suite + distillation transcripts</td></tr>
+    <tr><td>Pattern capsules</td><td>content-addressed canonical forms + receipts (survivor 5)</td><td>Retrieval corpus: proof-carrying few-shot examples</td></tr>
+  </tbody>
+</table>
+<p>No general model has this: a corpus where every example carries a machine-checked correctness label and a signed provenance chain.</p>
+
+<p><strong>Training, staged.</strong> (1) <em>SFT / distillation</em> of an open 3-8B code model on a fill-in-the-middle objective (aligned with holes). The synthetic channel needs care: naive "enumerate canonical forms, mutate, verify" produces <code>(program, green)</code> pairs that teach valid <em>syntax</em>, not task <em>intent</em> — the trivially-correct noise to avoid. The two channels that carry real signal are <em>reverse-diagnostics</em> (invert a <code>RepairIntent</code> on a green handler to synthesize a red one, then train on <code>red + diagnostic → verified green edit</code>; the label is the verifier's own diagnostic — dense and correct) and the <em>expert session ledgers</em> (persisted <code>verified_patch</code> events, which carry intent but whose volume is the cold-start dependency). (2) <em>Preference tuning</em> on veto-rejected/repaired pairs, balanced per rule family. (3) <em>RLVR with the proof as reward</em>: rollout = fill a hole or draft against a spec; reward = green proof (hard gate) + <code>provenPathRatio</code> partial credit + per-property discharge shaping + functional-test pass fraction − veto penalties − a length penalty. Critical: the property floor is fixed from the <em>task spec</em>, not the generated code — otherwise a policy inflates <code>provenPathRatio</code> by emitting handlers that track fewer properties. The hermetic wasm64 analyzer is the strategic asset: a ms-latency, parallel reward oracle.</p>
+
+<div class="callout warn"><span class="k">Honest caveat — the small-model bet is three bets, not one</span>
+"Narrow grammar ⇒ a 3-8B model wins" is a hypothesis, and it splits by task class with very different confidence. <strong>Repair</strong> (44 rules carry a typed <code>RepairIntent</code>; Phase B model-free apply already ships with <em>no</em> model) — high confidence, arguably needs no model at all. <strong>Typed hole-fill</strong> — medium confidence, directly testable, because the context is constrained decoding. <strong>Whole-handler-from-intent</strong> — low confidence: the bottleneck is <em>deciding what the handler should do</em>, and grammar narrowing does not help reasoning; keep the frontier model as proposer with verifier reranking here. <code>classify()</code> routes the reasoning-heavy turns to the frontier teacher; the deterministic scaffolding shrinks how often they occur. The honest failure mode is the middle band — too novel for the small model, too frequent to remote-route economically. State the bet as falsifiable and let the eval (fixed suite, small vs frontier, cost per verified handler; the pi codegen eval baseline moved 3/6 → 7/7) decide it before committing to RLVR.</div>
+
+<h3>2c. The proof system — correctness spine and reward signal</h3>
+<p>The proof system carries two loads: the user-facing guarantee, and the label generator for pillar (b). Both demand the same thing first — <strong>soundness of the reward.</strong> A concrete, instructive example: a taint-laundering fail-open lived through 14 review passes before it was closed on main (<code>4e46e143</code> for member/optional/arrow-call laundering, <code>00af8391</code> for the JSX channel, 2026-07-10). While open, that fail-open would have poisoned training — a verifier that labels a leaky program green certifies the bug class into both SFT labels and RLVR reward. The durable lesson is not "fix that one bug" (done) but a <em>process obligation</em>: the training pipeline versions the verifier (pin against <code>spec-hash</code> / policy hash) and relabels banked data on every soundness fix, so a corpus is never trusted across a soundness boundary. Survivor 2 (unforgeable <code>Validated&lt;T,"schema"&gt;</code> brands, minted only by <code>validateJson</code>, demanded by sinks) is now <em>defense-in-depth</em> for the same class: it converts the global taint dataflow question into a local type obligation a second, independent layer enforces.</p>
+<p>Beyond that, the proof system deepens along three axes: <strong>coverage</strong> (route-table determinism, survivor 4 — whose "prove a property over finite declarative data" pattern is the exact prototype for the app transition tables in §3; plus the deferred SMT type-precondition layer); <strong>provenance</strong> (survivor 7 — receipts record the DAG of function-level capsules that discharged each claim, which is simultaneously the user audit story and the training data-lineage story); and <strong>totality of repair</strong> (every registry rule either has a deterministic <code>RepairIntent</code> or is explicitly classified as requiring judgment — the compiler formally delimiting the model's job).</p>
+</section>
+
+<!-- ================= STANDALONE ================= -->
+<section id="standalone">
+<h2>3. The standalone-applications expansion</h2>
+<p>The hardest and most valuable move: growing zigts from <code>function handler(req): Response</code> to standalone applications <em>without surrendering the acyclic-CFG decidability the entire thesis rests on.</em></p>
+
+<h3>3.1 The principle: the loop lives in the runtime; the logic stays a tree</h3>
+<p>A standalone application differs from a handler in exactly one semantic respect: unbounded execution — it loops, waits, and reacts indefinitely. The naive move (admit <code>while</code>, admit events-as-callbacks) reintroduces arbitrary back-edges and destroys the tree-walk proof. The correct move is already latent in the codebase: <strong><code>zigttp:durable</code> is an existence proof that unbounded, resumable execution can be expressed as a sequence of individually decidable steps.</strong> <code>run()</code>/<code>step()</code>/<code>sleep()</code>/<code>waitSignal()</code> execute an unbounded workflow through replay: each invocation is a finite tree walk; the driver that re-enters the function is trusted Zig (<code>durable_recovery.zig</code>). The back-edge exists — but it lives in the runtime, not in the user's proven code.</p>
+
+<figure>
+  <svg viewBox="0 0 680 250" role="img" aria-label="A handler is a single proven tree. A standalone app is a trusted runtime supervisor looping over a finite transition table of proven step-function trees; the back-edge lives in the runtime, the logic stays acyclic.">
+    <text x="14" y="18" class="svg-mut" font-size="11" font-weight="700">HANDLER (today)</text>
+    <rect x="14" y="28" width="150" height="64" rx="10" fill="var(--ok-soft)" stroke="var(--line)"/>
+    <text x="89" y="52" text-anchor="middle" class="svg-txt" font-size="12">handler(req)</text>
+    <text x="89" y="70" text-anchor="middle" class="svg-mut" font-size="10">one acyclic tree</text>
+    <text x="89" y="84" text-anchor="middle" class="svg-mut" font-size="10">= proven by tree walk</text>
+
+    <text x="250" y="18" class="svg-mut" font-size="11" font-weight="700">STANDALONE APP (proposed)</text>
+    <!-- supervisor -->
+    <rect x="250" y="28" width="416" height="52" rx="10" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="458" y="49" text-anchor="middle" class="svg-txt" font-size="12" font-weight="650">trusted runtime supervisor (Zig)</text>
+    <text x="458" y="65" text-anchor="middle" class="svg-mut" font-size="10">pump event · look up transition · invoke step · persist state — the back-edge lives HERE</text>
+    <path d="M656 80 C690 120, 690 20, 660 32" fill="none" stroke="var(--accent)" stroke-width="1.4" marker-end="url(#sv)"/>
+    <text x="672" y="58" class="svg-mut" font-size="9" transform="rotate(90 672 58)">loop</text>
+
+    <!-- step trees -->
+    <rect x="250" y="150" width="128" height="60" rx="9" fill="var(--ok-soft)" stroke="var(--line)"/>
+    <text x="314" y="174" text-anchor="middle" class="svg-mono" font-size="10.5">f₁(State,Event)</text>
+    <text x="314" y="190" text-anchor="middle" class="svg-mut" font-size="9.5">acyclic tree · proven</text>
+    <rect x="394" y="150" width="128" height="60" rx="9" fill="var(--ok-soft)" stroke="var(--line)"/>
+    <text x="458" y="174" text-anchor="middle" class="svg-mono" font-size="10.5">f₂(State,Event)</text>
+    <text x="458" y="190" text-anchor="middle" class="svg-mut" font-size="9.5">acyclic tree · proven</text>
+    <rect x="538" y="150" width="128" height="60" rx="9" fill="var(--ok-soft)" stroke="var(--line)"/>
+    <text x="602" y="174" text-anchor="middle" class="svg-mono" font-size="10.5">f₃(State,Event)</text>
+    <text x="602" y="190" text-anchor="middle" class="svg-mut" font-size="9.5">acyclic tree · proven</text>
+    <line x1="330" y1="80" x2="314" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#sm)"/>
+    <line x1="458" y1="80" x2="458" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#sm)"/>
+    <line x1="586" y1="80" x2="602" y2="148" stroke="var(--muted)" stroke-width="1.2" marker-end="url(#sm)"/>
+    <rect x="250" y="222" width="416" height="24" rx="12" fill="var(--accent-soft)" stroke="var(--accent)"/>
+    <text x="458" y="239" text-anchor="middle" class="svg-txt" font-size="10.5" font-weight="600">transition table = finite data → graph proofs (reachability, totality, no dead states)</text>
+    <defs>
+      <marker id="sv" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--accent)"/></marker>
+      <marker id="sm" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker>
+    </defs>
+  </svg>
+  <figcaption>Per-step properties stay decidable exactly as today; global properties over the authored transition <em>table</em> (small, finite, data) become finite-graph model-checking — the same machinery as route-table determinism (survivor 4), one level up. The proof story stratifies rather than degrades. Caveat: the table is finite, but program <em>state</em> is not — see below.</figcaption>
+</figure>
+
+<p>Generalized: <strong>user code</strong> is a finite set of step functions <code>f_i : (State_i, Event) -&gt; (State_j, Effects)</code>, each an ordinary zigts function that receives every existing proof (response totality becomes transition totality; plus fault coverage, flow labels, capability enforcement, cost envelopes). Note the precise claim: a step is <em>input-bounded with a proven cost envelope</em>, not literally acyclic — recursion is legal at runtime (guarded by stack-overflow limits in <code>interpreter.zig</code>) and array HOFs iterate runtime-sized arrays, so "the logic stays a tree" is shorthand for "the step terminates and its cost is a signed, input-relative property" (the in-flight Cost Contracts work is the honest form of this). <strong>Control structure</strong> is <em>data</em> — a finite transition table in the app contract, encoded per the house rule as a type capsule (<code>App&lt;{states,events,transitions}&gt;</code>), never a new keyword; states and events are enums, and a guard is a pure predicate over <code>State</code> discharged per-transition by the existing prover (guards are where verification effort will concentrate). <strong>The event loop</strong> is a trusted Zig supervisor: pump event, look up transition, acquire runtime, invoke step, persist state, release — the HandlerPool isolation and arena-per-request model transfer intact as arena-per-event.</p>
+
+<div class="callout warn"><span class="k">Where the bridge relocates the hard part rather than removing it</span>
+Three limits to state plainly, or the decidability claim is dishonest. <strong>Infinite state domain.</strong> The transition table is finite, but the <em>reachable state space</em> is not — a step that appends to a list makes it unbounded, and properties over infinite-state systems are not finite-graph model-checking. Decidability is claimed only for control-graph properties (reachability, transition coverage, dead-state absence, supervisor termination) plus the per-step properties the prover already discharges; genuine <em>state</em> properties require author-supplied invariants the prover checks inductively per transition, or schema-bounding <code>State</code> via the existing <code>schemaCompile</code> machinery. <strong>Finite ≠ tractable.</strong> States × events × guards can still explode, so the design caps declared cardinality and falls back to bounded model-checking with an explicit coverage report rather than silently timing out. <strong>Effects, not just control.</strong> "Restart = replay" is inherited from durable only for <em>journaled</em> effects; durable replay is position-sensitive and works precisely because every effect is forced through a named <code>step()</code>. A live socket read, wall clock, or push is not replayable — so the supervisor must impose the same all-effects-through-journaled-handlers discipline, and <em>that discipline is the real engineering cost</em> of the standalone story, not a free corollary of the durable analogy.</div>
+
+<h3>3.2 Entrypoints and packaging — by ascending runtime risk</h3>
+<ol>
+  <li><strong><code>cli()</code></strong> — one-shot: argv/stdin in, structured output out. No event loop; a handler with a different transport. Ships first because it exercises multi-entrypoint contracts and packaging with zero new runtime machinery.</li>
+  <li><strong><code>worker()</code></strong> — a queue consumer: the existing <code>zigttp:queue</code> receive/ack/nack surface becomes an entrypoint; the supervisor pumps the queue. Each message is one bounded step; the unboundedness is the pump.</li>
+  <li><strong>Timers / cron</strong> — <code>sleepUntil</code> generalized to declared schedules in the contract.</li>
+  <li><strong><code>main()</code> / full FSM app</strong> — the supervised transition-table model of §3.1, potentially co-resident with HTTP handlers and WebSocket lifecycles in one binary.</li>
+</ol>
+<p>Pipeline changes: <code>handler_contract.zig</code>'s single-entry discovery grows into a multi-entry contract (per-entrypoint routes/capabilities/properties plus an app-level section for the transition table and state schema); <code>precompile.zig</code> embeds multiple bytecode units with an entry table; <code>runtime_cli.zig</code> dispatches on entry kind. The output remains one zero-dependency attested binary. Ship the supervisor behind a <code>-Dapps</code> flag initially (mirroring <code>-Dstudio</code>/<code>-Dedge</code>) so the FaaS binary's threat surface is unchanged while the model matures.</p>
+
+<h3>3.3 Capabilities for apps</h3>
+<p><code>ModuleCapability</code> already names <code>filesystem</code> and <code>network</code>; apps make them real as declared, enforced, <code>Effects</code>-typed grants: scoped filesystem path-sets (flow analysis forbids a <code>secret</code> label reaching a filesystem sink outside scope), declared listen ports (the runtime binds; user code never touches raw sockets), a typed <code>persistent_state</code> schema with a size envelope persisted via the durable journal, and <code>onShutdown</code> as a proven step with a bounded finite-step obligation — graceful shutdown as a theorem, not a convention.</p>
+
+<h3>3.4 What a proven app gets that hand-written Go/Rust/Node never will</h3>
+<p>Capability containment machine-checked at compile time rather than approximated by seccomp/containers at runtime. Exhaustive event coverage — every declared <code>(state, event)</code> pair provably handled, every failure fork enumerated. Per-event cost envelopes (Cost Contracts). Behavioral-equivalence across edits including FSM diffs (an added state reads additive; a changed transition reads breaking) <em>before</em> deploy. An attestable binary whose receipt carries the provenance DAG down to the pattern capsules that authored it. Deterministic replay of any journaled incident. No mainstream toolchain offers even two of these.</p>
+</section>
+
+<!-- ================= ROADMAP ================= -->
+<section id="roadmap">
+<h2>4. The roadmap</h2>
+<p>Sequencing logic: <strong>NOW</strong> makes the reward sound and starts data collection — the flywheel must begin turning before the model exists. <strong>NEXT</strong> builds the model on data NOW banked. <strong>LATER</strong> builds standalone foundations on proof machinery (finite-data interlocking, multi-entry contracts) that NOW and NEXT already hardened. <strong>HORIZON</strong> composes all three. Timeframes are ambition, not commitment — the NOW phase in particular is deliberately over-scoped below its realistic capacity; see the sequencing risk.</p>
+
+<figure>
+  <svg viewBox="0 0 680 90" role="img" aria-label="Four horizons on a timeline: NOW sound reward and flywheel ignition; NEXT the local model; LATER standalone foundations; HORIZON the agent-compiler for apps.">
+    <line x1="20" y1="45" x2="660" y2="45" stroke="var(--line)" stroke-width="2"/>
+    <g><circle cx="90" cy="45" r="6" fill="var(--ok)"/><text x="90" y="30" text-anchor="middle" class="svg-txt" font-size="11" font-weight="650">NOW</text><text x="90" y="66" text-anchor="middle" class="svg-mut" font-size="9">sound reward</text><text x="90" y="77" text-anchor="middle" class="svg-mut" font-size="9">+ flywheel</text></g>
+    <g><circle cx="270" cy="45" r="6" fill="var(--info)"/><text x="270" y="30" text-anchor="middle" class="svg-txt" font-size="11" font-weight="650">NEXT</text><text x="270" y="66" text-anchor="middle" class="svg-mut" font-size="9">local model</text><text x="270" y="77" text-anchor="middle" class="svg-mut" font-size="9">+ deeper proofs</text></g>
+    <g><circle cx="450" cy="45" r="6" fill="var(--accent)"/><text x="450" y="30" text-anchor="middle" class="svg-txt" font-size="11" font-weight="650">LATER</text><text x="450" y="66" text-anchor="middle" class="svg-mut" font-size="9">standalone</text><text x="450" y="77" text-anchor="middle" class="svg-mut" font-size="9">foundations</text></g>
+    <g><circle cx="620" cy="45" r="6" fill="var(--muted)"/><text x="620" y="30" text-anchor="middle" class="svg-txt" font-size="11" font-weight="650">HORIZON</text><text x="620" y="66" text-anchor="middle" class="svg-mut" font-size="9">agent-compiler</text><text x="620" y="77" text-anchor="middle" class="svg-mut" font-size="9">for apps</text></g>
+  </svg>
+</figure>
+
+<div class="phase">
+  <h3><span class="pill now">NOW</span> Sound reward, native authoring, flywheel ignition <span style="color:var(--muted);font-weight:400;font-size:.85rem">≈ 0-4 mo</span></h3>
+  <p><strong>Goal:</strong> the handler agent-compiler is trustworthy enough to train against, and every session banks labeled data.</p>
+  <table>
+    <thead><tr><th>#</th><th>Workstream</th><th>Mechanism / files</th></tr></thead>
+    <tbody>
+      <tr><td>N1</td><td>Training-data integrity: verifier versioning + relabel hooks (the taint CRIT is already fixed on main; this is its durable lesson). Add survivor 2 brands as defense-in-depth.</td><td>Stamp every banked record with <code>spec-hash</code> / policy hash; relabel on soundness fixes; <code>Validated&lt;T,"schema"&gt;</code> nominal brands (<code>type_pool.zig</code>), sinks demand them; keep the laundering counterexample corpus as a permanent red regression</td></tr>
+      <tr><td>N2</td><td>Typed holes end to end (survivor 1)</td><td><code>hole()</code>/<code>todo()</code> in parser; <code>check --holes --json</code>; <code>loop.zig</code>/<code>veto.zig</code> consume hole contracts; persona rewritten around hole-filling</td></tr>
+      <tr><td>N3</td><td>Certified forms + combinator algebra (survivors 6, 3)</td><td><code>resource()</code>/<code>webhook()</code>/<code>proxy()</code> comptime generators re-proven by full pipeline; guard stacks + <code>Spec&lt;"guarded"&gt;</code> coverage</td></tr>
+      <tr><td>N4</td><td>Deterministic repair expansion</td><td><code>RepairIntent</code> coverage 44/71 → ≥60/71; deterministic-apply ratio instrumented in <code>session/events.zig</code></td></tr>
+      <tr><td>N5</td><td>Flywheel ignition</td><td>Local corpus at <code>~/.zigttp/corpus</code>: every session persists (context, draft, veto diagnostics, repair, final, receipts); local-only default, opt-in sharing; cassette recording default-on locally</td></tr>
+      <tr><td>N6</td><td>Route determinism (survivor 4) + equivalence-receipt veto</td><td><code>routes_deterministic</code> property; veto consults <code>kind=equivalence</code> verdicts</td></tr>
+    </tbody>
+  </table>
+  <div class="gate"><span class="k">Gate</span> Expanded eval suite (7 → ~25 cases) at first-draft-correct ≥ 85%; round-trips-to-green p50 ≤ 1; taint corpus fully red and version-stamped; deterministic-apply ratio baselined; ≥ 1,000 verifier-labeled, spec-hash-tagged records banked.</div>
+  <div class="risk"><span class="k">Risk</span> The phase as drawn is over-scoped for this team's cadence (the repo absorbs a fresh-eyes-review-and-fix cycle roughly every 1-2 weeks on top of features). Shrink it: the non-negotiable core is <strong>N1 + N4 + N5 + the eval harness</strong> (data integrity, mechanical repair coverage, data collection, and the benchmark that decides the small-model bet). N2 (typed holes) stays if it feeds the eval; N3 (forms/combinators) and N6 can slip to early NEXT without stalling the flywheel. Brand migration may break the existing corpus — mitigate with a <code>normalize</code> auto-fix path.</div>
+</div>
+
+<div class="phase">
+  <h3><span class="pill next">NEXT</span> The local model and deeper proofs <span style="color:var(--muted);font-weight:400;font-size:.85rem">≈ 4-10 mo</span></h3>
+  <p><strong>Goal:</strong> a local zigts model wins the tight loop; SMT and provenance depth grow.</p>
+  <table>
+    <thead><tr><th>#</th><th>Workstream</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>X1</td><td>Corpus scale-out</td><td>Synthetic generation (enumerate/mutate canonical forms, verifier-filter, no model); frontier-teacher self-instruct filtered by proofs; distill banked cassettes</td></tr>
+      <tr><td>X2</td><td>SFT of open 3-8B FIM model</td><td>Objective aligned with typed holes; <code>expert_codegen_eval.zig</code> extended to A/B local-vs-remote on identical cassettes</td></tr>
+      <tr><td>X3</td><td>RLVR pipeline</td><td>Reward = proof verdict + <code>provenPathRatio</code> shaping + <code>tests.jsonl</code> functional pass − veto penalties − token cost; wasm analyzer as parallel reward oracle; canary properties to detect reward hacking</td></tr>
+      <tr><td>X4</td><td>Local inference provider</td><td>New backend under <code>packages/pi/providers</code> (llama.cpp / MLX); routing local for hole-fill/repair via <code>classify()</code>, remote for design; win-rate telemetry</td></tr>
+      <tr><td>X5</td><td>Pattern capsules + provenance DAG (survivors 5, 7)</td><td><code>zigttp patterns</code> local catalog; content-addressed, re-verified on import; capsules double as retrieval few-shots</td></tr>
+      <tr><td>X6</td><td>SMT precondition layer</td><td>The deferred type-precondition plan; extends mechanism-5 coverage beyond value nodes</td></tr>
+    </tbody>
+  </table>
+  <div class="gate"><span class="k">Gate</span> Local model ≥ 90% win-or-tie vs remote on hole-fill and repair classes; mean tokens-to-green down ≥ 5×; local repair-round latency &lt; 1s p50; RLVR eval curve monotone across 3 checkpoints with zero canary regressions.</div>
+  <div class="risk"><span class="k">Risk</span> RLVR reward under-specifies functionality (mitigate: functional tests in reward); base-model license may not permit shipping in a local binary (decide early); local footprint exceeds solo-dev hardware (quantized 3B floor, remote fallback stays). Reward is sparse on multi-line generation — convergence is a genuine research risk, not a foregone conclusion; the A/B harness (X2) must green-light before committing to X3.</div>
+</div>
+
+<div class="phase">
+  <h3><span class="pill later">LATER</span> Standalone foundations <span style="color:var(--muted);font-weight:400;font-size:.85rem">≈ 10-18 mo</span></h3>
+  <p><strong>Goal:</strong> the FSM app model exists, proven, for the low-risk entrypoints first.</p>
+  <table>
+    <thead><tr><th>#</th><th>Workstream</th><th>Mechanism</th></tr></thead>
+    <tbody>
+      <tr><td>L1</td><td>App model spec</td><td><code>App&lt;...&gt;</code> type capsule; transition-table contract section; per-edge state-type check; types-never-keywords preserved</td></tr>
+      <tr><td>L2</td><td><code>cli()</code> entrypoint</td><td>One-shot, no event loop; multi-entry contract; entry table in self-extracting format (<code>precompile.zig</code>)</td></tr>
+      <tr><td>L3</td><td><code>worker()</code> + timers</td><td><code>zigttp:queue</code> receive as entrypoint; declared schedules; supervisor pump</td></tr>
+      <tr><td>L4</td><td>Trusted event-loop supervisor</td><td><code>packages/runtime</code>; arena-per-event; state persisted via durable journal (restart = replay for journaled effects); aligns with the noted evented <code>std.Io</code> gap</td></tr>
+      <tr><td>L5</td><td>App capabilities</td><td>Scoped filesystem, listen ports, <code>persistent_state</code> schema + size envelope + proven migrations, bounded <code>onShutdown</code></td></tr>
+      <tr><td>L6</td><td>Global graph proofs</td><td>Reachability, dead-state absence, every-event-handled totality; prove-behavior extended to FSM diffs</td></tr>
+    </tbody>
+  </table>
+  <div class="gate"><span class="k">Gate</span> Standalone decidability coverage ≥ 90% on a reference suite (queue worker, cron job, CLI tool, chat bot); one demo app (worker + cron + admin handler) shipped as a single attested binary with 100% proven-path ratio; per-event isolation verified under the panic-isolation harness.</div>
+  <div class="risk"><span class="k">Risk</span> The FSM model feels alien if hand-authored (mitigate: certified <em>app</em> forms so most users describe an app and review a state diagram); the supervisor becomes a second, less-hardened runtime (mitigate: reuse HandlerPool/arena wholesale per the AGENTS.md isolation invariants); finite-graph proofs can still blow up on state-space explosion — cap declared state/event cardinality and fall back to bounded model-checking with an explicit coverage report rather than silently timing out.</div>
+</div>
+
+<div class="phase">
+  <h3><span class="pill horizon">HORIZON</span> The agent-compiler for applications <span style="color:var(--muted);font-weight:400;font-size:.85rem">18+ mo</span></h3>
+  <p><strong>Goal:</strong> the expert authors whole applications; the triangle operates at app granularity. Holes scale up to whole states ("fill this state's step function; here is its <code>(State, Event)</code> contract"); the local model trains on the app corpus LATER generated; equivalence receipts and provenance DAGs span entire apps; pattern capsules become a distillation and distribution channel; hosted deploy can return with attestation as the trust story rather than a hosting commodity.</p>
+  <div class="gate"><span class="k">Gate</span> A solo developer builds and ships a real multi-entrypoint product end-to-end through <code>zigttp expert</code> with proven-path ratio ≥ 95%, local-model share of turns ≥ 80%, reading generated code only where the provenance DAG flags judgment-class decisions.</div>
+</div>
+</section>
+
+<!-- ================= METRICS ================= -->
+<section id="metrics">
+<h2>5. Metrics evolution</h2>
+<p>The current four north stars remain and grow into an agent-compiler scorecard.</p>
+<table>
+  <thead><tr><th>Metric</th><th>Phase</th><th>Definition / trajectory</th></tr></thead>
+  <tbody>
+    <tr><td>Expert success rate</td><td>current</td><td>Sessions reaching <code>verified_patch</code>; stays north star</td></tr>
+    <tr><td>Round-trips to first green</td><td>current</td><td>p50 ≤ 1 by end of NOW</td></tr>
+    <tr><td>Proven-path ratio</td><td>current</td><td>discharged/tracked properties; ≥ 95% at HORIZON, app-granularity from LATER</td></tr>
+    <tr><td>Cold-start p50</td><td>current</td><td>Unchanged guardrail (~0.27 ms measured); apps add per-event p99</td></tr>
+    <tr><td>First-draft-correct (local/remote split)</td><td>NOW</td><td>Headline codegen metric, per model per task class</td></tr>
+    <tr><td>Deterministic-apply ratio</td><td>NOW</td><td>Fraction of veto findings repaired with zero model calls — measures compiler-native-ness</td></tr>
+    <tr><td>Proof-reward signal density</td><td>NOW</td><td>Verifier-labeled training examples banked per session — flywheel health</td></tr>
+    <tr><td>Mean tokens-to-green</td><td>NEXT</td><td>Total model tokens per verified patch — the cost metric the local model must crush</td></tr>
+    <tr><td>Local-vs-remote win rate</td><td>NEXT</td><td>Per task class, judged by the verifier on identical cassettes — gates routing expansion</td></tr>
+    <tr><td>RLVR convergence</td><td>NEXT</td><td>Eval-suite delta per 1k rollouts, canary-property regressions required at zero</td></tr>
+    <tr><td>Veto false-positive rate</td><td>NEXT</td><td>Verifier soundness telemetry — the reward's own quality gate</td></tr>
+    <tr><td>Standalone decidability coverage</td><td>LATER</td><td>Fraction of reference-app suite expressible with full proof coverage</td></tr>
+  </tbody>
+</table>
+</section>
+
+<!-- ================= RISKS ================= -->
+<section id="risks">
+<h2>6. Risks &amp; open questions</h2>
+<p>The honest hard parts, after a Fable adversarial pressure-test against the load-bearing claims (its findings are folded in throughout — the largest was a stale premise: the taint CRIT is already fixed).</p>
+
+<div class="callout"><span class="k">Reward soundness is a process, not a one-time fix</span>
+The specific taint fail-open that motivated this concern is closed on main (2026-07-10). The durable point stands and is stronger as a process: a fail-open verifier labels leaky programs green, poisoning both SFT labels and RLVR reward, so the pipeline must <em>version the verifier</em> against <code>spec-hash</code> and relabel banked data whenever a soundness fix lands. This is why N1 is data-integrity, not bug-closing. It also means the reward channel is "deterministic with a versioned soundness history," never "perfect."</div>
+
+<h4>Does a small local model actually beat a frontier model here?</h4>
+<p>On the narrow classes — hole fill, repair, form parameterization, canonical transforms — the structural argument is strong and cheaply testable via X2's A/B harness before committing to RLVR. It will lose on novel design, ambiguous requirements, and cross-domain reasoning; the system is architected so losing there does not matter (<code>classify()</code> routes those to the frontier teacher). The real unknown is the middle band — tasks too novel for the small model but too frequent to remote-route economically. Measure the band before concluding.</p>
+
+<h4>Does RLVR-on-proofs converge, or reward-hack?</h4>
+<p>The compiler is unusually hard to game: the proof is total, deterministic, and comptime-anchored, so there is no learned-reward-model exploit surface. But the <em>shaping</em> can be gamed — a policy can learn to emit trivially provable programs that ignore the task. The defense is structural: reward = proof (safety, contract) AND functional tests AND intent assertions; canary tasks whose only correct solutions are non-trivial; periodic human audit of high-reward rollouts. <strong>Proof certifies safety; it does not certify intent</strong> — conflating them is the single most likely way to waste a training run (the intent-oracle-vs-Spec line already documented internally is exactly this). And the reward is <em>sparse</em>: binary green over multi-line generation is a known-hard RL setting, which is why the per-property discharge shaping and functional partial credit matter, and why convergence is a real risk the A/B gate must clear first.</p>
+
+<h4>The decidability tax on standalone apps</h4>
+<p>The FSM model is more honest than callbacks but less familiar. If developers must hand-author transition tables, adoption stalls. The bet: certified app forms plus agent-authored tables means most users experience "describe the app, review the state diagram." If that bet fails, the fallback is to constrain scope to the entrypoints that need no visible FSM (<code>cli</code>, <code>worker</code>, cron) — which already cover a large share of real solo-dev applications. Separately, acyclic control flow does not bound memory or effects; the <code>persistent_state</code> envelope and journaled-effect seams (§3.1 caveat) are obligations to build, not guarantees to inherit.</p>
+
+<h4>Data cold-start</h4>
+<p>Mitigated to near-zero by a property no other project has: the verifier generates and labels synthetic data with no model in the loop (enumerate canonical forms, mutate, verify). The frontier teacher accelerates but is not load-bearing. Caveat: synthetic data teaches form, not intent — it must be paired with functional specs.</p>
+
+<h4>Where the human stays in the loop</h4>
+<p>Permanently at three points: intent (task specs and assertions remain human-authored, outside the proof boundary by design); judgment-class decisions the repair-totality classification explicitly reserves; and the approval diff, with the existing veto-exhaustion off-ramp. The trajectory is not "remove the human" but "make every human touch targeted" — provenance DAGs and equivalence verdicts tell the developer precisely which ~5% of an edit deserves eyes.</p>
+
+<h4>Underweighted questions to decide early</h4>
+<ul>
+  <li><strong>Evaluation against the field.</strong> The subset is proprietary, so SWE-bench-style comparisons do not apply — simultaneously the moat and an evaluation vacuum. Define the public metric as cost-per-verified-deployed-handler and first-draft-correct rate versus Claude Code / Cursor driving the <em>same</em> zigttp tasks through the plain CLI, and commit to publishing it.</li>
+  <li><strong>Model/spec versioning.</strong> The language and proof spec move (policy-hash-relevant surface changes roughly weekly); the local model is trained against a snapshot. Pin the model to a <code>spec-hash</code> and treat a spec bump as a retrain-or-fallback trigger, or the model silently drifts out of distribution.</li>
+  <li><strong>Fork-maintenance cost.</strong> A fine-tuned open base model is a dependency to track, patch, and re-license; budget it as an ongoing cost, not a one-time train.</li>
+  <li><strong>Addressable-market cap.</strong> Restricting to a subset caps what can be built; the standalone-app expansion is partly a market-expansion move, and its scope (which app shapes are in vs out) is a product decision, not only a technical one.</li>
+  <li><strong>Community corpus.</strong> Whether the local-first privacy stance permits an opt-in, receipt-anonymized shared corpus — which would supercharge the flywheel — is worth deciding before N5 sets the default.</li>
+</ul>
+</section>
+
+<div class="callout"><span class="k">The thesis in one line</span>
+zigttp expert becomes first-in-class not by having the best model or the best prompts, but by being the only system where <strong>the language was shaped for the proof, the proof was shaped to be a reward, and the agent was shaped to author inside the fence</strong> — so every hour of use makes the model smarter, every model gain makes proofs cheaper to reach, and every proof deepening gives the agent new vocabulary. Handlers are the beachhead; "the loop lives in the runtime, the logic stays cost-bounded" is the bridge; standalone applications — proven, attested, authored by a local model against a compiler whose reward is deterministic and whose soundness is versioned — are what "agent-compiler" will come to mean.</div>
+
+<footer class="composition-signal">Composed 2026-07-23 by compound-engineering · repo-grounded vision · Fable vision architect + Fable adversarial pressure-test (findings folded in; largest correction: the taint CRIT is already fixed on main) · built on the 2026-07-23 zigts pattern/convention ideation and grounding scans of <code>packages/pi/</code>, the proof pipeline, and the standalone-app gap.</footer>
+
+</div>
