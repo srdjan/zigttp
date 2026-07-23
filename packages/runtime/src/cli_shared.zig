@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 /// True when stderr is attached to a real terminal. Used to gate ANSI escape
 /// codes so piped output and CI logs stay clean.
@@ -101,7 +101,7 @@ pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const 
 /// unchanged so plain-JS `-e` keeps its existing behavior and the parser
 /// produces the same diagnostic it always did.
 pub fn stripInlineSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var strip_result = zigts.strip(allocator, source, .{ .report_errors = false }) catch {
+    var strip_result = zts.strip(allocator, source, .{ .report_errors = false }) catch {
         return allocator.dupe(u8, source);
     };
     defer strip_result.deinit();
@@ -109,7 +109,7 @@ pub fn stripInlineSource(allocator: std.mem.Allocator, source: []const u8) ![]co
 }
 
 pub fn printVersion() void {
-    const version = "zigttp " ++ zigts.version.string ++ "\n";
+    const version = "zttp " ++ zts.version.string ++ "\n";
     _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
 }
 
@@ -122,7 +122,7 @@ pub fn writeStdoutLine(s: []const u8) void {
 /// non-zero. `name` is the command (e.g. "studio"), `flag` the build option
 /// to rebuild with (e.g. "studio" for `zig build -Dstudio`).
 pub fn featureCompiledOut(name: []const u8, flag: []const u8) noreturn {
-    std.debug.print("zigttp {s} was compiled out of this build. Rebuild with: zig build -D{s}\n", .{ name, flag });
+    std.debug.print("zttp {s} was compiled out of this build. Rebuild with: zig build -D{s}\n", .{ name, flag });
     std.process.exit(1);
 }
 

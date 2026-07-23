@@ -8,12 +8,12 @@
 const std = @import("std");
 const pi_app = @import("pi_app");
 
-/// `zigttp deploy` flags that opt into hosted cloud deploy. They are
+/// `zttp deploy` flags that opt into hosted cloud deploy. They are
 /// intercepted by `deployArgsRequestCloud` before `localDeployCommand`
 /// runs and rejected while cloud deploy is deferred from the beta.
 pub const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--wait", "--no-wait" };
 
-/// Comma-separated list of template names accepted by `zigttp init
+/// Comma-separated list of template names accepted by `zttp init
 /// --template`. Used in both the help text and the preflight error
 /// message so the two stay in sync.
 pub const template_choices = "basic, api, htmx";
@@ -40,7 +40,7 @@ pub fn containsString(haystack: []const []const u8, needle: []const u8) bool {
 }
 
 /// Returns the first flag that selects the hosted control-plane deploy, or
-/// null when bare `zigttp deploy` should fall through to the local path.
+/// null when bare `zttp deploy` should fall through to the local path.
 /// Cloud-only flags (`--region`, `--confirm`, `--wait`, `--no-wait`) imply
 /// `--cloud` so existing scripts keep working through v1.x. `--target` is
 /// parsed by the local deploy command so missing, duplicate, and unknown
@@ -74,27 +74,27 @@ fn commandAcceptsHandlerPath(command: []const u8) bool {
 pub fn printNoProjectConfigDiagnostic(command: []const u8) void {
     if (commandAcceptsHandlerPath(command)) {
         std.debug.print(
-            \\No zigttp.json found in the current directory or any parent.
+            \\No zttp.json found in the current directory or any parent.
             \\
-            \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
-            \\and re-run `zigttp {s}`. Or pass an explicit handler path as an argument.
+            \\Run `zttp init <name>` to scaffold a new project, then `cd <name>`
+            \\and re-run `zttp {s}`. Or pass an explicit handler path as an argument.
             \\
         , .{command});
     } else {
         std.debug.print(
-            \\No zigttp.json found in the current directory or any parent.
+            \\No zttp.json found in the current directory or any parent.
             \\
-            \\Run `zigttp init <name>` to scaffold a new project, then `cd <name>`
-            \\and re-run `zigttp {s}`.
+            \\Run `zttp init <name>` to scaffold a new project, then `cd <name>`
+            \\and re-run `zttp {s}`.
             \\
         , .{command});
     }
 }
 
-/// Convert preflight errors from `dev`/`studio` (which run `zigts check`
+/// Convert preflight errors from `dev`/`studio` (which run `zts check`
 /// before launching the runtime child) into clean exit-1 messages instead
 /// of panic-style stack-trace dumps. The readable line was already printed
-/// upstream by `zigts check` itself.
+/// upstream by `zts check` itself.
 ///
 /// Returns `true` if the caller should `std.process.exit(1)`.
 pub fn handlePreflightError(err: anyerror, command: []const u8) bool {
@@ -111,11 +111,11 @@ pub fn handlePreflightError(err: anyerror, command: []const u8) bool {
         return true;
     }
     if (err == error.FileNotFound) {
-        // zigts check has already printed `Error reading handler file 'X': error.FileNotFound`.
+        // zts check has already printed `Error reading handler file 'X': error.FileNotFound`.
         // Add a remediation hint and swallow the stack trace.
         std.debug.print(
             \\
-            \\Check the `entry` path in zigttp.json or pass --help for usage.
+            \\Check the `entry` path in zttp.json or pass --help for usage.
             \\
         , .{});
         return true;
@@ -132,7 +132,7 @@ pub const ExpertArgValidation = union(enum) {
     unexpected_arg: []const u8,
 };
 
-/// Validate `zigttp expert` argv against the documented flag set before the
+/// Validate `zttp expert` argv against the documented flag set before the
 /// agent loop starts, so a typo'd flag or stray subcommand fails fast with a
 /// clear message instead of being silently ignored. Value-taking flags are
 /// resolved against `pi_app.value_taking_flags` so this list stays in sync

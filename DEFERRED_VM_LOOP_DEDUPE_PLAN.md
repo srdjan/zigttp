@@ -13,10 +13,10 @@ Do not start Steps 1-4 until every precondition gate is green on `main`. Status
 as of this refresh (2026-06-17), verified against source - re-check at execution
 time:
 
-- [x] Phase 0: GC correctness fixes + `test-zigts`/`test-server`/bench gates
+- [x] Phase 0: GC correctness fixes + `test-zts`/`test-server`/bench gates
       wired (commit `adaf6e0`).
 - [ ] Track A1: engine facade is strict - `packages/runtime/src/engine_facade.zig`
-      is the only runtime entry into the engine, `packages/zigts/src/runtime_contract.zig`
+      is the only runtime entry into the engine, `packages/zts/src/runtime_contract.zig`
       exposes stable public types, and the direct reaches into engine internals
       from `zruntime.zig` are gone. (Today only `engine_adapter.zig` exists.)
 - [ ] Track B1: runtime lifecycle verification gaps close - stale
@@ -35,11 +35,11 @@ See [Improvement Plan](IMPROVEMENT_PLAN.md) for the tracks these gates belong to
 
 Opcode semantics are implemented across three execution tiers:
 
-- interpreter dispatch in `packages/zigts/src/interpreter.zig` (`dispatch` at
+- interpreter dispatch in `packages/zts/src/interpreter.zig` (`dispatch` at
   `:211`, a Zig switch lowered to computed-goto)
-- baseline JIT lowering in `packages/zigts/src/jit/baseline.zig` (`compileOpcode`
+- baseline JIT lowering in `packages/zts/src/jit/baseline.zig` (`compileOpcode`
   switch at `:1259`, emits native code per opcode)
-- optimized JIT lowering in `packages/zigts/src/jit/optimized.zig` (loop-focused
+- optimized JIT lowering in `packages/zts/src/jit/optimized.zig` (loop-focused
   unboxed fast paths; no full opcode switch)
 
 That duplication can let supported-subset behavior diverge between tiers. The
@@ -68,7 +68,7 @@ panic-isolation, memory-cap, and engine-facade work.
 
 ## What already exists (reuse, do not rebuild)
 
-- **Parity harness:** `packages/zigts/src/tests/opcode_parity.zig` (anchored in
+- **Parity harness:** `packages/zts/src/tests/opcode_parity.zig` (anchored in
   `root.zig:234`). 15 cases, three tiers, deterministic tier-forcing,
   `sameValue` NaN-box-aware comparison.
 - **Tier-forcing API:** `interpreter/jit_policy.zig` +
@@ -99,7 +99,7 @@ panic-isolation, memory-cap, and engine-facade work.
 
 ### Step 0 - Extend the parity harness (LANDED 2026-06-07, test-only)
 
-Extend `packages/zigts/src/tests/opcode_parity.zig` beyond arithmetic /
+Extend `packages/zts/src/tests/opcode_parity.zig` beyond arithmetic /
 comparison / overflow to cover property access (`get_field`/`put_field` and the
 `_ic` variants), calls (`call`/`call_method`), and failure/diagnostic paths,
 asserting identical results **and** identical diagnostics across interpreter,
@@ -116,7 +116,7 @@ runtime-built closure invoked through `push_const`/`call` - the callee lives in
 `constants[0]` because `make_closure`/`make_function` would bail baseline), and
 two failure paths (`add` of two `undefined`s -> `TypeError`; `call` on a
 non-callable -> `NotCallable`), each across interpreter, baseline JIT, and
-optimized-when-reached. `zig build test-zigts` green (1218 pass, 1 skip).
+optimized-when-reached. `zig build test-zts` green (1218 pass, 1 skip).
 Test-only; no engine source changed.
 
 **Finding (fault representation - boundary half fixed, residual narrowed).**
@@ -175,7 +175,7 @@ separately deferred.
 
 ## Verification
 
-- `zig build test-zigts` (includes the parity harness).
+- `zig build test-zts` (includes the parity harness).
 - Opcode parity harness green across interpreter, baseline JIT, and optimized JIT
   for every migrated family, including diagnostics parity.
 - `zig build bench` and `zig build bench-check`: no regression against the

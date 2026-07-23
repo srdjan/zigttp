@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a defect in the zigttp runtime, the zigts engine, or the CLI.
+description: Report a defect in the zttp runtime, the zts engine, or the CLI.
 labels: ["bug"]
 body:
   - type: markdown
@@ -11,8 +11,8 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `zigttp version`, or the git commit / binary hash.
-      placeholder: "zigttp 0.16.0-rc2"
+      description: Output of `zttp version`, or the git commit / binary hash.
+      placeholder: "zttp 0.16.0-rc2"
     validations:
       required: true
   - type: input

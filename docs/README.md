@@ -11,7 +11,7 @@ path.
   deploy, proof receipts, and troubleshooting.
 - [CLI Reference](cli.md) - core commands, advanced analyzer commands,
   proof-ledger commands, expert mode, and machine-readable output.
-- [Virtual Modules](virtual-modules/README.md) - complete current `zigttp:*`
+- [Virtual Modules](virtual-modules/README.md) - complete current `zttp:*`
   module list, exports, capabilities, effects, and runtime requirements.
 - [Durable Workflows](durable-workflows.md) - durable run/step/signal,
   workflow queue, dead-letter handling, proof receipts, and replay boundaries.
@@ -27,7 +27,7 @@ path.
 - [TypeScript](typescript.md) - type stripping, type checking, TSX, and
   `comptime()`.
 - [TypeScript Patterns](typescript-patterns.md) - the "TypeScript Tips Everyone
-  Should Know" canon mapped onto the zigts subset.
+  Should Know" canon mapped onto the zts subset.
 - [Feature Detection](feature-detection.md) - allowed and rejected language
   features.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - why each language cut
@@ -35,7 +35,7 @@ path.
 - [Sound Mode](sound-mode.md) - type-directed truthiness, arithmetic, and
   comparison diagnostics.
 - [Canonical Profile](canonical-profile.md) - canonical ZigTS rules and
-  `zigttp normalize`.
+  `zttp normalize`.
 - [Proof Card](proof-card.md), [Proof Gate](proof-gate.md),
   [Counterexamples](counterexamples.md), and [Witnesses](witnesses.md) -
   proof UI, pull-request gates, failing inputs, and persisted witness corpus.
@@ -52,5 +52,5 @@ path.
   native function extension notes.
 - [Module Capabilities](internals/capabilities.md) - built-in module
   capability governance.
-- [zigts Expert Contract](internals/zigts-expert-contract.md) - stable
+- [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.

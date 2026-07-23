@@ -6,7 +6,7 @@
 //! filesystem writes during the first turn after resume.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const agent = @import("../agent.zig");
 const registry_mod = @import("../registry/registry.zig");
@@ -119,7 +119,7 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
     // Isolate the sessions root under the tmp dir.
     const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
     defer allocator.free(sessions_dir);
-    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
 
     // Force the stub backend so live-client state never gets built.
@@ -172,13 +172,13 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
         allocator.free(rendered);
 
         // The edit was applied.
-        const written = try zigts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+        const written = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
         defer allocator.free(written);
         try testing.expectEqualStrings(clean_handler, written);
 
         // events.jsonl has non-empty content.
         const events_path = session.events_path.?;
-        const raw = try zigts.file_io.readFile(allocator, events_path, 1024 * 1024);
+        const raw = try zts.file_io.readFile(allocator, events_path, 1024 * 1024);
         defer allocator.free(raw);
         try testing.expect(raw.len > 0);
 
@@ -188,7 +188,7 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
 
     // --- Mutate the file on disk so we can detect any replay write. ---
     const mutated_bytes = "MUTATED\n";
-    try zigts.file_io.writeFile(allocator, handler_path, mutated_bytes);
+    try zts.file_io.writeFile(allocator, handler_path, mutated_bytes);
 
     // --- Resume the session and run one turn. The first turn after resume
     //     runs in replay_mode and must NOT touch handler.ts. ---
@@ -213,7 +213,7 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
         try testing.expect(!session.replay_next_turn);
 
         // CRITICAL: handler.ts still equals the mutated bytes.
-        const after = try zigts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+        const after = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
         defer allocator.free(after);
         try testing.expectEqualStrings(mutated_bytes, after);
     }
@@ -227,7 +227,7 @@ test "replay-safety: /new starts a fresh session_id and fresh events.jsonl" {
 
     const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
     defer allocator.free(sessions_dir);
-    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
 
     var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
@@ -272,7 +272,7 @@ test "replay-safety: /new starts a fresh session_id and fresh events.jsonl" {
         );
         allocator.free(rendered);
 
-        const raw = try zigts.file_io.readFile(allocator, session.events_path.?, 1024 * 1024);
+        const raw = try zts.file_io.readFile(allocator, session.events_path.?, 1024 * 1024);
         defer allocator.free(raw);
         try testing.expect(raw.len > 0);
 
@@ -287,5 +287,5 @@ test "replay-safety: /new starts a fresh session_id and fresh events.jsonl" {
     try testing.expect(!std.mem.eql(u8, first_id, fresh.session_id.?));
 
     // Fresh events.jsonl does not exist yet (no turn has run).
-    try testing.expect(!zigts.file_io.fileExists(allocator, fresh.events_path.?));
+    try testing.expect(!zts.file_io.fileExists(allocator, fresh.events_path.?));
 }

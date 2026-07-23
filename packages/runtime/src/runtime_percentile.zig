@@ -1,7 +1,7 @@
 //! Approximate-percentile latency tracker backed by a fixed-size ring of
 //! samples. Mutex-guarded so multiple workers can record concurrently.
 
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 
 pub const PercentileTracker = struct {
     mutex: compat.Mutex = .{},

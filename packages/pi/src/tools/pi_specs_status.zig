@@ -4,7 +4,7 @@
 //! compiler is enforcing, not whatever the autoloop's CLI flag happened
 //! to be set to.
 //!
-//! The tool shells out to `zigts check --json` to keep the implementation
+//! The tool shells out to `zts check --json` to keep the implementation
 //! a single source of truth with the in-process verifier; the JSON output
 //! already includes `declared_specs` and `spec_diagnostics`.
 //!
@@ -85,7 +85,7 @@ fn execute(
         }
         return registry_mod.ToolResult.errFmt(
             allocator,
-            name ++ ": failed to parse zigts check output: {s}\n",
+            name ++ ": failed to parse zts check output: {s}\n",
             .{@errorName(err)},
         );
     };

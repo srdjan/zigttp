@@ -1,10 +1,10 @@
-//! zigttp:router - Pattern-matching HTTP router
+//! zttp:router - Pattern-matching HTTP router
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:router",
+    .specifier = "zttp:router",
     .name = "router",
     .exports = &.{
         .{

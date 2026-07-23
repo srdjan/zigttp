@@ -1,5 +1,5 @@
 //! WebSocket runtime callbacks: the native implementations behind the
-//! `zigttp:websocket` module exports (send / close / serializeAttachment /
+//! `zttp:websocket` module exports (send / close / serializeAttachment /
 //! deserializeAttachment / getWebSockets / setAutoResponse).
 //!
 //! Extracted from zruntime.zig to keep the request-lifecycle struct focused.
@@ -10,7 +10,7 @@
 //! callbacks take the connection id from their first JS argument instead.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
 const zruntime = @import("zruntime.zig");
@@ -41,7 +41,7 @@ pub fn wsSendCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "send(ws, data) requires 2 arguments");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
@@ -68,7 +68,7 @@ pub fn wsCloseCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "close(ws, code?, reason?) requires at least 1 argument");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
@@ -112,7 +112,7 @@ pub fn wsSerializeAttachmentCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "serializeAttachment(ws, value) requires 2 arguments");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
@@ -143,7 +143,7 @@ pub fn wsDeserializeAttachmentCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "deserializeAttachment(ws) requires 1 argument");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
@@ -168,7 +168,7 @@ pub fn wsGetWebSocketsCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "getWebSockets(roomKey) requires 1 argument");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const room_key = zq.modules.util.extractString(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "roomKey must be a string");
@@ -199,7 +199,7 @@ pub fn wsSetAutoResponseCallback(
         return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse(ws, request, response) requires 3 arguments");
     }
     const pool = wsPoolFromRuntime(runtime_ptr) orelse {
-        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+        return zq.modules.util.throwError(ctx, "Error", "zttp:websocket not bound to an active server");
     };
     const id = wsConnectionIdFromArg(args[0]) orelse {
         return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");

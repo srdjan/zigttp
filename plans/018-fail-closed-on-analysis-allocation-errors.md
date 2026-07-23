@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan phase by phase. Run every verification command and red-prove each new allocator-failure test. Do not turn intentional optimization fallbacks into fatal compile errors. Update `plans/README.md` when complete.
 >
-> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/zigts/src/pipeline.zig packages/zigts/src/bool_checker.zig packages/zigts/src/type_checker.zig packages/zigts/src/strict_checker.zig packages/zigts/src/handler_verifier.zig packages/zigts/src/flow_checker.zig`
+> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/zts/src/pipeline.zig packages/zts/src/bool_checker.zig packages/zts/src/type_checker.zig packages/zts/src/strict_checker.zig packages/zts/src/handler_verifier.zig packages/zts/src/flow_checker.zig`
 
 ## Status
 
@@ -21,12 +21,12 @@ Allocation pressure should produce `error.OutOfMemory`, never a stronger proof.
 
 ## Current evidence
 
-- `packages/zigts/src/pipeline.zig:137-190,223-255` trusts the error counts returned by all five analysis passes.
-- `packages/zigts/src/type_checker.zig:146-154,1835-1837` exposes an error-returning `check` but drops diagnostic append failure; load-bearing maps also use `catch {}` at lines such as 257, 276-292, and 1687.
-- `packages/zigts/src/strict_checker.zig:151-164,197-199` has the same partial-diagnostic pattern.
-- `packages/zigts/src/handler_verifier.zig:356-390,1439-1441` can omit a verifier error and return a lower count.
-- `packages/zigts/src/flow_checker.zig:396-409,1892-1919` can drop taint diagnostics and witness data.
-- `packages/zigts/src/bool_checker.zig:216-225,1671-1673` can drop state-isolation/type diagnostics.
+- `packages/zts/src/pipeline.zig:137-190,223-255` trusts the error counts returned by all five analysis passes.
+- `packages/zts/src/type_checker.zig:146-154,1835-1837` exposes an error-returning `check` but drops diagnostic append failure; load-bearing maps also use `catch {}` at lines such as 257, 276-292, and 1687.
+- `packages/zts/src/strict_checker.zig:151-164,197-199` has the same partial-diagnostic pattern.
+- `packages/zts/src/handler_verifier.zig:356-390,1439-1441` can omit a verifier error and return a lower count.
+- `packages/zts/src/flow_checker.zig:396-409,1892-1919` can drop taint diagnostics and witness data.
+- `packages/zts/src/bool_checker.zig:216-225,1671-1673` can drop state-isolation/type diagnostics.
 
 Intentional best-effort fallbacks exist elsewhere, such as static handler fast-path/JIT analysis falling back to the interpreter. Those are not proof claims and are outside this plan.
 
@@ -86,7 +86,7 @@ Each test must prove that the pre-fix code can return a clean/partial result at 
 
 ```sh
 zig fmt --check build.zig packages/
-zig build test-zigts test-precompile test-zigts-cli test-expert
+zig build test-zts test-precompile test-zts-cli test-expert
 bash scripts/verify.sh
 git diff --check
 git status --short

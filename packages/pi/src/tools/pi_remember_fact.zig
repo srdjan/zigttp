@@ -13,7 +13,7 @@
 //! Output:
 //!   { "ok": true, "id": "26-char-id" }
 //!
-//! Storage: `<project_root>/.zigttp/memory.jsonl`, append-only JSONL.
+//! Storage: `<project_root>/.zttp/memory.jsonl`, append-only JSONL.
 
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
@@ -28,7 +28,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "remember-fact",
     .effect = .persist_agent_state,
     .description =
-    \\Persist a project-scoped fact to .zigttp/memory.jsonl so it survives
+    \\Persist a project-scoped fact to .zttp/memory.jsonl so it survives
     \\across expert sessions. Use this for load-bearing observations the
     \\next session would otherwise have to rediscover: naming conventions,
     \\failed approaches and why they failed, invariants the test suite

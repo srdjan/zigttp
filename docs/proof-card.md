@@ -1,18 +1,18 @@
 # Reading the Proof Card
 
-Every time you save a handler, zigttp re-runs its analyzers and prints a proof
+Every time you save a handler, zttp re-runs its analyzers and prints a proof
 card: a verdict, the proven surface, and - when something fails - the exact
 construct that broke a proof. It is the screen you read on every save. This
 guide explains how to read it.
 
 The card comes from one analysis, shown in three places:
 
-- `zigttp dev` redraws it on every save, above the live-reload HUD, and
-  `zigttp test` prints it as the pre-test check.
-- `zigttp check` prints it once to the terminal for a one-shot run.
-- `zigttp studio` mirrors it in the browser workbench.
+- `zttp dev` redraws it on every save, above the live-reload HUD, and
+  `zttp test` prints it as the pre-test check.
+- `zttp check` prints it once to the terminal for a one-shot run.
+- `zttp studio` mirrors it in the browser workbench.
 
-The in-browser playground on the zigttp website runs the same analyzer
+The in-browser playground on the zttp website runs the same analyzer
 compiled to WebAssembly, so the card there matches the card you get locally.
 
 ## The Stages
@@ -121,7 +121,7 @@ auto-rendered block in the terminal HUD, to see:
   evidence is derived from what the prover observed, never invented: a named
   guard appears only when the validator binding is recovered from the source.
 
-The trace is the same data on every surface. `zigttp check --json` emits it as
+The trace is the same data on every surface. `zttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the
 exact reasoning the HUD shows.
 
@@ -129,8 +129,8 @@ Durable workflow checks add a second receipt shape when you ask for the
 contract:
 
 ```bash
-zigttp check examples/workflow/dsl-orchestrator.ts --json
-zigttp check examples/workflow/dsl-orchestrator.ts --contract
+zttp check examples/workflow/dsl-orchestrator.ts --json
+zttp check examples/workflow/dsl-orchestrator.ts --contract
 ```
 
 The JSON proof card exposes `proofTrace.durable_workflow_*`. The contract file
@@ -147,7 +147,7 @@ what the runtime persisted.
 
 ## The Three Lenses
 
-In the `zigttp dev` HUD, press `Tab` to rotate the card's left pane through
+In the `zttp dev` HUD, press `Tab` to rotate the card's left pane through
 three lenses:
 
 - `Properties` - the default `[+]`/`[-]` pills.

@@ -6,11 +6,11 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
-ZIGTTP_INSTALLER_SOURCE_ONLY=1
-export ZIGTTP_INSTALLER_SOURCE_ONLY
+ZTTP_INSTALLER_SOURCE_ONLY=1
+export ZTTP_INSTALLER_SOURCE_ONLY
 . "$ROOT_DIR/install.sh"
 
-EXPECTED_ROOT="zigttp-v0.1.1-beta-macos-aarch64"
+EXPECTED_ROOT="zttp-v0.1.1-beta-macos-aarch64"
 
 fail() {
     printf "FAIL: %s\n" "$*" >&2
@@ -29,26 +29,26 @@ expect_invalid_entry() {
 
 expect_valid_entry "$EXPECTED_ROOT"
 expect_valid_entry "$EXPECTED_ROOT/"
-expect_valid_entry "$EXPECTED_ROOT/zigttp"
+expect_valid_entry "$EXPECTED_ROOT/zttp"
 expect_valid_entry "$EXPECTED_ROOT/docs/README.md"
 
 expect_invalid_entry ""
-expect_invalid_entry "/$EXPECTED_ROOT/zigttp"
-expect_invalid_entry "../$EXPECTED_ROOT/zigttp"
-expect_invalid_entry "$EXPECTED_ROOT/../zigttp"
-expect_invalid_entry "$EXPECTED_ROOT/bin/../zigttp"
-expect_invalid_entry "other-root/zigttp"
+expect_invalid_entry "/$EXPECTED_ROOT/zttp"
+expect_invalid_entry "../$EXPECTED_ROOT/zttp"
+expect_invalid_entry "$EXPECTED_ROOT/../zttp"
+expect_invalid_entry "$EXPECTED_ROOT/bin/../zttp"
+expect_invalid_entry "other-root/zttp"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 mkdir -p "$TMPDIR/$EXPECTED_ROOT"
-touch "$TMPDIR/$EXPECTED_ROOT/zigttp"
+touch "$TMPDIR/$EXPECTED_ROOT/zttp"
 tar czf "$TMPDIR/safe.tar.gz" -C "$TMPDIR" "$EXPECTED_ROOT"
 validate_archive_paths "$TMPDIR/safe.tar.gz" "$EXPECTED_ROOT" || fail "safe archive rejected"
 
 mkdir -p "$TMPDIR/other-root"
-touch "$TMPDIR/other-root/zigttp"
+touch "$TMPDIR/other-root/zttp"
 tar czf "$TMPDIR/outside-root.tar.gz" -C "$TMPDIR" "other-root"
 if validate_archive_paths "$TMPDIR/outside-root.tar.gz" "$EXPECTED_ROOT" 2>/dev/null; then
     fail "outside-root archive accepted"

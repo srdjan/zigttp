@@ -5,7 +5,7 @@
 //! not invalidate retained messages.
 
 const std = @import("std");
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 
 /// Hard cap on the number of distinct actor mailboxes a single ActorQueue
 /// will create. Mailboxes are never evicted (a live pointer may be cached by
@@ -525,7 +525,7 @@ fn priorityIndex(priority: MessagePriority) usize {
 }
 
 fn unixMillis() i64 {
-    return @import("zigts").trace.unixMillis();
+    return @import("zts").trace.unixMillis();
 }
 
 test "actor queue delivers higher priority first and retains messages until ack" {

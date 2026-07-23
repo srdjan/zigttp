@@ -16,20 +16,20 @@ const Server = @import("server.zig").Server;
 const shared = @import("cli_shared.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimePolicy = @import("engine_adapter.zig").RuntimePolicy;
-const zigts = @import("zigts");
-const compat = zigts.compat;
-const zigts_cli = @import("zigts_cli");
-const precompile = zigts_cli.precompile;
-const contract_diff = zigts.contract_diff;
-const upgrade_verifier = zigts_cli.upgrade_verifier;
-const HandlerContract = zigts.HandlerContract;
-const deploy_manifest = zigts_cli.deploy_manifest;
-const review_facts_mod = @import("zigttp_proof_review").review;
-const spec_diagnostic = @import("zigttp_proof_review").spec_diagnostic;
+const zts = @import("zts");
+const compat = zts.compat;
+const zts_cli = @import("zts_cli");
+const precompile = zts_cli.precompile;
+const contract_diff = zts.contract_diff;
+const upgrade_verifier = zts_cli.upgrade_verifier;
+const HandlerContract = zts.HandlerContract;
+const deploy_manifest = zts_cli.deploy_manifest;
+const review_facts_mod = @import("zttp_proof_review").review;
+const spec_diagnostic = @import("zttp_proof_review").spec_diagnostic;
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
 const keystroke_input = @import("keystroke_input.zig");
-const printer_mod = @import("zigttp_proof_review").printer;
+const printer_mod = @import("zttp_proof_review").printer;
 const studio_mod = @import("runtime_features.zig").studio;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
@@ -67,7 +67,7 @@ pub const LiveReloadState = struct {
     superseded_code: ?[]const u8,
     previous_stamp: u64,
     watch_paths: []const []const u8,
-    /// Last source-bytes sha logged to .zigttp/proofs.jsonl. Suppresses
+    /// Last source-bytes sha logged to .zttp/proofs.jsonl. Suppresses
     /// duplicate appends when the watcher fires for a no-op save (or when
     /// our own ledger write trips the recursive directory walk).
     last_ledger_sha: ?[std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
@@ -240,7 +240,7 @@ pub const LiveReloadState = struct {
     fn recompileAndSwap(self: *LiveReloadState) void {
         if (self.server.studio) |*studio| studio.updateChecking();
 
-        var new_code: ?[]const u8 = zigts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
+        var new_code: ?[]const u8 = zts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
             if (self.server.studio) |*studio| studio.updateError("failed to read handler");
             printReload("Failed to read handler: {}. Keeping previous.\n", .{err});
             return;
@@ -397,7 +397,7 @@ pub const LiveReloadState = struct {
     fn seedInitialProof(self: *LiveReloadState) void {
         if (self.server.studio) |*studio| studio.updateChecking();
 
-        const source = zigts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
+        const source = zts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
             if (self.server.studio) |*studio| studio.updateError("failed to read handler");
             printProve("Initial proof skipped: failed to read handler: {}\n", .{err});
             return;
@@ -497,7 +497,7 @@ pub const LiveReloadState = struct {
         var json_output: std.ArrayList(u8) = .empty;
         defer json_output.deinit(self.allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &json_output);
-        zigts.writeContractJson(contract, &aw.writer) catch |err| {
+        zts.writeContractJson(contract, &aw.writer) catch |err| {
             printProve("Caller receipt skipped: contract JSON failed: {}.\n", .{err});
             return;
         };
@@ -870,7 +870,7 @@ fn buildSpecStates(
 }
 
 /// Compute a hash over all watched paths (files and directory contents).
-/// Replicates the recursive directory walking from zigttp_cli.foldPathIntoHash
+/// Replicates the recursive directory walking from zttp_cli.foldPathIntoHash
 /// to detect changes in subdirectories.
 fn computeStamp(io: std.Io, paths: []const []const u8) !u64 {
     var hash = std.hash.Wyhash.init(0);
@@ -1013,7 +1013,7 @@ fn writeRestrictionFrame(
     try writer.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
 
     if (source) |src| {
-        if (zigts.bool_checker.getSourceLine(src, d.line)) |line_text| {
+        if (zts.bool_checker.getSourceLine(src, d.line)) |line_text| {
             try writer.print("    {d} | {s}\n", .{ d.line, line_text });
         }
     }
@@ -1063,7 +1063,7 @@ fn ownDiagnostics(allocator: std.mem.Allocator, source: []const json_diag.JsonDi
 }
 
 /// Project the contract into ReviewFacts and append a row to
-/// `.zigttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex
+/// `.zttp/proofs.jsonl`. `sha_hex` is the source-bytes sha256 hex
 /// (callers that have already computed it for the HUD pass it in).
 pub fn appendLedgerEntry(
     allocator: std.mem.Allocator,
@@ -1187,7 +1187,7 @@ test "firstFailingStage names the earliest failing analyzer stage" {
 
 test "factsFromContract projects intent and behavior summary" {
     const allocator = std.testing.allocator;
-    const hc = zigts.handler_contract;
+    const hc = zts.handler_contract;
 
     var contract = hc.emptyContract(try allocator.dupe(u8, "h.ts"));
     defer contract.deinit(allocator);

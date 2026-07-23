@@ -5,7 +5,7 @@
 //! This file is also the home of the `Mode` selector that the live
 //! provider clients consult before deciding whether to open a real socket.
 //!
-//! The mode is set by the env var `ZIGTTP_CASSETTE_MODE`:
+//! The mode is set by the env var `ZTTP_CASSETTE_MODE`:
 //!
 //!   replay      Default. Replay from the cassette path the caller already
 //!               holds; never open a socket. Missing cassette = test failure.
@@ -22,8 +22,8 @@
 //! format `cassette_client.zig` consumes.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const file_io = zts.file_io;
 const cassette_client = @import("cassette_client.zig");
 
 pub const Mode = enum {
@@ -39,12 +39,12 @@ pub const Mode = enum {
     }
 };
 
-/// Read `ZIGTTP_CASSETTE_MODE` from the process environment. Defaults to
+/// Read `ZTTP_CASSETTE_MODE` from the process environment. Defaults to
 /// `.replay` when unset or unparseable so tests that forget to opt in
 /// never hit the live network. Callers that want to surface bad values
 /// loudly can call `parseModeStrict` instead.
 pub fn modeFromEnv(allocator: std.mem.Allocator) Mode {
-    const raw = std.process.getEnvVarOwned(allocator, "ZIGTTP_CASSETTE_MODE") catch return .replay;
+    const raw = std.process.getEnvVarOwned(allocator, "ZTTP_CASSETTE_MODE") catch return .replay;
     defer allocator.free(raw);
     return Mode.fromString(raw) orelse .replay;
 }

@@ -11,7 +11,7 @@
 <!-- The `zig build test*` commands you ran locally, and their result. -->
 
 - [ ] `zig build test`
-- [ ] `zig build test-zigts` / `test-zruntime` (if engine or runtime touched)
+- [ ] `zig build test-zts` / `test-zruntime` (if engine or runtime touched)
 - [ ] `bash scripts/test-examples.sh` (if handler-facing behavior changed)
 
 ## Checklist

@@ -1,0 +1,124 @@
+//! Both this tool and `zts describe-rule --json` go through
+//! `describe_rule.writeRuleJson`, so expert and CLI output stay byte-identical.
+
+const std = @import("std");
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
+const describe_rule = @import("zts_cli").describe_rule;
+const registry_mod = @import("../registry/registry.zig");
+
+const name = "zts_expert_describe_rule";
+
+pub const tool: registry_mod.ToolDef = .{
+    .name = name,
+    .label = "describe rule",
+    .effect = .analyze,
+    .description = "Describe a rule by name or code, or list all rules when called with no args.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
+    .decode_json = decodeJson,
+    .execute = execute,
+};
+
+fn decodeJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    return registry_mod.helpers.decodeOptionalSingleStringField(allocator, args_json, "rule");
+}
+
+fn execute(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+
+    if (args.len == 0) {
+        try w.writeAll("[");
+        for (&rule_registry.all_rules, 0..) |*entry, i| {
+            if (i > 0) try w.writeAll(",");
+            try describe_rule.writeRuleJson(w, entry);
+        }
+        try w.writeAll("]\n");
+
+        buf = aw.toArrayList();
+        return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    }
+
+    const query = args[0];
+    const entry = rule_registry.findByName(query) orelse
+        rule_registry.findByCode(query) orelse
+        {
+            try w.print("Unknown rule: {s}\n", .{query});
+            buf = aw.toArrayList();
+            return .{ .ok = false, .llm_text = try buf.toOwnedSlice(allocator) };
+        };
+
+    try describe_rule.writeRuleJson(w, entry);
+    try w.writeAll("\n");
+
+    buf = aw.toArrayList();
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "list mode emits JSON array of rules" {
+    var result = try execute(testing.allocator, &.{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(result.llm_text.len > 2);
+    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"category\":") != null);
+}
+
+test "lookup by code returns single rule object" {
+    var result = try execute(testing.allocator, &.{"ZTS303"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(u8, '{'), result.llm_text[0]);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":\"ZTS303\"") != null);
+}
+
+test "unknown query returns not-ok body" {
+    var result = try execute(testing.allocator, &.{"not-a-real-rule"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Unknown rule") != null);
+}
+
+test "lookup by code surfaces repair_intent when present" {
+    // The agent reads `repair_intent` from describe-rule output to pick an
+    // apply primitive directly. ZTS612
+    // (canonical_ternary) maps to `replace_ternary_with_if`.
+    var result = try execute(testing.allocator, &.{"ZTS612"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        result.llm_text,
+        "\"repair_intent\":\"replace_ternary_with_if\"",
+    ) != null);
+}
+
+test "lookup by code omits repair_intent when unset" {
+    // Some diagnostics deliberately have no canonical repair primitive
+    // (e.g. ZTS600 implicit_unknown — needs a type annotation that can
+    // take several shapes). The field is omitted, not emitted as null.
+    var result = try execute(testing.allocator, &.{"ZTS600"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"repair_intent\"") == null);
+}

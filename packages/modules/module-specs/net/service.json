@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:service",
+  "specifier": "zttp:service",
   "source": "packages/modules/src/net/service.zig",
   "requiredCapabilities": [
     "network",

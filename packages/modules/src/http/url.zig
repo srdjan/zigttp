@@ -1,10 +1,10 @@
-//! zigttp:url - URL parsing and encoding
+//! zttp:url - URL parsing and encoding
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:url",
+    .specifier = "zttp:url",
     .name = "url",
     .exports = &.{
         .{ .name = "urlParse", .module_func = urlParseImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },

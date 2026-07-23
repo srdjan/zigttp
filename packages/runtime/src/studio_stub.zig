@@ -1,9 +1,9 @@
 const std = @import("std");
 
 pub const index_html = "";
-pub const demo_state_path = "/_zigttp/studio/demo/state.json";
-pub const demo_action_path = "/_zigttp/studio/demo/action";
-pub const caller_verify_path = "/_zigttp/studio/caller-verify.json";
+pub const demo_state_path = "/_zttp/studio/demo/state.json";
+pub const demo_action_path = "/_zttp/studio/demo/action";
+pub const caller_verify_path = "/_zttp/studio/caller-verify.json";
 
 pub const DemoAction = enum { introduce_bug, repair_bug, deploy, reset };
 
@@ -138,7 +138,7 @@ pub fn witnessDetailKey(path: []const u8) ?[]const u8 {
     return null;
 }
 
-pub const sse_path = "/_zigttp/studio/events";
+pub const sse_path = "/_zttp/studio/events";
 
 pub fn upgradeToSse(state: *State, fd: std.posix.fd_t, allocator: std.mem.Allocator) !void {
     _ = state;

@@ -1,26 +1,26 @@
-//! Test aggregator for the zigts expert app package.
+//! Test aggregator for the zts expert app package.
 
 comptime {
     _ = @import("registry/tool.zig");
     _ = @import("registry/registry.zig");
-    _ = @import("tools/zigts_expert_meta.zig");
-    _ = @import("tools/zigts_expert_verify_paths.zig");
-    _ = @import("tools/zigts_expert_canonicalize.zig");
-    _ = @import("tools/zigts_expert_normalize.zig");
-    _ = @import("tools/zigts_expert_describe_rule.zig");
-    _ = @import("tools/zigts_expert_search.zig");
-    _ = @import("tools/zigts_expert_edit_simulate.zig");
-    _ = @import("tools/zigts_expert_review_patch.zig");
-    _ = @import("tools/zigts_expert_prove_patch.zig");
-    _ = @import("tools/zigts_expert_system_proof.zig");
-    _ = @import("tools/zigts_expert_features.zig");
-    _ = @import("tools/zigts_expert_modules.zig");
-    _ = @import("tools/zigts_expert_verify_modules.zig");
+    _ = @import("tools/zts_expert_meta.zig");
+    _ = @import("tools/zts_expert_verify_paths.zig");
+    _ = @import("tools/zts_expert_canonicalize.zig");
+    _ = @import("tools/zts_expert_normalize.zig");
+    _ = @import("tools/zts_expert_describe_rule.zig");
+    _ = @import("tools/zts_expert_search.zig");
+    _ = @import("tools/zts_expert_edit_simulate.zig");
+    _ = @import("tools/zts_expert_review_patch.zig");
+    _ = @import("tools/zts_expert_prove_patch.zig");
+    _ = @import("tools/zts_expert_system_proof.zig");
+    _ = @import("tools/zts_expert_features.zig");
+    _ = @import("tools/zts_expert_modules.zig");
+    _ = @import("tools/zts_expert_verify_modules.zig");
     _ = @import("tools/common.zig");
     _ = @import("tools/workspace_list_files.zig");
     _ = @import("tools/workspace_read_file.zig");
     _ = @import("tools/workspace_search_text.zig");
-    _ = @import("tools/zigts_check.zig");
+    _ = @import("tools/zts_check.zig");
     _ = @import("tools/zig_build_step.zig");
     _ = @import("tools/zig_test_step.zig");
     _ = @import("tools/gen_tests.zig");
@@ -28,7 +28,7 @@ comptime {
     _ = @import("tools/pi_goal_candidate.zig");
     _ = @import("tools/pi_repair_plan.zig");
     _ = @import("tools/pi_apply_repair_plan.zig");
-    _ = @import("tools/zigts_expert_ast_rewrite.zig");
+    _ = @import("tools/zts_expert_ast_rewrite.zig");
     _ = @import("tools/pi_forge_route.zig");
     _ = @import("tools/pi_forge_spec.zig");
     _ = @import("tools/pi_remember_fact.zig");

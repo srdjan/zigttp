@@ -1,15 +1,15 @@
 # CLI Reference
 
-`zigttp` is the developer CLI. `zigts` is installed for tools that want the
-analyzer directly; analyzer commands exposed by `zigts` are also reachable as
-`zigttp <command>`.
+`zttp` is the developer CLI. `zts` is installed for tools that want the
+analyzer directly; analyzer commands exposed by `zts` are also reachable as
+`zttp <command>`.
 
 Run command-specific help for exact flags:
 
 ```bash
-zigttp --help
-zigttp help --all
-zigttp <command> --help
+zttp --help
+zttp help --all
+zttp <command> --help
 ```
 
 ## Core Commands
@@ -17,14 +17,14 @@ zigttp <command> --help
 The default help shows the day-to-day workflow:
 
 ```bash
-zigttp init <name> [--template basic|api|htmx]
-zigttp dev [handler.ts]
-zigttp test [tests.jsonl]
-zigttp expert
-zigttp deploy
+zttp init <name> [--template basic|api|htmx]
+zttp dev [handler.ts]
+zttp test [tests.jsonl]
+zttp expert
+zttp deploy
 ```
 
-Core commands auto-detect `zigttp.json` from the current directory or a parent.
+Core commands auto-detect `zttp.json` from the current directory or a parent.
 
 | Command | Purpose |
 |---|---|
@@ -36,11 +36,11 @@ Core commands auto-detect `zigttp.json` from the current directory or a parent.
 
 ## Run Commands
 
-`zigttp serve` runs a handler without the proof-aware watch loop:
+`zttp serve` runs a handler without the proof-aware watch loop:
 
 ```bash
-zigttp serve src/handler.ts -p 3000
-zigttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
+zttp serve src/handler.ts -p 3000
+zttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
 ```
 
 Common `dev` and `serve` flags:
@@ -61,11 +61,11 @@ Common `dev` and `serve` flags:
 | `--incident-log <file>` | Append runtime soundness incidents as JSONL. Off by default. |
 | `--replay <file>` | Replay recorded traces. |
 | `--test <file>` | Run JSONL handler tests. |
-| `--sqlite <file>` | SQLite database for `zigttp:sql`. |
+| `--sqlite <file>` | SQLite database for `zttp:sql`. |
 | `--durable <dir>` | Durable workflow oplog directory. |
-| `--system <file>` | Handler bundle manifest: the `zigttp:service` HTTP registry and the `zigttp:workflow` in-process sub-handler registry. An optional `entry` field names the bundle's single external HTTP entry point, validated by `zigttp link`. Workflow startup fails if a local handler path is unreadable. |
+| `--system <file>` | Handler bundle manifest: the `zttp:service` HTTP registry and the `zttp:workflow` in-process sub-handler registry. An optional `entry` field names the bundle's single external HTTP entry point, validated by `zttp link`. Workflow startup fails if a local handler path is unreadable. |
 | `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
-| `--actor-queue` | Enable process-local in-memory mailboxes for `zigttp:queue`. |
+| `--actor-queue` | Enable process-local in-memory mailboxes for `zttp:queue`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--outbound-timeout-ms <ms>` | Outbound connect timeout (default 10000). Implies `--outbound-http`. |
 | `--outbound-max-response <size>` | Outbound response body cap (default 1m). Implies `--outbound-http`. |
@@ -77,7 +77,7 @@ Common `dev` and `serve` flags:
 `dev` adds `--no-prove` (watch and reload without contract gating), `--quest` /
 `--no-quest` (replay or skip the first-run proof tour), and `--record-proof`,
 which captures the session's requests into a replayable proof capsule at
-`.zigttp/capsules/default/`. `serve --watch` takes `--prove` and `--force-swap`
+`.zttp/capsules/default/`. `serve --watch` takes `--prove` and `--force-swap`
 (apply a breaking swap anyway) instead. Both take `--studio` when the binary was
 built with `-Dstudio`.
 
@@ -103,34 +103,34 @@ later release.
 ## Deploy And Proof Receipts
 
 ```bash
-zigttp deploy
-./.zigttp/deploy/<project-name>
-zigttp verify http://127.0.0.1:8080
+zttp deploy
+./.zttp/deploy/<project-name>
+zttp verify http://127.0.0.1:8080
 ```
 
 `deploy` verifies the current project, writes a local binary, appends a
-`kind=deploy` row to `.zigttp/proofs.jsonl`, and signs an attestation by
+`kind=deploy` row to `.zttp/proofs.jsonl`, and signs an attestation by
 default. `--no-attest` disables signing for that build.
 
 Proof ledger commands:
 
 ```bash
-zigttp proofs
-zigttp proofs show HEAD
-zigttp proofs diff HEAD~1 HEAD
-zigttp proofs export --format md --ref HEAD
-zigttp proofs badge
-zigttp proofs gate --base origin/main --head HEAD
+zttp proofs
+zttp proofs show HEAD
+zttp proofs diff HEAD~1 HEAD
+zttp proofs export --format md --ref HEAD
+zttp proofs badge
+zttp proofs gate --base origin/main --head HEAD
 ```
 
-`zigttp proof replay <capsule>` replays a capsule recorded by `zigttp dev
+`zttp proof replay <capsule>` replays a capsule recorded by `zttp dev
 --record-proof` against the current handler: exit 0 reproduced, 1 regression. It
 fails closed when the capsule's pinned handler, contract, or policy hash no
-longer matches (`--allow-version-mismatch` overrides). `zigttp verify <url>`
-verifies a live endpoint's attestation. `zigttp proofs verify <bundle-dir>`
+longer matches (`--allow-version-mismatch` overrides). `zttp verify <url>`
+verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
 re-hashes a local proof bundle.
 
-`zigttp verify --json` includes durable workflow receipt fields when a build was
+`zttp verify --json` includes durable workflow receipt fields when a build was
 attested with a workflow contract: `durableWorkflowProofLevel`,
 `durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
 `durableWorkflowFaultCovered`.
@@ -138,23 +138,23 @@ attested with a workflow contract: `durableWorkflowProofLevel`,
 Workflow queue dead-letter commands:
 
 ```bash
-zigttp workflow-queue list --durable <dir>
-zigttp workflow-queue show --durable <dir> <item-id>
-zigttp workflow-queue replay --durable <dir> <item-id>
-zigttp workflow-queue discard --durable <dir> <item-id>
+zttp workflow-queue list --durable <dir>
+zttp workflow-queue show --durable <dir> <item-id>
+zttp workflow-queue replay --durable <dir> <item-id>
+zttp workflow-queue discard --durable <dir> <item-id>
 ```
 
 These commands inspect the persisted queue used by `--workflow-queue`; they do
-not operate on the in-memory actor queue from `zigttp:queue`.
+not operate on the in-memory actor queue from `zttp:queue`.
 
 Durable-run dead-letter commands (a sibling surface: these inspect runs that
 permanently failed crash recovery, not queued child dispatch):
 
 ```bash
-zigttp durable dead-runs list --durable <dir>
-zigttp durable dead-runs show --durable <dir> <id>
-zigttp durable dead-runs replay --durable <dir> <id>
-zigttp durable dead-runs discard --durable <dir> <id>
+zttp durable dead-runs list --durable <dir>
+zttp durable dead-runs show --durable <dir> <id>
+zttp durable dead-runs replay --durable <dir> <id>
+zttp durable dead-runs discard --durable <dir> <id>
 ```
 
 See [Durable Workflows](durable-workflows.md#durable-run-recovery-and-dead-letters)
@@ -162,35 +162,35 @@ for the quarantine/restart/replay/discard semantics.
 
 ## Analyzer Commands
 
-These commands are listed by `zigttp help --all` from the shared `zigts`
+These commands are listed by `zttp help --all` from the shared `zts`
 command registry:
 
 ```bash
-zigttp check [handler.ts] [--json] [--contract] [--types]
-zigttp prove <old-contract.json> <new-contract.json>
-zigttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
-zigttp mock <tests.jsonl> [--port <port>]
-zigttp link <system.json>
-zigttp rollout <old-system.json> <new-system.json>
-zigttp edit-simulate [handler.ts] [--before old.ts]
-zigttp review-patch <file> [--before old.ts] [--json]
-zigttp gen-tests [handler.ts] [-o output.jsonl]
-zigttp canonicalize <file> --json
-zigttp normalize <file> [--write] [--check] [--json]
-zigttp features [--json]
-zigttp modules [--json]
-zigttp restrictions [--json] [--by proof|class]
-zigttp meta [--json]
-zigttp describe-rule [name|code] [--json] [--hash]
-zigttp search <keyword> [--json]
-zigttp spec-check [--json]
-zigttp spec-hash [--json]
-zigttp spec-render [--out path] [--check path]
-zigttp verify-paths <file>... [--json]
-zigttp verify-modules <file>... [--strict] [--json]
-zigttp verify-modules --builtins --strict --json
-zigttp verify-module-manifest <manifest.json> [--json]
-zigttp extension-status --module-manifest <path>... [--json]
+zttp check [handler.ts] [--json] [--contract] [--types]
+zttp prove <old-contract.json> <new-contract.json>
+zttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
+zttp mock <tests.jsonl> [--port <port>]
+zttp link <system.json>
+zttp rollout <old-system.json> <new-system.json>
+zttp edit-simulate [handler.ts] [--before old.ts]
+zttp review-patch <file> [--before old.ts] [--json]
+zttp gen-tests [handler.ts] [-o output.jsonl]
+zttp canonicalize <file> --json
+zttp normalize <file> [--write] [--check] [--json]
+zttp features [--json]
+zttp modules [--json]
+zttp restrictions [--json] [--by proof|class]
+zttp meta [--json]
+zttp describe-rule [name|code] [--json] [--hash]
+zttp search <keyword> [--json]
+zttp spec-check [--json]
+zttp spec-hash [--json]
+zttp spec-render [--out path] [--check path]
+zttp verify-paths <file>... [--json]
+zttp verify-modules <file>... [--strict] [--json]
+zttp verify-modules --builtins --strict --json
+zttp verify-module-manifest <manifest.json> [--json]
+zttp extension-status --module-manifest <path>... [--json]
 ```
 
 Use JSON mode for IDEs, CI, and review-bot integrations.
@@ -202,24 +202,24 @@ Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, 
 Configure a model key, then launch the interactive agent:
 
 ```bash
-zigttp auth claude
-zigttp auth openai
-zigttp auth status
-zigttp auth revoke claude
-zigttp expert
+zttp auth claude
+zttp auth openai
+zttp auth status
+zttp auth revoke claude
+zttp expert
 ```
 
 Useful modes:
 
 ```bash
-zigttp expert --resume
-zigttp expert --yes
-zigttp expert --no-edit
-zigttp expert --model claude-sonnet-4-6
-zigttp expert --print "add a GET /health route"
-zigttp expert --print "..." --mode json
-zigttp expert --mode rpc
-zigttp expert --handler src/handler.ts --goal no_secret_leakage
+zttp expert --resume
+zttp expert --yes
+zttp expert --no-edit
+zttp expert --model claude-sonnet-4-6
+zttp expert --print "add a GET /health route"
+zttp expert --print "..." --mode json
+zttp expert --mode rpc
+zttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
 | Flag | Purpose |
@@ -231,7 +231,7 @@ zigttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
 | `--mode rpc` | Run in RPC mode for editor integrations. |
-| `--handler <file>` | Override the handler file (default: auto-detected from `zigttp.json`). |
+| `--handler <file>` | Override the handler file (default: auto-detected from `zttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 
 Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI.
@@ -248,16 +248,16 @@ budgets, while `gpt-4o-mini` requests at most 8,192 output tokens despite its
 16,384-token output capability. RPC clients get the same allowed set through
 `model.list` and the same validation through `model.set`.
 
-The stored provider file is `~/.zigttp/providers.json` with mode `0600`.
+The stored provider file is `~/.zttp/providers.json` with mode `0600`.
 Environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` override stored
 values.
 
 ## Optional Surfaces
 
-- `zigttp studio` runs the browser proof workbench when built with `-Dstudio`.
-- `zigttp edge --config zigttp.edge.json` runs the in-process multi-handler
+- `zttp studio` runs the browser proof workbench when built with `-Dstudio`.
+- `zttp edge --config zttp.edge.json` runs the in-process multi-handler
   edge router when built with `-Dedge`.
-- `zigttp demo --scripted --out proof-demo --export proof-demo/passport`
+- `zttp demo --scripted --out proof-demo --export proof-demo/passport`
   creates an offline Proof Passport demo.
 
 See [User Guide](user-guide.md) for the normal project flow.

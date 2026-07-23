@@ -1,15 +1,15 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const json_diag = @import("json_diagnostics.zig");
 const expert_meta = @import("expert_meta.zig");
-const writeJsonString = zigts.handler_contract.writeJsonString;
+const writeJsonString = zts.handler_contract.writeJsonString;
 
-const file_io = zigts.file_io;
-const builtin_modules = zigts.builtin_modules;
-const module_manifest = zigts.module_manifest;
+const file_io = zts.file_io;
+const builtin_modules = zts.builtin_modules;
+const module_manifest = zts.module_manifest;
 
 /// Write the v1 verify-modules envelope to `writer`. Single source of truth
-/// for the shape documented in docs/zigts-expert-contract.md.
+/// for the shape documented in docs/zts-expert-contract.md.
 pub fn writeJsonEnvelope(
     writer: anytype,
     result: *const VerifyResult,
@@ -126,7 +126,7 @@ const forbidden_patterns = [_]ForbiddenPattern{
         .code = "ZVM001",
         .pattern = "capability_policy.",
         .message = "virtual module accesses runtime capability_policy directly",
-        .suggestion = "use checked policy helpers from packages/zigts/src/module_binding.zig",
+        .suggestion = "use checked policy helpers from packages/zts/src/module_binding.zig",
     },
     .{
         .code = "ZVM001",
@@ -180,25 +180,25 @@ const forbidden_patterns = [_]ForbiddenPattern{
         .code = "ZVM001",
         .pattern = "std.net.",
         .message = "virtual module opens network connections directly",
-        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+        .suggestion = "delegate outbound HTTP through the capability-gated zttp:fetch runtime callback",
     },
     .{
         .code = "ZVM001",
         .pattern = "std.Io.net.",
         .message = "virtual module opens network connections directly",
-        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+        .suggestion = "delegate outbound HTTP through the capability-gated zttp:fetch runtime callback",
     },
     .{
         .code = "ZVM001",
         .pattern = "std.http.Client",
         .message = "virtual module constructs an HTTP client directly",
-        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+        .suggestion = "delegate outbound HTTP through the capability-gated zttp:fetch runtime callback",
     },
     .{
         .code = "ZVM001",
         .pattern = "std.posix.socket",
         .message = "virtual module opens sockets directly",
-        .suggestion = "delegate outbound HTTP through the capability-gated zigttp:fetch runtime callback",
+        .suggestion = "delegate outbound HTTP through the capability-gated zttp:fetch runtime callback",
     },
     .{
         .code = "ZVM001",
@@ -304,7 +304,7 @@ fn auditPath(
                 path,
                 1,
                 1,
-                "create or restore the matching file under packages/zigts/src/modules/",
+                "create or restore the matching file under packages/zts/src/modules/",
             );
             return;
         }
@@ -326,7 +326,7 @@ fn auditPath(
         path,
         1,
         1,
-        "pass a path under packages/modules/src/, packages/zigts/src/modules/, or packages/modules/module-specs/",
+        "pass a path under packages/modules/src/, packages/zts/src/modules/, or packages/modules/module-specs/",
     );
 }
 
@@ -431,7 +431,7 @@ fn auditModuleContentWithSpecPath(
                 path,
                 1,
                 1,
-                "register the binding in packages/zigts/src/builtin_modules.zig or remove the stale spec",
+                "register the binding in packages/zts/src/builtin_modules.zig or remove the stale spec",
             );
             return;
         };
@@ -442,7 +442,7 @@ fn auditModuleContentWithSpecPath(
 fn checkBindingExportDrift(
     allocator: std.mem.Allocator,
     spec_path: []const u8,
-    binding: *const zigts.module_binding.ModuleBinding,
+    binding: *const zts.module_binding.ModuleBinding,
     manifest: *const module_manifest.Manifest,
     diagnostics: *std.ArrayList(OwnedDiagnostic),
 ) !void {
@@ -539,9 +539,9 @@ fn findManifestExport(exports: []const module_manifest.Export, name: []const u8)
 }
 
 fn findBindingExport(
-    exports: []const zigts.module_binding.FunctionBinding,
+    exports: []const zts.module_binding.FunctionBinding,
     name: []const u8,
-) ?*const zigts.module_binding.FunctionBinding {
+) ?*const zts.module_binding.FunctionBinding {
     for (exports) |*export_item| {
         if (std.mem.eql(u8, export_item.name, name)) return export_item;
     }
@@ -694,7 +694,7 @@ fn parseAssignedString(content: []const u8, marker: []const u8) ?[]const u8 {
 }
 
 fn looksLikeBuiltinAdjacentPath(path: []const u8) bool {
-    const in_legacy_modules_dir = std.mem.indexOf(u8, path, "packages/zigts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_legacy_modules_dir = std.mem.indexOf(u8, path, "packages/zts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
     const in_peer_modules_dir = std.mem.indexOf(u8, path, "packages/modules/src/") != null and std.mem.endsWith(u8, path, ".zig");
     const in_specs_dir = std.mem.indexOf(u8, path, "packages/modules/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
     return in_legacy_modules_dir or in_peer_modules_dir or in_specs_dir;
@@ -740,11 +740,11 @@ fn resolveCompanionPath(
 
 fn sameCapabilities(
     binding_caps: []const []const u8,
-    manifest_caps: []const zigts.module_manifest.CapabilityDeclaration,
+    manifest_caps: []const zts.module_manifest.CapabilityDeclaration,
 ) bool {
     if (binding_caps.len != manifest_caps.len) return false;
     for (binding_caps) |item| {
-        const cap = std.meta.stringToEnum(zigts.module_binding.ModuleCapability, item) orelse return false;
+        const cap = std.meta.stringToEnum(zts.module_binding.ModuleCapability, item) orelse return false;
         var found = false;
         for (manifest_caps) |decl| {
             if (decl.effective == cap) {
@@ -801,7 +801,7 @@ test "verify module reports helper use without declared capability" {
 
     const source =
         \\pub const binding = mb.ModuleBinding{
-        \\    .specifier = "zigttp:test",
+        \\    .specifier = "zttp:test",
         \\    .required_capabilities = &.{},
         \\};
         \\
@@ -813,7 +813,7 @@ test "verify module reports helper use without declared capability" {
     var caps = try parseBindingCapabilities(allocator, source);
     defer caps.deinit(allocator);
 
-    try checkCapabilityHelperDrift(allocator, "packages/zigts/src/modules/test.zig", source, caps.items, &diags);
+    try checkCapabilityHelperDrift(allocator, "packages/zts/src/modules/test.zig", source, caps.items, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqualStrings("ZVM002", diags.items[0].diag.code);
 }
@@ -828,7 +828,7 @@ test "verify module reports network capability use without declaration" {
 
     const source =
         \\pub const binding = mb.ModuleBinding{
-        \\    .specifier = "zigttp:test",
+        \\    .specifier = "zttp:test",
         \\    .required_capabilities = &.{},
         \\};
         \\
@@ -939,11 +939,11 @@ test "sanctioned outbound callback module audits cleanly" {
 
 test "registry-driven companion path mapping preserves rooted paths" {
     const allocator = std.testing.allocator;
-    const module_path = "/tmp/work/packages/zigts/src/modules/http_mod.zig";
+    const module_path = "/tmp/work/packages/zts/src/modules/http_mod.zig";
     const spec_path = try resolveCompanionPath(
         allocator,
         module_path,
-        "packages/zigts/src/modules/http_mod.zig",
+        "packages/zts/src/modules/http_mod.zig",
         "packages/modules/module-specs/http-mod.json",
     );
     defer allocator.free(spec_path);
@@ -958,7 +958,7 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
     defer buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
 
-    const hash = zigts.rule_registry.policyHash();
+    const hash = zts.rule_registry.policyHash();
     try writeJsonEnvelope(&aw.writer, &result, hash);
 
     buf = aw.toArrayList();
@@ -974,7 +974,7 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
 test "verifyPaths ignores internal helper files outside the public built-in set" {
     var result = try verifyPaths(
         std.testing.allocator,
-        &.{"packages/zigts/src/modules/internal/util.zig"},
+        &.{"packages/zts/src/modules/internal/util.zig"},
         .{},
     );
     defer result.deinit(std.testing.allocator);
@@ -994,7 +994,7 @@ test "verifyBuiltins reports the authoritative public module and spec set" {
 }
 
 test "pathMatchesCanonical requires a path-separator boundary" {
-    try std.testing.expect(pathMatchesCanonical("packages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
-    try std.testing.expect(pathMatchesCanonical("/repo/packages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
-    try std.testing.expect(!pathMatchesCanonical("xpackages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
+    try std.testing.expect(pathMatchesCanonical("packages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
+    try std.testing.expect(pathMatchesCanonical("/repo/packages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
+    try std.testing.expect(!pathMatchesCanonical("xpackages/zts/src/modules/env.zig", "packages/zts/src/modules/env.zig"));
 }

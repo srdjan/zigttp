@@ -147,7 +147,7 @@ implementation risk of translating an existing, already-proven pattern
 
 ### Hypothesis Statement
 
-We believe **operators running zigttp handlers with `--durable`**
+We believe **operators running zttp handlers with `--durable`**
 
 Will **need to see and act on durable runs that permanently fail recovery**
 
@@ -162,7 +162,7 @@ parity between the two fault-tolerance surfaces the runtime ships (durable
 runs vs. queued workflow dispatch)**
 
 We'll know this is true when **100% of permanently-failed durable runs are
-recorded to an inspectable dead-run store, and a `zigttp durable dead-runs
+recorded to an inspectable dead-run store, and a `zttp durable dead-runs
 list|replay|discard` surface exists, mirroring `workflow queue`'s existing
 CLI**
 
@@ -203,7 +203,7 @@ CLI**
 On quarantine, write the durable run's terminal state + failure reason to a
 new `dead-runs/` directory (same durable dir, same `0600` permissions as the
 in-flight hardening pass) instead of abandoning it in place. Add
-`zigttp durable dead-runs list|replay|discard`, mirroring the four
+`zttp durable dead-runs list|replay|discard`, mirroring the four
 `workflow_queue` verbs.
 
 **Success Criteria**
@@ -259,9 +259,9 @@ in-flight hardening pass) instead of abandoning it in place. Add
 - `packages/runtime/src/runtime_workflow.zig` (`workflow.call` step-depth
   gating ~86-92, `saga` vs `--workflow-queue` rejection ~653-655, `fanout`
   sequential dispatch note ~798, 835)
-- `packages/zigts/src/modules/workflow/io.zig` (`race()` latency note line
+- `packages/zts/src/modules/workflow/io.zig` (`race()` latency note line
   16, `MAX_PARALLEL` = 8)
-- `packages/zigts/src/system_linker.zig` (affordance proof-coverage scope
+- `packages/zts/src/system_linker.zig` (affordance proof-coverage scope
   note ~158-160)
 - `docs/plans/2026-06-30-001-feat-workflow-fault-tolerance-plan.md` (landed
   scope, stop conditions, explicit deferrals)

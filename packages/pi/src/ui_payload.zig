@@ -577,7 +577,7 @@ pub const PropertiesSnapshot = struct {
     /// (true) or did not (false). `has_egress` is excluded because it records a
     /// neutral fact (the handler makes egress), not a guarantee, and the
     /// non-boolean `max_io_depth` is skipped by the field-type filter. Because
-    /// zigts proofs hold handler-wide over the exhaustively-enumerated path
+    /// zts proofs hold handler-wide over the exhaustively-enumerated path
     /// space rather than per response path, `proven / tracked` is the fraction
     /// of tracked guarantees discharged for the handler - the session
     /// "proven-path ratio".
@@ -760,7 +760,7 @@ pub const SystemProofSummary = struct {
 };
 
 /// One virtual-module call in a witness's IO stub script. Mirrors
-/// `zigts.counterexample.IoStubEntry` but holds owned strings so the body can
+/// `zts.counterexample.IoStubEntry` but holds owned strings so the body can
 /// outlive the analyzer that produced it.
 pub const WitnessStub = struct {
     seq: u32,
@@ -793,7 +793,7 @@ pub const WitnessStub = struct {
 /// Concrete counterexample for a property violation: the request that drives
 /// the handler down the violating path, the IO stub script that pins the
 /// virtual-module return values, and the source span endpoints. Replayable
-/// via `zigts.counterexample.writeJsonl` against the runtime's `--test`
+/// via `zts.counterexample.writeJsonl` against the runtime's `--test`
 /// path. The stable `key` is the same digest `witness_key.forWitness`
 /// produces; consumers compare witness identity by byte equality on `key`.
 pub const WitnessBody = struct {
@@ -2557,7 +2557,7 @@ test "command outcome payload round-trips" {
         .exit_code = 0,
         .stdout = try testing.allocator.dupe(u8, "ok"),
         .stderr = try testing.allocator.dupe(u8, ""),
-        .command = try testing.allocator.dupe(u8, "zig build test-zigts"),
+        .command = try testing.allocator.dupe(u8, "zig build test-zts"),
     } };
     defer payload.deinit(testing.allocator);
 
@@ -2568,7 +2568,7 @@ test "command outcome payload round-trips" {
         .command_outcome => |command| {
             try testing.expectEqualStrings("zig test", command.title);
             try testing.expectEqual(@as(?u8, 0), command.exit_code);
-            try testing.expectEqualStrings("zig build test-zigts", command.command);
+            try testing.expectEqualStrings("zig build test-zts", command.command);
         },
         else => return error.TestFailed,
     }

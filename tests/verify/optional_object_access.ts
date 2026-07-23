@@ -1,6 +1,6 @@
 // Should fail: property access on optional value without checking
-import { routerMatch } from "zigttp:router";
-import type { Spec } from "zigttp:types";
+import { routerMatch } from "zttp:router";
+import type { Spec } from "zttp:types";
 
 function getHome(req: Request): Response {
     return Response.json({ status: "ok" });

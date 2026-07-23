@@ -7,7 +7,7 @@
 //! Usage: zig build mock -- <tests.jsonl> [--port PORT]
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("netinet/in.h");
@@ -69,7 +69,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
     }
 
-    const source = zigts.file_io.readFile(allocator, test_path, 1024 * 1024) catch |err| {
+    const source = zts.file_io.readFile(allocator, test_path, 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ test_path, err });
         std.process.exit(2);
     };
@@ -193,8 +193,8 @@ fn sendResponse(fd: c_int, status: u16, name: []const u8) void {
     _ = c.write(fd, body.ptr, body.len);
 }
 
-const findStr = zigts.trace.findJsonStringValue;
-const findInt = zigts.trace.findJsonIntValue;
+const findStr = zts.trace.findJsonStringValue;
+const findInt = zts.trace.findJsonIntValue;
 
 fn parseTestRoutes(source: []const u8, routes: *std.ArrayList(MockRoute), allocator: std.mem.Allocator) void {
     var current_name: []const u8 = "unnamed";

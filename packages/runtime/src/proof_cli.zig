@@ -1,4 +1,4 @@
-//! `zigttp proof` command group — the Proof Flight Recorder's replay surface.
+//! `zttp proof` command group — the Proof Flight Recorder's replay surface.
 //!
 //! A capsule (see `capsule.zig`) bundles a handler's recorded request traces
 //! with the manifest that pins the handler/contract/policy hashes. `proof
@@ -14,21 +14,21 @@
 //! the running binary fails closed — the recorded behavior was proven under a
 //! different rule set, so silently replaying it would be misleading.
 //!
-//! Distinct from `proofs_cli.zig` (the `zigttp proofs` ledger viewer): that
-//! renders `.zigttp/proofs.jsonl` receipts; this replays capsule traces.
+//! Distinct from `proofs_cli.zig` (the `zttp proofs` ledger viewer): that
+//! renders `.zttp/proofs.jsonl` receipts; this replays capsule traces.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const capsule = @import("capsule.zig");
 const replay_runner = @import("replay_runner.zig");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 
-const trace = zigts.trace;
-const file_io = zigts.file_io;
-const rule_registry = zigts.rule_registry;
-const precompile = zigts_cli.precompile;
-const handler_contract = zigts.handler_contract;
+const trace = zts.trace;
+const file_io = zts.file_io;
+const rule_registry = zts.rule_registry;
+const precompile = zts_cli.precompile;
+const handler_contract = zts.handler_contract;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const max_handler_bytes = 4 * 1024 * 1024;
@@ -74,7 +74,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (std.mem.eql(u8, sub, "replay")) {
         return runReplay(allocator, argv[1..]);
     }
-    std.debug.print("zigttp proof: unknown subcommand '{s}'\n\n", .{sub});
+    std.debug.print("zttp proof: unknown subcommand '{s}'\n\n", .{sub});
     printHelp();
     return Error.UsageError;
 }
@@ -103,18 +103,18 @@ fn runReplay(allocator: std.mem.Allocator, args: []const []const u8) !void {
             continue;
         }
         if (std.mem.startsWith(u8, arg, "-")) {
-            std.debug.print("zigttp proof replay: unknown flag '{s}'\n", .{arg});
+            std.debug.print("zttp proof replay: unknown flag '{s}'\n", .{arg});
             return Error.UsageError;
         }
         if (name == null) {
             name = arg;
         } else {
-            std.debug.print("zigttp proof replay: expected a single capsule name\n", .{});
+            std.debug.print("zttp proof replay: expected a single capsule name\n", .{});
             return Error.UsageError;
         }
     }
     const capsule_name = name orelse {
-        std.debug.print("Usage: zigttp proof replay <capsule> [--allow-version-mismatch]\n", .{});
+        std.debug.print("Usage: zttp proof replay <capsule> [--allow-version-mismatch]\n", .{});
         return Error.UsageError;
     };
 
@@ -160,7 +160,7 @@ pub fn replayCapsule(
     defer allocator.free(manifest_path);
 
     const manifest_json = file_io.readFile(allocator, manifest_path, max_trace_bytes) catch {
-        std.debug.print("zigttp proof replay: no capsule '{s}' at {s}\n", .{ capsule_name, manifest_path });
+        std.debug.print("zttp proof replay: no capsule '{s}' at {s}\n", .{ capsule_name, manifest_path });
         return Error.CapsuleNotFound;
     };
     defer allocator.free(manifest_json);
@@ -168,13 +168,13 @@ pub fn replayCapsule(
     var loaded = capsule.parse(allocator, manifest_json, .{ .allow_version_mismatch = allow_version_mismatch }) catch |err| {
         if (err == error.SchemaVersionMismatch) {
             std.debug.print(
-                "zigttp proof replay: capsule '{s}' was recorded under capsule schema v?, this binary speaks v{d}.\n" ++
+                "zttp proof replay: capsule '{s}' was recorded under capsule schema v?, this binary speaks v{d}.\n" ++
                     "The recorded behavior was proven under a different format; pass --allow-version-mismatch to replay anyway.\n",
                 .{ capsule_name, capsule.schema_version },
             );
             return Error.SchemaVersionMismatch;
         }
-        std.debug.print("zigttp proof replay: capsule '{s}' manifest is malformed: {}\n", .{ capsule_name, err });
+        std.debug.print("zttp proof replay: capsule '{s}' manifest is malformed: {}\n", .{ capsule_name, err });
         return Error.CapsuleNotFound;
     };
     defer loaded.deinit();
@@ -186,7 +186,7 @@ pub fn replayCapsule(
     const current_policy = rule_registry.policyHash();
     if (!allow_version_mismatch and !std.mem.eql(u8, manifest.policy_hash, &current_policy)) {
         std.debug.print(
-            "zigttp proof replay: capsule '{s}' was recorded under policy {s}, this binary is {s}.\n" ++
+            "zttp proof replay: capsule '{s}' was recorded under policy {s}, this binary is {s}.\n" ++
                 "Pass --allow-version-mismatch to replay against the current rule set anyway.\n",
             .{ capsule_name, manifest.policy_hash, current_policy[0..] },
         );
@@ -195,7 +195,7 @@ pub fn replayCapsule(
 
     const handler_source = file_io.readFile(allocator, manifest.handler_path, max_handler_bytes) catch {
         std.debug.print(
-            "zigttp proof replay: capsule '{s}' references handler '{s}', which is not readable from here.\n",
+            "zttp proof replay: capsule '{s}' references handler '{s}', which is not readable from here.\n",
             .{ capsule_name, manifest.handler_path },
         );
         return Error.HandlerNotFound;
@@ -232,7 +232,7 @@ pub fn replayTraceFiles(
         // early would dangle every request/response field. Keep it alive for
         // the whole replay loop, then free.
         const source = file_io.readFile(allocator, path, max_trace_bytes) catch |err| {
-            std.debug.print("zigttp proof replay: cannot read trace '{s}': {}\n", .{ path, err });
+            std.debug.print("zttp proof replay: cannot read trace '{s}': {}\n", .{ path, err });
             return Error.CapsuleNotFound;
         };
         defer allocator.free(source);
@@ -376,7 +376,7 @@ pub fn writeManifest(
     }
 
     // Proven specs from the classified properties.
-    var spec_buf: [zigts.handler_contract.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+    var spec_buf: [zts.handler_contract.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
     var proven: std.ArrayList([]const u8) = .empty;
     defer proven.deinit(allocator);
     if (contract.properties) |props| {
@@ -400,7 +400,7 @@ pub fn writeManifest(
         .handler_path = handler_path,
         .handler_hash = &handler_hash,
         .contract_hash = &contract_hash,
-        .zigttp_version = zigts.version.string,
+        .zttp_version = zts.version.string,
         .policy_hash = &policy,
         .proven_specs = proven.items,
         .declared_specs = declared.items,
@@ -418,18 +418,18 @@ pub fn writeManifest(
 
 fn printHelp() void {
     const help =
-        \\zigttp proof — replay a recorded proof capsule against the current handler
+        \\zttp proof — replay a recorded proof capsule against the current handler
         \\
         \\Usage:
-        \\  zigttp proof replay <capsule> [--allow-version-mismatch]
+        \\  zttp proof replay <capsule> [--allow-version-mismatch]
         \\      Replay every recorded request in the named capsule
-        \\      (.zigttp/capsules/<capsule>/) against the current handler and
+        \\      (.zttp/capsules/<capsule>/) against the current handler and
         \\      report whether the responses still match. Exits 1 on any
         \\      regression. Fails closed when the capsule's schema or policy
         \\      hash no longer matches this binary; --allow-version-mismatch
         \\      overrides that gate.
         \\
-        \\A capsule is recorded by `zigttp dev --record-proof` or
+        \\A capsule is recorded by `zttp dev --record-proof` or
         \\authored from recorded `--trace` output. The capsule format lives in
         \\packages/runtime/src/capsule.zig.
         \\
@@ -551,7 +551,7 @@ test "replayTraceFiles flags a regression when the response changed" {
 
 test "ReplayReport with zero recorded requests is not clean" {
     // Regression: a capsule that captured no traffic (empty trace file) yields
-    // total=0, regressed=0. clean() must NOT treat that as a pass, or `zigttp
+    // total=0, regressed=0. clean() must NOT treat that as a pass, or `zttp
     // proof replay` would print "0/0 reproduced ... clean" and exit 0 after a
     // breaking edit, defeating the fail-closed replay gate.
     const empty = ReplayReport{ .total = 0, .matched = 0, .regressed = 0 };
@@ -581,7 +581,7 @@ test "replayCapsule fails closed on a policy mismatch" {
         .handler_path = "handler.ts",
         .handler_hash = "a" ** 64,
         .contract_hash = "b" ** 64,
-        .zigttp_version = "test",
+        .zttp_version = "test",
         .policy_hash = "0" ** 64,
         .trace_files = &.{"traces/001.jsonl"},
     };

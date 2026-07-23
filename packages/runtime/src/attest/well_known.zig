@@ -1,14 +1,14 @@
 //! Well-known proof receipt document.
 //!
-//! Precomputes the `GET /.well-known/zigttp-attest` response body once at
+//! Precomputes the `GET /.well-known/zttp-attest` response body once at
 //! startup. The doc carries the same JWS the runtime emits in the
-//! `Zigttp-Attest` response header plus the full contract surface and the
+//! `Zttp-Attest` response header plus the full contract surface and the
 //! public-key JWK, so a security scanner or registry crawler can validate
 //! the attestation without issuing a request through every handler route.
 //!
 //! Body shape:
 //! ```
-//! { "v": "zigttp-attest-v1",
+//! { "v": "zttp-attest-v1",
 //!   "attest": "<compact JWS>",
 //!   "contract": { ...verbatim contract.json... },
 //!   "publicKey": { "kty": "OKP", "crv": "Ed25519",
@@ -25,7 +25,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const route_path: []const u8 = "/.well-known/zigttp-attest";
+pub const route_path: []const u8 = "/.well-known/zttp-attest";
 pub const content_type: []const u8 = "application/json";
 /// One hour. The doc is content-addressed via ETag, so caches re-validate
 /// cheaply when a fresh build changes the body.
@@ -117,7 +117,7 @@ test "build embeds attest, contract, and public key" {
     var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"zigttp-attest-v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"zttp-attest-v1\"") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"attest\":\"eyJh.eyJ2.signature\"") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"contract\":{\"version\":14") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"publicKey\":{") != null);

@@ -1,28 +1,28 @@
 .{
-    .name = .zigttp,
+    .name = .zttp,
     .version = "0.18.0",
-    .fingerprint = 0x610658c09272015b, // Changing this has security and trust implications.
+    .fingerprint = 0x6d6892a6f6d0b5fe, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zigts = .{
-            .path = "packages/zigts",
+        .zts = .{
+            .path = "packages/zts",
         },
-        .zigttp_tools = .{
+        .zttp_tools = .{
             .path = "packages/tools",
         },
-        .zigttp_runtime = .{
+        .zttp_runtime = .{
             .path = "packages/runtime",
         },
-        .zigttp_sdk = .{
-            .path = "packages/zigttp-sdk",
+        .zttp_sdk = .{
+            .path = "packages/zttp-sdk",
         },
-        .zigttp_modules = .{
+        .zttp_modules = .{
             .path = "packages/modules",
         },
-        .zigttp_pi = .{
+        .zttp_pi = .{
             .path = "packages/pi",
         },
-        .zigttp_proof_review = .{
+        .zttp_proof_review = .{
             .path = "packages/proof-review",
         },
     },
@@ -42,6 +42,6 @@
         "policy-hash.txt",
         "scripts",
         "tests",
-        "zigts_main.zig",
+        "zts_main.zig",
     },
 }

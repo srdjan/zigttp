@@ -1,4 +1,4 @@
-//! `zigttp doctor --release` implementation extracted from dev_cli.zig.
+//! `zttp doctor --release` implementation extracted from dev_cli.zig.
 //!
 //! Self-contained release-passport pipeline: parses CLI options, collects
 //! a set of release-readiness checks, renders the result as text or JSON,
@@ -12,7 +12,7 @@
 //! dependencies.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const release_verify_commands = [_][]const u8{
     "zig fmt --check build.zig packages/",
@@ -29,7 +29,7 @@ const release_verify_commands = [_][]const u8{
     "bash scripts/test-install-archive-safety.sh",
     "bash scripts/check-semantics-spec.sh",
     "zig build bench-check",
-    "./zig-out/bin/zigttp doctor --release --json",
+    "./zig-out/bin/zttp doctor --release --json",
 };
 
 const build_gate_markers = [_][]const u8{
@@ -66,14 +66,14 @@ const verify_script_markers = [_][]const u8{
     "bash scripts/test-examples.sh",
     "bash scripts/test-install-archive-safety.sh",
     "bash scripts/check-semantics-spec.sh",
-    "zigts meta --json",
+    "zts meta --json",
 };
 
 const release_only_gate_markers = [_][]const u8{
     "zig build smoke-getting-started",
     "zig build smoke-demo",
     "zig build smoke-studio",
-    "./zig-out/bin/zigttp doctor --release --json",
+    "./zig-out/bin/zttp doctor --release --json",
     "contents: write",
 };
 
@@ -232,7 +232,7 @@ pub fn releaseDoctorCommand(
     const json_bytes = try renderReleasePassportJson(allocator, &passport);
     defer allocator.free(json_bytes);
     if (opts.out_path) |path| {
-        try zigts.file_io.writeFile(allocator, path, json_bytes);
+        try zts.file_io.writeFile(allocator, path, json_bytes);
     }
 
     const output = if (opts.json)
@@ -284,12 +284,12 @@ pub fn collectReleasePassport(allocator: std.mem.Allocator) !ReleasePassport {
 }
 
 fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon: ?[]const u8) !void {
-    const root = readOptionalFile(allocator, "packages/zigts/src/root.zig", 256 * 1024);
+    const root = readOptionalFile(allocator, "packages/zts/src/root.zig", 256 * 1024);
     defer if (root) |bytes| allocator.free(bytes);
 
     const version = if (zon) |bytes| extractZonVersion(bytes) else null;
     if (version == null or root == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon or packages/zigts/src/root.zig is missing", "zig build test-zigts");
+        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon or packages/zts/src/root.zig is missing", "zig build test-zts");
         return;
     }
 
@@ -297,20 +297,20 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     const expected = try std.fmt.allocPrint(allocator, "string = \"{s}\"", .{version.?});
     defer allocator.free(expected);
     if (std.mem.indexOf(u8, root_bytes, expected) == null) {
-        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon version does not match packages/zigts/src/root.zig", "zig build test-zigts");
+        try passport.add(allocator, "version", "Version alignment", .fail, "build.zig.zon version does not match packages/zts/src/root.zig", "zig build test-zts");
         return;
     }
 
-    try passport.add(allocator, "version", "Version alignment", .ok, "build.zig.zon and zigts version string agree", "zig build test-zigts");
+    try passport.add(allocator, "version", "Version alignment", .ok, "build.zig.zon and zts version string agree", "zig build test-zts");
 }
 
 fn addReleaseEvidenceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
     const docs_ok =
-        zigts.file_io.fileExists(allocator, "README.md") and
-        zigts.file_io.fileExists(allocator, "docs/README.md") and
-        zigts.file_io.fileExists(allocator, "docs/user-guide.md") and
-        zigts.file_io.fileExists(allocator, "docs/roadmap.md") and
-        zigts.file_io.fileExists(allocator, "docs/virtual-modules/README.md");
+        zts.file_io.fileExists(allocator, "README.md") and
+        zts.file_io.fileExists(allocator, "docs/README.md") and
+        zts.file_io.fileExists(allocator, "docs/user-guide.md") and
+        zts.file_io.fileExists(allocator, "docs/roadmap.md") and
+        zts.file_io.fileExists(allocator, "docs/virtual-modules/README.md");
     if (docs_ok) {
         try passport.add(allocator, "release_evidence", "Documentation evidence", .ok, "front door, user guide, roadmap, and virtual-module index exist", "bash scripts/audit-docs.sh .");
     } else {
@@ -328,19 +328,19 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
     const verify_sh = readOptionalFile(allocator, "scripts/verify.sh", 256 * 1024);
     defer if (verify_sh) |bytes| allocator.free(bytes);
 
-    const smoke_ok = zigts.file_io.fileExists(allocator, "scripts/smoke-v1.sh");
-    const examples_ok = zigts.file_io.fileExists(allocator, "scripts/test-examples.sh");
-    const installer_ok = zigts.file_io.fileExists(allocator, "scripts/test-install-archive-safety.sh");
-    const semantics_ok = zigts.file_io.fileExists(allocator, "scripts/check-semantics-spec.sh");
+    const smoke_ok = zts.file_io.fileExists(allocator, "scripts/smoke-v1.sh");
+    const examples_ok = zts.file_io.fileExists(allocator, "scripts/test-examples.sh");
+    const installer_ok = zts.file_io.fileExists(allocator, "scripts/test-install-archive-safety.sh");
+    const semantics_ok = zts.file_io.fileExists(allocator, "scripts/check-semantics-spec.sh");
     const workflow_ok = if (build_zig != null and ci_yml != null and release_yml != null and verify_sh != null)
         releaseGateRequirementsPresent(build_zig.?, ci_yml.?, release_yml.?, verify_sh.?)
     else
         false;
 
     if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && ./zig-out/bin/zigttp doctor --release --json");
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && ./zig-out/bin/zttp doctor --release --json");
     } else {
-        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && ./zig-out/bin/zigttp doctor --release --json");
+        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && ./zig-out/bin/zttp doctor --release --json");
     }
 }
 
@@ -439,7 +439,7 @@ fn addProofSurfaceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport
     }
 
     const dev_ok =
-        std.mem.indexOf(u8, dev_cli.?, "zigttp verify <url>") != null and
+        std.mem.indexOf(u8, dev_cli.?, "zttp verify <url>") != null and
         std.mem.indexOf(u8, dev_cli.?, "proofs") != null and
         std.mem.indexOf(u8, dev_cli.?, "--no-attest") != null;
     const proofs_ok =
@@ -458,7 +458,7 @@ fn renderReleasePassportText(allocator: std.mem.Allocator, passport: *const Rele
     defer aw.deinit();
     const verdict = passport.verdict();
     try aw.writer.print(
-        \\zigttp release doctor
+        \\zttp release doctor
         \\Release:  {s}
         \\Verdict:  {s}
         \\
@@ -476,7 +476,7 @@ fn renderReleasePassportText(allocator: std.mem.Allocator, passport: *const Rele
         try aw.writer.print("Wrote JSON passport: {s}\n", .{path});
     }
     if (verdict == .blocked) {
-        try aw.writer.writeAll("Next: resolve the failed release rows, then run `zigttp doctor --release` again.\n");
+        try aw.writer.writeAll("Next: resolve the failed release rows, then run `zttp doctor --release` again.\n");
     }
     return try allocator.dupe(u8, aw.writer.buffered());
 }
@@ -491,7 +491,7 @@ pub fn renderReleasePassportJson(allocator: std.mem.Allocator, passport: *const 
 }
 
 fn readOptionalFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ?[]u8 {
-    return zigts.file_io.readFile(allocator, path, max_size) catch null;
+    return zts.file_io.readFile(allocator, path, max_size) catch null;
 }
 
 fn extractZonVersion(bytes: []const u8) ?[]const u8 {
@@ -545,7 +545,7 @@ test "release verify commands cover release gates" {
     try std.testing.expect(hasReleaseVerifyCommand("bash scripts/test-install-archive-safety.sh"));
     try std.testing.expect(hasReleaseVerifyCommand("bash scripts/check-semantics-spec.sh"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build bench-check"));
-    try std.testing.expect(hasReleaseVerifyCommand("./zig-out/bin/zigttp doctor --release --json"));
+    try std.testing.expect(hasReleaseVerifyCommand("./zig-out/bin/zttp doctor --release --json"));
 }
 
 test "pending receipt-backed measurement note tolerates markdown wrapping" {
@@ -567,12 +567,12 @@ test "release gate requirements require semantics and doctor wiring" {
     const release_yml =
         ci_yml ++
         "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
-        "./zig-out/bin/zigttp doctor --release --json\ncontents: write\n";
+        "./zig-out/bin/zttp doctor --release --json\ncontents: write\n";
     const verify_sh =
         "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
         "bash scripts/test-examples.sh\nbash scripts/test-install-archive-safety.sh\n" ++
-        "bash scripts/check-semantics-spec.sh\nzigts meta --json\n";
+        "bash scripts/check-semantics-spec.sh\nzts meta --json\n";
 
     try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));

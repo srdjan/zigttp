@@ -1,4 +1,4 @@
-# zigttp unreleased
+# zttp unreleased
 
 Curated release notes. Paste the sections below above the auto-generated
 commit changelog when editing the next GitHub Release. Mirrors `CHANGELOG.md`

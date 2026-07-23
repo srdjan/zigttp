@@ -60,7 +60,7 @@ pub fn runWith(
     stderr: *std.Io.Writer,
 ) !void {
     const opts = parseOptions(argv) catch |err| {
-        try stderr.writeAll("zigttp workflow-queue: invalid arguments\n\n");
+        try stderr.writeAll("zttp workflow-queue: invalid arguments\n\n");
         try writeHelp(stderr);
         return err;
     };
@@ -71,12 +71,12 @@ pub fn runWith(
     }
 
     const durable_dir = opts.durable_dir orelse {
-        try stderr.writeAll("zigttp workflow-queue: --durable <DIR> is required\n");
+        try stderr.writeAll("zttp workflow-queue: --durable <DIR> is required\n");
         return error.MissingDurableDir;
     };
     if (opts.id) |id| {
         if (!workflow_queue.isValidItemId(id)) {
-            try stderr.writeAll("zigttp workflow-queue: item id must use letters, numbers, '-' or '_'\n");
+            try stderr.writeAll("zttp workflow-queue: item id must use letters, numbers, '-' or '_'\n");
             return error.InvalidWorkflowQueueItemId;
         }
     }
@@ -131,7 +131,7 @@ fn parseCommand(arg: []const u8) ?Command {
 }
 
 fn missingId(stderr: *std.Io.Writer) !void {
-    try stderr.writeAll("zigttp workflow-queue: item id is required\n");
+    try stderr.writeAll("zttp workflow-queue: item id is required\n");
     return error.MissingId;
 }
 
@@ -167,7 +167,7 @@ fn showCommand(
     stderr: *std.Io.Writer,
 ) !void {
     const payload = (try workflow_queue.readDead(allocator, durable_dir, id)) orelse {
-        try stderr.print("zigttp workflow-queue: dead letter not found: {s}\n", .{id});
+        try stderr.print("zttp workflow-queue: dead letter not found: {s}\n", .{id});
         return error.NotFound;
     };
     defer allocator.free(payload);
@@ -197,7 +197,7 @@ fn discardCommand(
 ) !void {
     workflow_queue.discardDead(allocator, durable_dir, id) catch |err| switch (err) {
         error.WorkflowQueueDeadLetterMissing => {
-            try stderr.print("zigttp workflow-queue: dead letter not found: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: dead letter not found: {s}\n", .{id});
             return error.NotFound;
         },
         else => return err,
@@ -208,19 +208,19 @@ fn discardCommand(
 fn writeReplayError(stderr: *std.Io.Writer, id: []const u8, err: anyerror) !void {
     switch (err) {
         error.WorkflowQueueDeadLetterMissing => {
-            try stderr.print("zigttp workflow-queue: dead letter not found: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: dead letter not found: {s}\n", .{id});
         },
         error.WorkflowQueueDeadLetterNotReplayable => {
-            try stderr.print("zigttp workflow-queue: dead letter is not replayable: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: dead letter is not replayable: {s}\n", .{id});
         },
         error.WorkflowQueueResultAlreadyDone => {
-            try stderr.print("zigttp workflow-queue: item already has a done result: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: item already has a done result: {s}\n", .{id});
         },
         error.WorkflowQueueItemAlreadyPending => {
-            try stderr.print("zigttp workflow-queue: item is already pending: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: item is already pending: {s}\n", .{id});
         },
         error.WorkflowQueueItemAlreadyLeased => {
-            try stderr.print("zigttp workflow-queue: item is currently leased: {s}\n", .{id});
+            try stderr.print("zttp workflow-queue: item is currently leased: {s}\n", .{id});
         },
         else => {},
     }
@@ -228,13 +228,13 @@ fn writeReplayError(stderr: *std.Io.Writer, id: []const u8, err: anyerror) !void
 
 fn writeHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
-        \\zigttp workflow-queue - inspect durable workflow queue dead letters
+        \\zttp workflow-queue - inspect durable workflow queue dead letters
         \\
         \\Usage:
-        \\  zigttp workflow-queue list --durable <DIR>
-        \\  zigttp workflow-queue show --durable <DIR> <ID>
-        \\  zigttp workflow-queue replay --durable <DIR> <ID>
-        \\  zigttp workflow-queue discard --durable <DIR> <ID>
+        \\  zttp workflow-queue list --durable <DIR>
+        \\  zttp workflow-queue show --durable <DIR> <ID>
+        \\  zttp workflow-queue replay --durable <DIR> <ID>
+        \\  zttp workflow-queue discard --durable <DIR> <ID>
         \\
     );
 }
@@ -330,7 +330,7 @@ test "workflow-queue cli rejects unsafe ids" {
 
     try std.testing.expectError(
         error.InvalidWorkflowQueueItemId,
-        runWith(allocator, &.{ "show", "--durable", "/tmp/zigttp-durable", "../x" }, &out.writer, &err.writer),
+        runWith(allocator, &.{ "show", "--durable", "/tmp/zttp-durable", "../x" }, &out.writer, &err.writer),
     );
     try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "item id must use") != null);
 }

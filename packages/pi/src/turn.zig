@@ -256,8 +256,8 @@ test "awaiting_model + final_text -> done with render(model_text)" {
 test "awaiting_model + tool_calls -> executing_tools with invoke_tool_batch" {
     var m: TurnMachine = .{ .state = .awaiting_model };
     const calls = [_]ToolCall{
-        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
-        .{ .id = "toolu_2", .name = "zigts_expert_features", .args_json = "{}" },
+        .{ .id = "toolu_1", .name = "zts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_2", .name = "zts_expert_features", .args_json = "{}" },
     };
     const action = m.transition(.{ .model_replied = .{
         .preamble = "I'll inspect the compiler surface first.",
@@ -269,7 +269,7 @@ test "awaiting_model + tool_calls -> executing_tools with invoke_tool_batch" {
         .invoke_tool_batch => |batch| {
             try testing.expectEqual(@as(usize, 2), batch.len);
             try testing.expectEqualStrings("toolu_1", batch[0].id);
-            try testing.expectEqualStrings("zigts_expert_features", batch[1].name);
+            try testing.expectEqualStrings("zts_expert_features", batch[1].name);
         },
         else => return error.TestFailed,
     }

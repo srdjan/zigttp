@@ -43,7 +43,7 @@ Until that first boundary is deterministic, later delivery units cannot rely on 
 
 ### Actors
 
-- A1. Zigttp maintainer: implements and reviews each isolated fix and needs deterministic focused and full gates.
+- A1. Zttp maintainer: implements and reviews each isolated fix and needs deterministic focused and full gates.
 - A2. Expert CLI user: chooses a model for the configured provider and expects invalid choices to fail before a provider request.
 - A3. RPC client: lists and selects models programmatically and expects the same provider constraints and atomic failure behavior as the REPL.
 - A4. Artifact consumer: relies on embedded contracts, attestations, and cached bytecode being complete and internally owned.
@@ -70,7 +70,7 @@ Until that first boundary is deterministic, later delivery units cannot rely on 
 **Provider-aware model selection**
 
 - R9. Every curated model must carry a provider tag, every real backend default must resolve to one matching registry entry, and model IDs must use exact matching.
-- R10. OpenAI's current `gpt-4o-mini` default must be registered with its documented 128,000-token context and 16,384-token output capability while preserving zigttp's existing 8,192-token default request policy.
+- R10. OpenAI's current `gpt-4o-mini` default must be registered with its documented 128,000-token context and 16,384-token output capability while preserving zttp's existing 8,192-token default request policy.
 - R11. Model listing and mutation must be constrained to the active provider, must not switch providers, and must reject unknown or cross-provider models before mutation or network use.
 - R12. Rejected model selection must leave the active model and request token budget unchanged across launch, REPL, and RPC flows.
 - R13. CLI flags, REPL commands, RPC methods, and session state must derive model validity from one shared registry and active-provider contract.
@@ -166,7 +166,7 @@ Until that first boundary is deterministic, later delivery units cannot rely on 
 - `STRATEGY.md` for proof-engine and expert-agent product authority.
 - `plans/018-fail-closed-on-analysis-allocation-errors.md` for proof-relevant allocation classification and deterministic failure-injection precedent.
 - `plans/007-add-verify-gate.md` and `plans/README.md` for the sequential-gate and deferred pattern-dispatch, serialization, and provider findings.
-- `packages/zigts/src/contract_types.zig` for the canonical monotonic-property reflection pattern.
+- `packages/zts/src/contract_types.zig` for the canonical monotonic-property reflection pattern.
 - [OpenAI GPT-4o mini model documentation](https://developers.openai.com/api/docs/models/gpt-4o-mini) for current endpoint, context, output-capability, alias, and snapshot metadata.
 - [OpenAI API deprecations](https://developers.openai.com/api/docs/deprecations) for the exact-ID lifecycle check.
 - [OpenAI Responses migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) for the current API recommendation and confirmation that no endpoint migration belongs in this plan.
@@ -322,7 +322,7 @@ U7 depends on U6; no other unit depends on the provider work.
 - **Requirements:** R3, R4; F2; AE2, AE3; KTD2, KTD3.
 - **Dependencies:** U1.
 - **Files:**
-  - `packages/zigts/src/contract_diff.zig`
+  - `packages/zts/src/contract_diff.zig`
   - `packages/tools/src/upgrade_verifier.zig`
 - **Approach:** Keep `contract_diff.zig` policy-neutral while exhaustively enumerating canonical monotonic boolean fields when both contracts contain properties; keep severity and final verdict exclusively in `upgrade_verifier.zig`.
 - **Execution note:** Start with integration tests that currently demonstrate unreachable critical and warning rules, then add the exhaustive drift guard.
@@ -344,7 +344,7 @@ U7 depends on U6; no other unit depends on the provider work.
 - **Requirements:** R5, R6; F3; AE4; KTD4.
 - **Dependencies:** U1.
 - **Files:**
-  - `packages/zigts/src/path_generator.zig`
+  - `packages/zts/src/path_generator.zig`
   - `packages/tools/src/precompile.zig`
 - **Approach:** Convert binding scans and module-call tracking to error-returning helpers, propagate binding-map and I/O-sequence failures, and install cleanup before exposing those errors. Preserve null argument signatures as a conservative no-rewrite fallback; extract a private path-analysis stage with an explicit allocator so precompile propagation can fail deterministically after earlier stages succeed.
 - **Execution note:** Use targeted allocation failure rather than a brittle global allocation ordinal; verify the new tests are collected by the intended roots.
@@ -384,7 +384,7 @@ U7 depends on U6; no other unit depends on the provider work.
 - **Requirements:** R8; AE6; KTD6.
 - **Dependencies:** U1.
 - **Files:**
-  - `packages/zigts/src/bytecode_cache.zig`
+  - `packages/zts/src/bytecode_cache.zig`
   - `packages/runtime/src/zruntime.zig`
 - **Approach:** Track the current partial pattern and initialized count, clean the exact map and dispatch allocation too, and destroy the complete table wrapper after `PatternDispatchTable.deinit` until ownership nests under the function.
 - **Execution note:** Keep wrapper-level fixtures free of constants so unrelated nested-constant ownership remains outside this unit.
@@ -398,7 +398,7 @@ U7 depends on U6; no other unit depends on the provider work.
   6. Shape failure after function ownership frees the function and attached dispatch.
   7. Successful `DeserializedBytecode.deinit` frees an attached dispatch table.
   8. Successful runtime ownership transfer continues to free the dispatch only through runtime object teardown.
-- **Verification:** `zig build test-zigts test-zruntime` passes under leak detection across decode, standalone cleanup, and runtime transfer with no cache-format change.
+- **Verification:** `zig build test-zts test-zruntime` passes under leak detection across decode, standalone cleanup, and runtime transfer with no cache-format change.
 
 ### U6. Provider Registry and Session Invariant
 
@@ -462,10 +462,10 @@ U7 depends on U6; no other unit depends on the provider work.
 |---|---|---|
 | Formatting | `zig fmt --check build.zig packages/` | All touched Zig files and the build graph are format-clean. |
 | Darwin gate | `zig build test -j1` | The aggregate completes repeatedly on macOS without the teardown trap. |
-| Upgrade and diff | `zig build test-zigts test-rollout` | Exhaustive property diff and integrated upgrade verdict scenarios pass. |
-| Path generation | `zig build test-zigts test-precompile` | Allocation failures propagate and no partial contract is emitted. |
+| Upgrade and diff | `zig build test-zts test-rollout` | Exhaustive property diff and integrated upgrade verdict scenarios pass. |
+| Path generation | `zig build test-zts test-precompile` | Allocation failures propagate and no partial contract is emitted. |
 | Artifact build | `zig build test-cli && zig build smoke-v1` | Serializer failure ordering and normal artifact creation both pass. |
-| Bytecode ownership | `zig build test-zigts test-zruntime` | Decode, standalone, and runtime-transfer ownership transitions are leak-free. |
+| Bytecode ownership | `zig build test-zts test-zruntime` | Decode, standalone, and runtime-transfer ownership transitions are leak-free. |
 | Provider core and parity | `zig build test-expert-app test-cli` | Registry/session invariants and CLI/REPL/RPC parity pass. |
 | Documentation | `zig build test-docs-drift test-doc-links` | Maintained docs match the provider registry and all links resolve. |
 | Examples and release surface | `bash scripts/test-examples.sh && zig build -Doptimize=ReleaseFast` | Examples and release binaries remain compatible. |
@@ -485,7 +485,7 @@ Allocation tests must demonstrate both the expected error and leak-free cleanup,
 - Path generation and contract serialization cannot expose partial proof or artifact data after allocation or writer failure.
 - Pattern-dispatch ownership is leak-free and single-owner across partial decode, completed decode, wrapper failure, standalone deinit, and runtime transfer.
 - Anthropic and OpenAI model selection is provider-filtered, exact, atomic on failure, and behaviorally consistent across CLI, REPL, and RPC.
-- OpenAI's documented capability metadata and zigttp's request policy remain distinct, and the default request budget does not change accidentally.
+- OpenAI's documented capability metadata and zttp's request policy remain distinct, and the default request budget does not change accidentally.
 - Maintained docs and a new Unreleased changelog entry match shipped provider behavior; historical release notes remain intact and the forward-looking Pi deferral is removed.
 - Focused tests, documentation gates, release build, examples, and the deterministic full repository gate pass on the pinned toolchain.
 - Abandoned approaches, temporary canaries, debug output, generated artifacts, compatibility scaffolding, and unrelated cleanup are absent from the final diff.

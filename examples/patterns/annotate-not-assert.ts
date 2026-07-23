@@ -1,13 +1,13 @@
 // Annotate the declaration instead of asserting with `as` or `satisfies`,
 // and declare the type alias first instead of deriving it with `typeof`.
 //
-// zigts rejects both `as` and `satisfies`. The conformance check moves onto
+// zts rejects both `as` and `satisfies`. The conformance check moves onto
 // the binding: `const config: Config = {...}` checks the literal against
 // `Config` and keeps its narrow type, which is what `satisfies` was for. The
 // reverse direction (`type Config = typeof config`) is unsupported, so the
 // alias is the single source of truth and the value is checked against it.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Config = { port: number; host: string; readonly version: string };
 

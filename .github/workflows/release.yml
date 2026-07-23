@@ -34,7 +34,7 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(awk -F'"' '/^[[:space:]]*\.version =/ { print $2; exit }' build.zig.zon)"
-          BINARY_VERSION="$(awk -F'"' '/^[[:space:]]*pub const string = "/ { print $2; exit }' packages/zigts/src/root.zig)"
+          BINARY_VERSION="$(awk -F'"' '/^[[:space:]]*pub const string = "/ { print $2; exit }' packages/zts/src/root.zig)"
           if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
             echo "::error::release tag v${TAG_VERSION} does not match build.zig.zon version ${PACKAGE_VERSION}"
             exit 1
@@ -95,7 +95,7 @@ jobs:
         if: ${{ vars.PROOF_LEDGER_PATH != '' }}
         run: |
           test -f "$PROOF_LEDGER_PATH"
-          ./zig-out/bin/zigttp ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
+          ./zig-out/bin/zttp ledger replay --input "$PROOF_LEDGER_PATH" --onto "$PROOF_LEDGER_ONTO"
 
       - name: Run example handler tests
         run: bash scripts/test-examples.sh
@@ -107,16 +107,16 @@ jobs:
         run: |
           if [ ! -f policy-hash.txt ]; then
             echo "::error::policy-hash.txt is missing - the policy hash baseline must be committed"
-            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
             exit 1
           fi
           EXPECTED=$(cat policy-hash.txt)
-          ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
+          ACTUAL=$(./zig-out/bin/zts describe-rule --hash)
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
             echo "Expected: $EXPECTED"
             echo "Actual:   $ACTUAL"
-            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
             exit 1
           fi
 
@@ -125,12 +125,12 @@ jobs:
 
       - name: Verify expert subsystem
         run: |
-          META=$(./zig-out/bin/zigts meta --json)
+          META=$(./zig-out/bin/zts meta --json)
           echo "$META" | jq -e '.rule_count >= 25'
           echo "$META" | jq -e '.policy_hash | length == 64'
 
       - name: Run release doctor
-        run: ./zig-out/bin/zigttp doctor --release --json
+        run: ./zig-out/bin/zttp doctor --release --json
 
   build:
     needs: test
@@ -165,11 +165,11 @@ jobs:
       - name: Package tarball
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          DIR="zigttp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          DIR="zttp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
           mkdir -p "${DIR}"
-          cp zig-out/bin/zigttp "${DIR}/"
-          cp zig-out/bin/zigttp-runtime "${DIR}/"
-          cp zig-out/bin/zigts "${DIR}/"
+          cp zig-out/bin/zttp "${DIR}/"
+          cp zig-out/bin/zttp-runtime "${DIR}/"
+          cp zig-out/bin/zts "${DIR}/"
           cp LICENSE README.md CHANGELOG.md "${DIR}/"
           cat > "${DIR}/VERSION" <<EOF
           version=${VERSION}
@@ -178,9 +178,9 @@ jobs:
           arch=${{ matrix.arch }}
           EOF
           tar czf "${DIR}.tar.gz" "${DIR}"
-          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigttp"
-          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigttp-runtime"
-          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zigts"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zttp"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zttp-runtime"
+          tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/zts"
           tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/LICENSE"
           tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/README.md"
           tar tzf "${DIR}.tar.gz" | grep -qx "${DIR}/CHANGELOG.md"
@@ -190,10 +190,10 @@ jobs:
       # actions/upload-artifact@v4
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: zigttp-${{ matrix.os }}-${{ matrix.arch }}
+          name: zttp-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            zigttp-*.tar.gz
-            zigttp-*.tar.gz.sha256
+            zttp-*.tar.gz
+            zttp-*.tar.gz.sha256
 
   smoke-linux:
     needs: build
@@ -202,15 +202,15 @@ jobs:
       # actions/download-artifact@v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: zigttp-linux-x86_64
+          name: zttp-linux-x86_64
 
       - name: Smoke-test the cross-compiled linux x86_64 binary
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          DIR="zigttp-${VERSION}-linux-x86_64"
+          DIR="zttp-${VERSION}-linux-x86_64"
           tar xzf "${DIR}.tar.gz"
-          BIN="${DIR}/zigttp"
-          chmod +x "${BIN}" "${DIR}/zigts" "${DIR}/zigttp-runtime"
+          BIN="${DIR}/zttp"
+          chmod +x "${BIN}" "${DIR}/zts" "${DIR}/zttp-runtime"
 
           # version: proves the cross-compiled binary loads and runs natively
           VERSION_OUT="$("${BIN}" version)"
@@ -272,6 +272,6 @@ jobs:
             - [CLI Reference](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/cli.md)
             - [Examples](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/examples/README.md)
           files: |
-            zigttp-*.tar.gz
-            zigttp-*.tar.gz.sha256
+            zttp-*.tar.gz
+            zttp-*.tar.gz.sha256
             checksums-sha256.txt

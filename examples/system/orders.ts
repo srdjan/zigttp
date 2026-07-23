@@ -1,6 +1,6 @@
 // Orders service handler
-import { cacheGet } from "zigttp:cache";
-import { routerMatch } from "zigttp:router";
+import { cacheGet } from "zttp:cache";
+import { routerMatch } from "zttp:router";
 
 function getOrderById(req: Request): Response {
   const cached = cacheGet("orders", req.params.id);

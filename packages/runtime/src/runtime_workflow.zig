@@ -1,7 +1,7 @@
 //! Workflow / saga / fan-out / follow native callbacks extracted from
 //! zruntime.zig (review finding M1).
 //!
-//! These implement the runtime side of `zigttp:workflow` (call, saga, fanout,
+//! These implement the runtime side of `zttp:workflow` (call, saga, fanout,
 //! follow). They orchestrate co-located sub-handlers through the in-process
 //! `SystemRuntime` registry and copy borrowed sub-handler responses into
 //! orchestrator-owned JS values. They depend on the ambient `current_runtime`
@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const ascii = std.ascii;
-const zq = @import("zigts");
+const zq = @import("zts");
 const zruntime = @import("zruntime.zig");
 const natives = @import("runtime_natives.zig");
 const http_parser = @import("http_parser.zig");
@@ -52,7 +52,7 @@ const WORKFLOW_QUEUE_RETRY_DELAY_MS: i64 = 1_000;
 /// not delay them meaningfully.
 const WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS: i64 = 1_000;
 
-/// Runtime side of `zigttp:workflow.call(name, init)`. Builds an
+/// Runtime side of `zttp:workflow.call(name, init)`. Builds an
 /// `HttpRequestView` from the `init` object, dispatches it to a co-located
 /// sub-handler in-process via the `SystemRuntime` registry (a separate pooled
 /// runtime, own GC/arena, setjmp panic isolation), then copies the borrowed
@@ -449,7 +449,7 @@ fn parseFollowHref(arena: std.mem.Allocator, href: []const u8) !FollowHref {
     };
 }
 
-/// Runtime side of `zigttp:workflow.follow(resource, rel, init?)`. Resolves the
+/// Runtime side of `zttp:workflow.follow(resource, rel, init?)`. Resolves the
 /// affordance `rel` on a structured `resource()` to `{href, method}`, routes the
 /// href to a co-located handler by the "/<name>" mount convention, and
 /// dispatches in-process - HATEOAS link-following without the orchestrator
@@ -684,7 +684,7 @@ fn responseFromPartsObject(rt: *Runtime, parts: zq.JSValue) !zq.JSValue {
     return created.value;
 }
 
-/// Runtime side of zigttp:workflow.saga(steps). Each step's `run` runs as a
+/// Runtime side of zttp:workflow.saga(steps). Each step's `run` runs as a
 /// durable step "do:<name>"; on a step failure (its Response status >= 400) the
 /// completed steps are compensated in REVERSE via "undo:<name>" durable steps.
 /// The compensation order is an emergent property of deterministic replay: on
@@ -720,7 +720,7 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
     // sub-runtime dispatch) can drive THIS context's GC and move JS objects. So
     // every JSValue held across a step is a tracked GC root, read back through
     // gc_state.getRoot so the address is always current - never a cached raw
-    // pointer. Mirrors zigttp:scope's resource-handle pattern. removeRootAt on
+    // pointer. Mirrors zttp:scope's resource-handle pattern. removeRootAt on
     // every exit path keeps the root set from growing.
     const steps_root = try ctx.gc_state.addRootTracked(steps_val);
     defer ctx.gc_state.removeRootAt(steps_root);
@@ -878,8 +878,8 @@ test "workflow.saga first-step failure keeps v0.18 compensation body" {
     const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:first-fails", () => saga([
         \\    { name: "charge", run: () => Response.json({ failed: true }, { status: 402 }) },
@@ -902,8 +902,8 @@ test "workflow.saga missing compensator is not reported as skipped" {
     const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  const completed = [{ name: "observe", run: () => Response.json({ ok: true }) }];
         \\  return run("saga:no-compensator", () => saga([
@@ -930,8 +930,8 @@ test "workflow.saga does not report clean compensation when compensator is non-c
     const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:non-callable", () => saga([
         \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: 42 },
@@ -957,8 +957,8 @@ test "workflow.saga reports a declared undefined compensator as skipped" {
     const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:undefined", () => saga([
         \\    { name: "observe", run: () => Response.json({ ok: true }), compensate: undefined },
@@ -984,8 +984,8 @@ test "workflow.saga still reports successful compensation when compensator runs"
     const durable_len = try tmp.dir.realPath(std.testing.io, &durable_buf);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:callable", () => saga([
         \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: () => Response.json({ undone: true }) },
@@ -1004,11 +1004,11 @@ test "workflow.saga still reports successful compensation when compensator runs"
 /// Bounds the size of a `fanout()` call array. `dispatchAllToPartsArray` below
 /// dispatches these sequentially (no concurrent OS threads), so this measures
 /// array size, not concurrency load - it is not required to match
-/// `zigttp:io`'s `MAX_PARALLEL` (io.zig), which bounds actual concurrent
+/// `zttp:io`'s `MAX_PARALLEL` (io.zig), which bounds actual concurrent
 /// fetches for `parallel()`/`race()`.
 const MAX_PARALLEL_CALLS: u32 = 16;
 
-/// Runtime side of zigttp:workflow.fanout(calls). Dispatches N co-located
+/// Runtime side of zttp:workflow.fanout(calls). Dispatches N co-located
 /// sub-handlers and returns their Responses as an array in DECLARATION ORDER.
 /// Inside a durable.run the whole fan-out is recorded as ONE durable step, so on
 /// recovery the aggregate replays from a single oplog entry - concurrency (if

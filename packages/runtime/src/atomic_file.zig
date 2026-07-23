@@ -5,7 +5,7 @@
 //! the atomic-write sequence previously had to be found and applied twice.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 
 const Allocator = std.mem.Allocator;
 const writeAllChecked = zq.trace.writeAllChecked;

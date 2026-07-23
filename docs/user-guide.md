@@ -1,6 +1,6 @@
 # User Guide
 
-zigttp runs JavaScript, TypeScript, and TSX HTTP handlers from a single Zig
+zttp runs JavaScript, TypeScript, and TSX HTTP handlers from a single Zig
 binary. The language surface is intentionally restricted so the compiler can
 prove handler properties before and during local development.
 
@@ -10,47 +10,47 @@ Install a release build:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
-zigttp --help
+zttp --help
 ```
 
 Build from source with Zig `0.16.0`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git
-cd zigttp
+cd zttp
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zigttp --help
+./zig-out/bin/zttp --help
 ```
 
 ## First Project
 
 ```bash
-zigttp init my-app
+zttp init my-app
 cd my-app
-zigttp dev
+zttp dev
 ```
 
-The scaffold writes `zigttp.json`, `src/handler.ts` or `src/handler.tsx`, and
-starter tests. `zigttp dev` reads the project config, starts the local server,
+The scaffold writes `zttp.json`, `src/handler.ts` or `src/handler.tsx`, and
+starter tests. `zttp dev` reads the project config, starts the local server,
 watches the handler, and prints a proof card on every save.
 
 Run tests and build a local deploy artifact:
 
 ```bash
-zigttp test
-zigttp deploy
-./.zigttp/deploy/my-app
+zttp test
+zttp deploy
+./.zttp/deploy/my-app
 ```
 
 `deploy` verifies the handler, emits a self-contained binary, writes
-`.zigttp/proofs.jsonl`, and signs a proof receipt unless `--no-attest` is
+`.zttp/proofs.jsonl`, and signs a proof receipt unless `--no-attest` is
 passed.
 
 For a one-file experiment:
 
 ```bash
-zigttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
-zigttp serve examples/handler/handler.ts -p 3000
+zttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
+zttp serve examples/handler/handler.ts -p 3000
 ```
 
 ## Handler Shape
@@ -103,10 +103,10 @@ function handler(req: Request): Response {
 }
 ```
 
-Use `zigttp:router` when you need path parameters:
+Use `zttp:router` when you need path parameters:
 
 ```ts
-import { routerMatch } from "zigttp:router";
+import { routerMatch } from "zttp:router";
 
 function handler(req: Request): Response {
     const routes = { "GET /users/:id": true };
@@ -123,11 +123,11 @@ For multi-handler routing behind one listener, see [Edge Runtime](edge.md).
 ## JSON And Validation
 
 Use normal `JSON.parse` and `Response.json` for basic JSON. Use
-`zigttp:validate` or `zigttp:decode` when the handler needs schema-backed
+`zttp:validate` or `zttp:decode` when the handler needs schema-backed
 validation.
 
 ```ts
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("todo", '{"type":"object","required":["title"]}');
 
@@ -146,7 +146,7 @@ patterns.
 
 ## JavaScript And TypeScript
 
-zigts supports a practical server-side JS/TS subset and rejects constructs that
+zts supports a practical server-side JS/TS subset and rejects constructs that
 weaken analysis. Commonly rejected constructs include `var`, `while`, `class`,
 `try/catch`, implicit globals, and unsupported module forms.
 
@@ -156,12 +156,12 @@ Use:
 - `for...of` loops.
 - `if`/`else` and `match` for branching.
 - Explicit Result and optional checks.
-- Type-only imports from `zigttp:types` for proof annotations.
+- Type-only imports from `zttp:types` for proof annotations.
 
 ### Author-Declared Specs
 
 ```ts
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Safe = Spec<"deterministic" | "state_isolated">;
 
@@ -199,9 +199,9 @@ function handler(req: Request): Response {
 Use the `htmx` template for an HTML-first scaffold:
 
 ```bash
-zigttp init htmx-app --template htmx
+zttp init htmx-app --template htmx
 cd htmx-app
-zigttp dev
+zttp dev
 ```
 
 See `examples/jsx/` and `examples/handler/handler-full.tsx`.
@@ -241,7 +241,7 @@ The rendering follows from the affordance shape:
 | `text/html` without `HX-Request` | The same fragment wrapped in a full page that loads htmx. |
 
 ```bash
-zigttp serve examples/hypermedia/order.ts -p 3000
+zttp serve examples/hypermedia/order.ts -p 3000
 curl -H 'Accept: application/hal+json' http://127.0.0.1:3000/orders/42
 curl -H 'Accept: text/html' -H 'HX-Request: true' http://127.0.0.1:3000/orders/42
 ```
@@ -252,7 +252,7 @@ state), open [hypermedia-explainer.html](hypermedia-explainer.html) in a browser
 
 ## Workflow Orchestration
 
-`zigttp:workflow` dispatches from a top-level orchestrator to co-located
+`zttp:workflow` dispatches from a top-level orchestrator to co-located
 handlers loaded from `--system <file>`. The system manifest is strict for
 workflow use: every local handler `path` must be readable at startup, and
 relative paths use the same rule as the proof tools: a path that exists from the
@@ -260,7 +260,7 @@ current working directory is used as-is, otherwise it is resolved from the
 manifest directory.
 
 ```ts
-import { call, fanout, follow, saga } from "zigttp:workflow";
+import { call, fanout, follow, saga } from "zttp:workflow";
 ```
 
 `call(name, init?)` dispatches by handler name. `follow(resource, rel, init?)`
@@ -268,7 +268,7 @@ resolves a `resource()` affordance by relation and dispatches by the proven
 bundle route. `fanout(calls)` aggregates multiple co-located calls in declaration
 order. `saga(steps)` runs durable do/compensate steps.
 
-Inside `run()` from `zigttp:durable`, workflow dispatches snapshot plain
+Inside `run()` from `zttp:durable`, workflow dispatches snapshot plain
 `{status, headers, body}` records into the oplog and rebuild real `Response`
 objects during replay, so completed child calls are not re-dispatched. Existing
 oplogs use the internal `workflow.parallel#N` key for `fanout()` records for
@@ -296,12 +296,12 @@ artifacts you already inspect. See [Durable Workflows](durable-workflows.md) and
 
 ## Actor Queues
 
-`zigttp:queue` provides opt-in in-process actor mailboxes for handlers that need
+`zttp:queue` provides opt-in in-process actor mailboxes for handlers that need
 to exchange work without sharing JS runtime state. Enable the server-owned
 in-memory queue with `--actor-queue`.
 
 ```ts
-import { send, request, receive, ack, nack, reply } from "zigttp:queue";
+import { send, request, receive, ack, nack, reply } from "zttp:queue";
 
 function handler(req) {
   const sent = send("worker", { kind: "resize", image: "hero.jpg" });
@@ -335,7 +335,7 @@ queue, not the JS heap. It does not survive process restart; use
 ## Virtual Modules
 
 Virtual modules are native Zig APIs exposed through `import { ... } from
-"zigttp:*"`. The current module list and runtime requirements are in
+"zttp:*"`. The current module list and runtime requirements are in
 [Virtual Modules](virtual-modules/README.md).
 
 Common runtime flags:
@@ -352,7 +352,7 @@ Common runtime flags:
 
 ## Compile-Time Proofs
 
-`zigttp dev`, `zigttp test`, `zigttp check`, and build-time precompile paths run
+`zttp dev`, `zttp test`, `zttp check`, and build-time precompile paths run
 the analyzer. It checks:
 
 - every path returns a `Response`;
@@ -374,53 +374,53 @@ Declarative tests are JSONL files. A scaffolded project writes a starter file
 under `tests/`.
 
 ```bash
-zigttp test
-zigttp serve --test tests/handler.test.jsonl src/handler.ts
+zttp test
+zttp serve --test tests/handler.test.jsonl src/handler.ts
 zig build -Dhandler=src/handler.ts -Dtest-file=tests/handler.test.jsonl
 ```
 
 Record and replay handler I/O:
 
 ```bash
-zigttp serve --trace traces.jsonl src/handler.ts
-zigttp serve --replay traces.jsonl src/handler.ts
+zttp serve --trace traces.jsonl src/handler.ts
+zttp serve --replay traces.jsonl src/handler.ts
 zig build -Dhandler=src/handler.ts -Dreplay=traces.jsonl
 ```
 
 Persisted counterexamples live in the witness corpus and can be inspected with
-`zigttp witnesses`. See [Witnesses](witnesses.md).
+`zttp witnesses`. See [Witnesses](witnesses.md).
 
 ## Deploy And Verify
 
 ```bash
-zigttp deploy
-./.zigttp/deploy/my-app -p 8080
-zigttp verify http://127.0.0.1:8080
+zttp deploy
+./.zttp/deploy/my-app -p 8080
+zttp verify http://127.0.0.1:8080
 ```
 
-The running server emits `Zigttp-Proofs` and `Zigttp-Attest` headers and serves
-`/.well-known/zigttp-attest`. `zigttp verify <url>` validates the signed
-attestation from another machine. Use `zigttp proofs` to inspect local ledger
-entries and `zigttp proofs gate` for pull-request checks.
+The running server emits `Zttp-Proofs` and `Zttp-Attest` headers and serves
+`/.well-known/zttp-attest`. `zttp verify <url>` validates the signed
+attestation from another machine. Use `zttp proofs` to inspect local ledger
+entries and `zttp proofs gate` for pull-request checks.
 
 ## Expert Mode
 
-`zigttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
+`zttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
 routes every one through the same compiler checks before they land. The
 Anthropic backend is the measured, supported path. The shipped OpenAI Responses
 API backend is experimental and unmeasured; its `gpt-4o-mini` default is not
 covered by the codegen quality ratchet.
 
 ```bash
-zigttp auth claude
-zigttp auth openai                              # experimental provider
-zigttp expert
-zigttp expert --yes                                # apply edits without prompting
-zigttp expert --no-edit                            # read-only analysis, no writes
-zigttp expert --resume                             # continue last session
-zigttp expert --model claude-sonnet-4-6            # user-selected override
-zigttp expert --print "add a GET /health route"
-zigttp expert --handler src/handler.ts --goal no_secret_leakage
+zttp auth claude
+zttp auth openai                              # experimental provider
+zttp expert
+zttp expert --yes                                # apply edits without prompting
+zttp expert --no-edit                            # read-only analysis, no writes
+zttp expert --resume                             # continue last session
+zttp expert --model claude-sonnet-4-6            # user-selected override
+zttp expert --print "add a GET /health route"
+zttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
 Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI. If both
@@ -442,7 +442,7 @@ veto was not satisfied within the attempt budget, `3` a turn budget was
 exhausted (round-trips, tool calls, or the wall-clock limit), `4` an edit was
 verified but the approval prompt rejected it.
 
-Keys are stored in `~/.zigttp/providers.json` with mode `0600`. A shell-set
+Keys are stored in `~/.zttp/providers.json` with mode `0600`. A shell-set
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.
 
 When your request is ambiguous - the right edit depends on a choice you have not
@@ -456,11 +456,11 @@ discharges.
 
 **The server says no handler was provided.**
 
-Run inside a project with `zigttp.json`, pass a handler path, or use `-e`:
+Run inside a project with `zttp.json`, pass a handler path, or use `-e`:
 
 ```bash
-zigttp serve src/handler.ts
-zigttp serve -e "function handler(req) { return Response.text('ok') }"
+zttp serve src/handler.ts
+zttp serve -e "function handler(req) { return Response.text('ok') }"
 ```
 
 **An env var check fails at startup.**
@@ -479,7 +479,7 @@ if (!token) return Response.text("Unauthorized", { status: 401 });
 
 **A language feature is rejected.**
 
-Run `zigttp restrictions` or see [Restrictions to Proofs](restrictions-to-proofs.md)
+Run `zttp restrictions` or see [Restrictions to Proofs](restrictions-to-proofs.md)
 for the reason and supported replacement.
 
 **A request returns 500.**
@@ -495,6 +495,6 @@ See [Reliability](reliability.md#proof-explained-500s).
 Choose another port:
 
 ```bash
-zigttp dev -p 3001
-zigttp serve -p 8081 src/handler.ts
+zttp dev -p 3001
+zttp serve -p 8081 src/handler.ts
 ```

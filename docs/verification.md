@@ -1,6 +1,6 @@
 # Compile-Time Handler Verification
 
-zigttp can statically prove your handler function is correct at compile time. Enabled via `-Dverify` at build time, zero cost when disabled.
+zttp can statically prove your handler function is correct at compile time. Enabled via `-Dverify` at build time, zero cost when disabled.
 
 ## Usage
 
@@ -16,7 +16,7 @@ Verification runs after parsing and before bytecode generation. If any error-sev
 
 ## Why This Works
 
-zigttp's JavaScript subset bans most sources of non-trivial control flow:
+zttp's JavaScript subset bans most sources of non-trivial control flow:
 
 - No `while`/`do-while` (no back-edges)
 - No `try`/`catch` (no exceptional paths)
@@ -58,7 +58,7 @@ Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, 
 The verifier tracks result bindings through the control flow tree:
 
 ```javascript
-import { jwtVerify } from "zigttp:auth";
+import { jwtVerify } from "zttp:auth";
 
 function handler(req) {
     const token = req.headers.authorization;
@@ -140,7 +140,7 @@ Four virtual module functions return optional values (`T | undefined`):
 The verifier tracks these optional bindings and requires them to be narrowed before use. Using an optional value as a function argument, object property value, template literal expression, or in arithmetic/string concatenation without first checking for `undefined` is an error.
 
 ```javascript
-import { env } from "zigttp:env";
+import { env } from "zttp:env";
 
 function handler(req) {
     const appName = env("APP_NAME");
@@ -192,7 +192,7 @@ function handler(req: Request): Response {
 }
 ```
 
-Fix: use `const` for module-level declarations, or move mutable state to `zigttp:cache`.
+Fix: use `const` for module-level declarations, or move mutable state to `zttp:cache`.
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
 
@@ -207,7 +207,7 @@ and runs after the analyzer pipeline so it has access to the full property
 set plus the imported module list.
 
 ```typescript
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"idempotent" | "deterministic">;
 
@@ -230,7 +230,7 @@ Three diagnostic codes:
   `.slice(0, k)`, SQL `LIMIT n`, or schema `maxItems`.
 - **ZTS501 - spec_incompatible_with_import**: the spec contradicts an
   imported module. v1 fires for `Spec<"read_only">` against
-  `zigttp:cache` or `zigttp:sql`. ZTS500 is suppressed for the same
+  `zttp:cache` or `zttp:sql`. ZTS500 is suppressed for the same
   name so the agent does not enter repair against a contradiction.
 - **ZTS502 - spec_unknown_name**: the declared name is not in the v1
   set.
@@ -241,7 +241,7 @@ ZTS5xx code, source line, and snippet), the proof ledger
 (`declaredSpecs: [{name, discharged, diagnosticCode?,
 diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` per
 swap event; the diagnostic fields appear only on failed specs),
-`zigts check --json` (`declared_specs` as the effective active set and
+`zts check --json` (`declared_specs` as the effective active set and
 `spec_diagnostics` arrays), and the `pi_specs_status` agent tool. See
 [user-guide.md](user-guide.md#author-declared-specs) for the author-side
 view.
@@ -258,15 +258,15 @@ demands while carrying no capsule for it gets **ZTS606 -
 missing_capsule**: the proof cannot compose across that call boundary.
 `computeProperties` intersects the handler's classified properties with
 its call-graph-composed effect row, so a property the handler claims
-also accounts for every helper it transitively calls. `zigts check
+also accounts for every helper it transitively calls. `zts check
 --json` adds a `proofCapsules` array; see
-[zigts-expert-contract.md](internals/zigts-expert-contract.md).
+[zts-expert-contract.md](internals/zts-expert-contract.md).
 
 Counterexample-rich specs additionally feed a persistent on-disk
 corpus. Each falsifying input the analyzer materialises is written
-under `.zigttp/witnesses/<short_hash>/` so the same logical leak does
+under `.zttp/witnesses/<short_hash>/` so the same logical leak does
 not need to be rediscovered next session. See [witnesses.md](witnesses.md)
-for layout, CLI (`zigttp witnesses`), and agent tool (`pi_witnesses`).
+for layout, CLI (`zttp witnesses`), and agent tool (`pi_witnesses`).
 
 ### 10. Capability Capsules
 
@@ -286,13 +286,13 @@ bounds every reachable helper. A capability the handler reaches directly
 outside the budget is **ZTS506**; one a reachable helper introduces is
 **ZTS607**, attributed to that helper by `contract_builder.zig`.
 The declared budget is recorded in `contract.json` under
-`sandbox.declaredBudget`. `zigts check --json` adds an `effectCapsules`
+`sandbox.declaredBudget`. `zts check --json` adds an `effectCapsules`
 array alongside `proofCapsules`.
 
 `Effects<...>` is opt-in - a function with no annotation gets no check.
 The budget and every ceiling are discharged only against inferred facts
 from real function bodies, never an assumed claim. The opt-in
-`zigts check --require-export-capsules` docs mode additionally warns
+`zts check --require-export-capsules` docs mode additionally warns
 (**ZTS507** / **ZTS508**) when an exported helper carries no capsule.
 
 ### Runtime Optimizations from Verification
@@ -300,7 +300,7 @@ from real function bodies, never an assumed claim. The opt-in
 Verified properties also control runtime behavior:
 
 - **Route pre-filtering**: proven routes reject non-matching requests at the HTTP layer before entering JS (`contract_runtime.zig`).
-- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), and its contract shows it reads no request headers or body, GET/HEAD responses are cached in memory and served without JS execution. The header/body condition is required because the cache key is method+URL only: a handler whose response varies on a request header (auth, content negotiation) is excluded so one caller's response is never replayed to another. Cached responses include an `X-Zigttp-Proof-Cache: hit` header (`proof_adapter.zig`).
+- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), and its contract shows it reads no request headers or body, GET/HEAD responses are cached in memory and served without JS execution. The header/body condition is required because the cache key is method+URL only: a handler whose response varies on a request header (auth, content negotiation) is excluded so one caller's response is never replayed to another. Cached responses include an `X-Zttp-Proof-Cache: hit` header (`proof_adapter.zig`).
 
 Both rely on the same property that makes verification tractable: the IR tree is the control flow graph, with no back-edges and no exceptions.
 
@@ -310,13 +310,13 @@ The `-Dgenerate-tests=true` build option enables compile-time exhaustive path en
 
 ### Path Generator
 
-The `PathGenerator` (`packages/zigts/src/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
+The `PathGenerator` (`packages/zts/src/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
 
 For Result-producing calls (`jwtVerify`, `validateJson`, `decodeJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
 
 ### Fault Coverage Analysis
 
-The `FaultCoverageChecker` (`packages/zigts/src/fault_coverage.zig`) analyzes the generated paths against `FailureSeverity` annotations on each virtual module function:
+The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the generated paths against `FailureSeverity` annotations on each virtual module function:
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
@@ -328,7 +328,7 @@ The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning 
 Results appear in:
 - `contract.json` under the `faultCoverage` section
 - `HandlerProperties.fault_covered` flag
-- Deployment manifest tags (`zigttp:faultCovered`)
+- Deployment manifest tags (`zttp:faultCovered`)
 - Build report alongside other PROVEN/--- labels
 
 ### Cost Envelope (Multiplicity)
@@ -337,7 +337,7 @@ The banned back-edge constructs (`while`, `do...while`, `for(;;)`, recursion)
 buy more than termination: they make the worst-path resource cost of a handler
 statically computable. `PathGenerator.buildCostEnvelope` folds the multiplicity
 of every module call along the enumerated paths into a per-module `CostEnvelope`
-(`packages/zigts/src/contract_types.zig`). Each bound is a symbolic `Bound`:
+(`packages/zts/src/contract_types.zig`). Each bound is a symbolic `Bound`:
 
 - `constant` - exactly `n` calls on the worst path.
 - `linear` - `base + coefficient * |source|` calls, where `|source|` is the
@@ -349,7 +349,7 @@ of every module call along the enumerated paths into a per-module `CostEnvelope`
   collections on one path), carrying the offending loop's location.
 
 The envelope is written to `contract.json` under `costEnvelope`, covered by the
-`Zigttp-Attest` JWS signature, and composed across `serviceCall` chains by the
+`Zttp-Attest` JWS signature, and composed across `serviceCall` chains by the
 system linker (a handler with no envelope composes as `unbounded`, failing
 closed). `HandlerProperties.max_io_depth` is kept but made honest: it is set
 only when the total bound is constant, else `null`.
@@ -357,7 +357,7 @@ only when the total bound is constant, else `null`.
 A `linear` or `unbounded` bound is dischargeable to `constant` by sizing the
 loop source: iterate a literal array, a `range(n)` literal, `Object.keys` of an
 object literal, a `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a
-field of a `zigttp:validate` schema that declares `maxItems`. When the total
+field of a `zttp:validate` schema that declares `maxItems`. When the total
 bound is constant or linear with exhaustive path enumeration, the
 `cost_bounded` property holds and `Spec<"cost_bounded">` discharges against it;
 otherwise the proof card's counterexample names the loop and the discharge
@@ -369,8 +369,8 @@ Results appear in:
 - The `contract_diff` cost lane: widening a bound to `unbounded` is breaking, a
   bounded widening (`constant` to `linear`) is additive; this reaches
   `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`
-- Deployment manifest tags (`zigttp:costClass`, `zigttp:costBound`,
-  `zigttp:costSource`, `zigttp:costWorstCase` evaluated at `--max-body-size`)
+- Deployment manifest tags (`zttp:costClass`, `zttp:costBound`,
+  `zttp:costSource`, `zttp:costWorstCase` evaluated at `--max-body-size`)
   and the `kind=deploy` receipt
 - A runtime cost fuse: the interpreter counts module calls per request at the
   capability-enforcement chokepoint and, on an excess over the proven envelope,

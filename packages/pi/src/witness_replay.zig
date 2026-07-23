@@ -96,7 +96,7 @@ pub fn replay(
 
 /// Emit a witness body as trace-compatible JSONL: one `request` record
 /// followed by one `io` record per stub. The format matches what
-/// `zigts.counterexample.writeJsonl` produces (minus the optional
+/// `zts.counterexample.writeJsonl` produces (minus the optional
 /// `witness` header line, which the trace parser drops anyway).
 pub fn writeWitnessJsonl(w: *std.Io.Writer, body: ui_payload.WitnessBody) !void {
     try w.print("{{\"type\":\"request\",\"method\":\"{s}\",\"url\":", .{body.request_method});

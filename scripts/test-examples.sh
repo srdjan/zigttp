@@ -7,10 +7,10 @@
 set -e
 
 ZIG="${ZIG:-zig}"
-ZIGTTP="${ZIGTTP:-zig-out/bin/zigttp}"
+ZTTP="${ZTTP:-zig-out/bin/zttp}"
 PASS=0
 FAIL=0
-TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/zigttp-examples.XXXXXX")
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/zttp-examples.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT
 NEXT_PORT=39000
 
@@ -28,7 +28,7 @@ run_tests_with_args() {
     name=$(echo "$handler" | sed 's|examples/||')
 
     local output
-    output=$("$ZIGTTP" serve "$handler" "$@" --test "$tests" 2>&1) || true
+    output=$("$ZTTP" serve "$handler" "$@" --test "$tests" 2>&1) || true
 
     local results
     results=$(echo "$output" | grep "^Results:" || echo "Results: ? passed, ? failed, ? total")
@@ -54,12 +54,12 @@ check_types() {
     local name
     name=$(echo "$handler" | sed 's|examples/||')
 
-    if "$ZIGTTP" check "$handler" --types >/dev/null 2>&1; then
+    if "$ZTTP" check "$handler" --types >/dev/null 2>&1; then
         echo "  PASS  $name (check --types)"
         PASS=$((PASS + 1))
     else
         echo "  FAIL  $name (check --types)"
-        "$ZIGTTP" check "$handler" --types 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
+        "$ZTTP" check "$handler" --types 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
         FAIL=$((FAIL + 1))
     fi
 }
@@ -70,7 +70,7 @@ start_live_server() {
     LIVE_PORT=$NEXT_PORT
     NEXT_PORT=$((NEXT_PORT + 1))
     LIVE_LOG="$TMP_ROOT/live-$LIVE_PORT.log"
-    "$ZIGTTP" serve "$handler" -p "$LIVE_PORT" "$@" >"$LIVE_LOG" 2>&1 &
+    "$ZTTP" serve "$handler" -p "$LIVE_PORT" "$@" >"$LIVE_LOG" 2>&1 &
     LIVE_PID=$!
 
     local i
@@ -391,9 +391,9 @@ run_workflow_queue_dead_letter_fixture() {
 JSON
 
     local list_output show_output replay_output
-    list_output=$("$ZIGTTP" workflow-queue list --durable "$durable" 2>&1) || true
-    show_output=$("$ZIGTTP" workflow-queue show --durable "$durable" "$id" 2>&1) || true
-    replay_output=$("$ZIGTTP" workflow-queue replay --durable "$durable" "$id" 2>&1) || true
+    list_output=$("$ZTTP" workflow-queue list --durable "$durable" 2>&1) || true
+    show_output=$("$ZTTP" workflow-queue show --durable "$durable" "$id" 2>&1) || true
+    replay_output=$("$ZTTP" workflow-queue replay --durable "$durable" "$id" 2>&1) || true
 
     if echo "$list_output" | grep -q "$id" && \
        echo "$show_output" | grep -q "workflow queue max attempts exceeded" && \
@@ -451,15 +451,15 @@ run_tests_with_args "examples/patterns/validate-external.ts"         "examples/p
 run_tests_with_args "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
 run_tests_with_args "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
 
-# sql/ - a zigttp:sql handler needs its schema to type-check; assert it proves
+# sql/ - a zttp:sql handler needs its schema to type-check; assert it proves
 # clean (this is the example whose one-arg sqlMany("listTodos") regressed when
 # the sql bindings lacked required_arg_count).
-if "$ZIGTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql >/dev/null 2>&1; then
+if "$ZTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql >/dev/null 2>&1; then
     echo "  PASS  sql/sql-crud.ts (check --sql-schema)"
     PASS=$((PASS + 1))
 else
     echo "  FAIL  sql/sql-crud.ts (check --sql-schema)"
-    "$ZIGTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
+    "$ZTTP" check examples/sql/sql-crud.ts --sql-schema examples/sql/schema.sql 2>&1 | grep -iE "error|warning" | head -5 | sed 's/^/        /'
     FAIL=$((FAIL + 1))
 fi
 
@@ -475,7 +475,7 @@ run_live_workflow "workflow/dsl-orchestrator.ts" "examples/workflow/dsl-orchestr
 # live run above cannot observe one, so gate on an empty spec_diagnostics in the
 # --json output (catches a ZTS500/ZTS501 over-claim - the exact regression this
 # example already hit once with retry_safe/idempotent).
-DSL_JSON="$("$ZIGTTP" check examples/workflow/dsl-orchestrator.ts --system examples/workflow/system.json --json 2>/dev/null)"
+DSL_JSON="$("$ZTTP" check examples/workflow/dsl-orchestrator.ts --system examples/workflow/system.json --json 2>/dev/null)"
 if printf '%s' "$DSL_JSON" | grep -q '"spec_diagnostics":\[\]'; then
     echo "  PASS  workflow/dsl-orchestrator.ts (Spec discharge, --json)"
     PASS=$((PASS + 1))
@@ -492,8 +492,8 @@ run_live_workflow "workflow/saga-orchestrator.ts" "examples/workflow/saga-orches
 run_live_workflow "workflow/entry-orchestrator.ts" "examples/workflow/entry-orchestrator.ts" --system examples/workflow/entry-system.json
 run_workflow_queue_dead_letter_fixture
 
-# `zigttp check` writes a zigttp.d.ts typings stub into the cwd; drop it.
-rm -f zigttp.d.ts
+# `zttp check` writes a zttp.d.ts typings stub into the cwd; drop it.
+rm -f zttp.d.ts
 
 echo ""
 echo "====================="

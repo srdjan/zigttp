@@ -1,11 +1,11 @@
-//! zigttp:env - Environment variable access
+//! zttp:env - Environment variable access
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:env",
+    .specifier = "zttp:env",
     .name = "env",
     .required_capabilities = &.{ .env, .policy_check },
     .contract_section = "env",

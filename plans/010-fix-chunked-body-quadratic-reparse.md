@@ -62,7 +62,7 @@
 
 Change the function to accept (or thread through a small caller-owned struct) the last-validated byte offset and running decoded length from the previous call, so it only scans bytes appended since then. Keep the return contract identical (`!?usize`: `null` = need more bytes, `usize` = total encoded bytes consumed including terminator/trailers). The trailer-scanning inner loop (`458-470`) already tracks `trailer_start` relative to the current call's `pos`; make sure resumed calls that land mid-trailer still work (i.e., the resume state must distinguish "mid chunk-size-line", "mid chunk data", and "mid trailer").
 
-**Verify**: `zig build test-zigts` is not needed here (this file is package `runtime`, not `zigts`) — just confirm it still compiles: `zig build` -> exit 0.
+**Verify**: `zig build test-zts` is not needed here (this file is package `runtime`, not `zts`) — just confirm it still compiles: `zig build` -> exit 0.
 
 ### Step 2: Thread the resume state through `readRequestData`
 

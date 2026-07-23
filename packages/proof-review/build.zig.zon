@@ -1,13 +1,13 @@
 .{
-    .name = .zigttp_proof_review,
+    .name = .zttp_proof_review,
     .version = "0.0.0",
-    .fingerprint = 0xfa24f2cc4cca7af9,
+    .fingerprint = 0xf63f9a8e2fff072f,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zigts = .{
-            .path = "../zigts",
+        .zts = .{
+            .path = "../zts",
         },
-        .zigttp_tools = .{
+        .zttp_tools = .{
             .path = "../tools",
         },
     },

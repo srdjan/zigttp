@@ -1,12 +1,12 @@
 # Durable Workflows
 
-Durable workflows combine `zigttp:durable` with optional `zigttp:workflow`
+Durable workflows combine `zttp:durable` with optional `zttp:workflow`
 dispatch. They give a handler a stable run key, an oplog for replay, and
 operator-visible artifacts that say which replay guarantees the compiler proved.
 
 ## Plain Dispatch (No Durability)
 
-`zigttp:workflow`'s `call` works on its own, without `zigttp:durable`, when a
+`zttp:workflow`'s `call` works on its own, without `zttp:durable`, when a
 handler just needs to compose a co-located sub-handler in-process. `call`
 dispatches to another handler named in `--system <file>`; it runs in its own
 isolated pooled runtime, and its `Response` is copied back before the caller
@@ -14,7 +14,7 @@ continues. No HTTP hop, no oplog, no replay:
 
 ```ts
 // orchestrator.ts
-import { call } from "zigttp:workflow";
+import { call } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const res = call("greet", { method: "GET", path: "/greet" });
@@ -30,27 +30,27 @@ function handler(req: Request): Response {
 ```
 
 ```bash
-zigttp serve orchestrator.ts --system system.json
+zttp serve orchestrator.ts --system system.json
 ```
 
 A sub-handler panic surfaces as a failed call (`subStatus 599`) rather than
-taking down the orchestrator. Reach for `zigttp:durable`'s `run()` (below)
+taking down the orchestrator. Reach for `zttp:durable`'s `run()` (below)
 once a handler needs its dispatch to survive a crash instead of just failing
 cleanly.
 
-## Proving Dispatch Links (`zigttp link`)
+## Proving Dispatch Links (`zttp link`)
 
 Plain dispatch resolves sub-handler names at runtime, so a typo like
 `call("inventroy", ...)` only surfaces as a `599` when that path executes.
-`zigttp link <system.json>` closes that gap at compile time. It resolves
-every `zigttp:workflow` `call`, `saga`, and `fanout` target against the
+`zttp link <system.json>` closes that gap at compile time. It resolves
+every `zttp:workflow` `call`, `saga`, and `fanout` target against the
 bundle by name - the same resolution `serviceCall` targets get - and reports
 any target that names no handler or matches no route in the target's own
 route table. A bundle whose targets all resolve signs a `kind=workflow`
 receipt.
 
 ```bash
-zigttp link examples/workflow/entry-system.json
+zttp link examples/workflow/entry-system.json
 ```
 
 Targets are extracted strict-literal. `call` and `fanout` read the literal
@@ -78,7 +78,7 @@ dispatch:
 }
 ```
 
-`zigttp link` checks that `entry` names a real bundle handler, and the
+`zttp link` checks that `entry` names a real bundle handler, and the
 `kind=workflow` receipt attests to it. When the entry handler's own routes
 are proven POST-only - a non-empty, statically enumerable
 `routerMatch({...}, req)` table whose every route is `POST` - the receipt
@@ -89,15 +89,15 @@ penalized for a door it never opened.
 
 Both fields are optional and backward-compatible. Manifests without `entry`
 link as before. A handler's `baseUrl` is optional too: it feeds only
-`zigttp:service`'s real-HTTP `serviceCall` and raw `fetchSync` egress, so a
-handler reached only by name through `zigttp:workflow` never needs one.
+`zttp:service`'s real-HTTP `serviceCall` and raw `fetchSync` egress, so a
+handler reached only by name through `zttp:workflow` never needs one.
 
 ## Runtime Model
 
 Enable the oplog with `--durable <dir>`:
 
 ```bash
-zigttp serve examples/workflow/durable-orchestrator.ts \
+zttp serve examples/workflow/durable-orchestrator.ts \
   --system examples/workflow/system.json \
   --durable ./.durable
 ```
@@ -144,7 +144,7 @@ When enforcement is active:
 
 Proof receipts and deploy manifests expose the same status:
 
-- `zigttp verify --json` includes `durableWorkflowProofLevel`,
+- `zttp verify --json` includes `durableWorkflowProofLevel`,
   `durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
   `durableWorkflowFaultCovered`.
 - AWS and Cloudflare deploy metadata include the same durable workflow proof
@@ -177,8 +177,8 @@ The most common ZTS509 mistake is putting a child dispatch behind a user
 `step()` boundary:
 
 ```ts
-import { run, step } from "zigttp:durable";
-import { call } from "zigttp:workflow";
+import { run, step } from "zttp:durable";
+import { call } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "bad";
@@ -192,8 +192,8 @@ That is invalid because the workflow queue can only persist top-level child
 dispatch inside the `run()` body. Move the child call to durable depth 0:
 
 ```ts
-import { run } from "zigttp:durable";
-import { call } from "zigttp:workflow";
+import { run } from "zttp:durable";
+import { call } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "good";
@@ -213,10 +213,10 @@ oplog (never inside it) at `<durable>/dead-runs/<id>.json`, with the run key,
 the last failure reason, and timestamps.
 
 ```bash
-zigttp durable dead-runs list --durable ./.durable
-zigttp durable dead-runs show --durable ./.durable <id>
-zigttp durable dead-runs replay --durable ./.durable <id>
-zigttp durable dead-runs discard --durable ./.durable <id>
+zttp durable dead-runs list --durable ./.durable
+zttp durable dead-runs show --durable ./.durable <id>
+zttp durable dead-runs replay --durable ./.durable <id>
+zttp durable dead-runs discard --durable ./.durable <id>
 ```
 
 A restarted process honors a standing dead-run record instead of forgetting
@@ -230,7 +230,7 @@ silently becoming eligible again on the next poll.
 
 ## Workflow Queue
 
-`zigttp:workflow` dispatches to co-located handlers from `--system <file>`.
+`zttp:workflow` dispatches to co-located handlers from `--system <file>`.
 Inside durable `run()`, completed `call`, `follow`, and `fanout` child
 responses are recorded so replay does not re-dispatch completed children.
 
@@ -238,7 +238,7 @@ responses are recorded so replay does not re-dispatch completed children.
 describes the shape of the request (many targets), not parallel execution.
 Results are ordered by declaration index regardless of dispatch order. This
 keeps the durable oplog boundary simple (the whole fan-out replays as one
-step) at the cost of wall-clock speedup; use `zigttp:io`'s `parallel()` for
+step) at the cost of wall-clock speedup; use `zttp:io`'s `parallel()` for
 actual concurrent I/O outside a durable workflow context.
 
 There are two queue surfaces with different reliability models:
@@ -246,14 +246,14 @@ There are two queue surfaces with different reliability models:
 - `--workflow-queue` persists workflow child dispatch under the durable
   directory. Use it for durable `workflow.call`, `workflow.follow`, and
   ordered `workflow.fanout` boundaries inside `run()`.
-- `zigttp:queue` is the opt-in actor mailbox module. It isolates handlers and
+- `zttp:queue` is the opt-in actor mailbox module. It isolates handlers and
   passes messages through process-local actor queues; it is not a durable
   workflow queue substitute.
 
 Add `--workflow-queue` to persist top-level child dispatch before it runs:
 
 ```bash
-zigttp serve examples/workflow/dsl-orchestrator.ts \
+zttp serve examples/workflow/dsl-orchestrator.ts \
   --system examples/workflow/system.json \
   --durable ./.durable \
   --workflow-queue
@@ -270,10 +270,10 @@ the parent request must be retried with the same `Idempotency-Key` afterward
 to actually resolve:
 
 ```bash
-zigttp workflow-queue list --durable ./.durable
-zigttp workflow-queue show --durable ./.durable <item-id>
-zigttp workflow-queue replay --durable ./.durable <item-id>
-zigttp workflow-queue discard --durable ./.durable <item-id>
+zttp workflow-queue list --durable ./.durable
+zttp workflow-queue show --durable ./.durable <item-id>
+zttp workflow-queue replay --durable ./.durable <item-id>
+zttp workflow-queue discard --durable ./.durable <item-id>
 ```
 
 `saga()` is intentionally rejected with `--workflow-queue`. Saga step closures
@@ -287,7 +287,7 @@ Responses in declaration order (see [Workflow Queue](#workflow-queue) above
 for why it is sequential, not concurrent):
 
 ```ts
-import { fanout } from "zigttp:workflow";
+import { fanout } from "zttp:workflow";
 
 function handler(req) {
   const rs = fanout([
@@ -305,7 +305,7 @@ the `"/<name>"` mount convention - `href: "/greet"` routes to the `greet`
 sub-handler:
 
 ```ts
-import { follow } from "zigttp:workflow";
+import { follow } from "zttp:workflow";
 
 function handler(req) {
   const home = resource({ service: "orchestrator" }, {
@@ -323,8 +323,8 @@ back in reverse via their `compensate` thunks (`undo:<name>`). The last step
 may omit `compensate` (see ZTS510 above):
 
 ```ts
-import { run } from "zigttp:durable";
-import { call, saga } from "zigttp:workflow";
+import { run } from "zttp:durable";
+import { call, saga } from "zttp:workflow";
 
 function handler(req) {
   const key = req.headers.get("idempotency-key") ?? "saga-demo";
@@ -366,7 +366,7 @@ Workflow fixtures live in `examples/workflow/`:
 - `wait-signal-orchestrator.ts` - signal park/resume, including `signalAt`'s
   scheduled (rather than immediately-delivered) signal.
 - `timeout-orchestrator.ts` - deterministic `stepWithTimeout`.
-- `scope-orchestrator.ts` - `zigttp:scope`'s `using`/`ensure` resource
+- `scope-orchestrator.ts` - `zttp:scope`'s `using`/`ensure` resource
   cleanup and `scope`'s named nested-scope unwind-before-continuing.
 - `saga-orchestrator.ts` - reverse-order saga compensation, including the
   `/compensation-fails` path where the `compensate` thunk itself fails: a

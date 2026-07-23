@@ -1,22 +1,22 @@
-//! `zigttp witnesses` subcommand. Surfaces the on-disk witness corpus to
+//! `zttp witnesses` subcommand. Surfaces the on-disk witness corpus to
 //! authors and CI: list persisted falsifying inputs per handler, pin entries
 //! that should never be pruned, and prune unpinned entries by age.
 //!
 //! Subcommands:
-//!     zigttp witnesses list [<handler>]
-//!     zigttp witnesses pin <handler> <key|prefix>
-//!     zigttp witnesses unpin <handler> <key|prefix>
-//!     zigttp witnesses prune <handler> [--older-than <seconds>]
+//!     zttp witnesses list [<handler>]
+//!     zttp witnesses pin <handler> <key|prefix>
+//!     zttp witnesses unpin <handler> <key|prefix>
+//!     zttp witnesses prune <handler> [--older-than <seconds>]
 //!
 //! With no handler argument, `list` reports a one-line summary per handler
-//! corpus discovered under `.zigttp/witnesses/`.
+//! corpus discovered under `.zttp/witnesses/`.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const witness_corpus = zigts.witness_corpus;
-const spec_discharge = zigts.spec_discharge;
-const printer_mod = @import("zigttp_proof_review").printer;
-const io_util = @import("zigttp_proof_review").io_util;
+const zts = @import("zts");
+const witness_corpus = zts.witness_corpus;
+const spec_discharge = zts.spec_discharge;
+const printer_mod = @import("zttp_proof_review").printer;
+const io_util = @import("zttp_proof_review").io_util;
 
 const Subcommand = enum {
     list,
@@ -97,17 +97,17 @@ fn parseSub(s: []const u8) ?Subcommand {
 
 fn printHelp(stdout: *std.Io.Writer) !void {
     try stdout.writeAll(
-        \\zigttp witnesses - inspect and manage the on-disk witness corpus.
+        \\zttp witnesses - inspect and manage the on-disk witness corpus.
         \\
         \\Usage:
-        \\  zigttp witnesses list [<handler>]
-        \\  zigttp witnesses pin <handler> <key|prefix>
-        \\  zigttp witnesses unpin <handler> <key|prefix>
-        \\  zigttp witnesses prune <handler> [--older-than <seconds>]
-        \\  zigttp witnesses synthesize <handler> <spec>
+        \\  zttp witnesses list [<handler>]
+        \\  zttp witnesses pin <handler> <key|prefix>
+        \\  zttp witnesses unpin <handler> <key|prefix>
+        \\  zttp witnesses prune <handler> [--older-than <seconds>]
+        \\  zttp witnesses synthesize <handler> <spec>
         \\
         \\Each handler accumulates a corpus of compiler-discovered falsifying
-        \\inputs ("witnesses") under .zigttp/witnesses/<short_hash>/. Pinned
+        \\inputs ("witnesses") under .zttp/witnesses/<short_hash>/. Pinned
         \\witnesses are never pruned. With no <handler> argument, `list`
         \\summarises every corpus directory discovered.
         \\
@@ -170,7 +170,7 @@ fn summariseAll(
     const io = io_backend.io();
 
     var root = std.Io.Dir.cwd().openDir(io, witness_corpus.corpus_root_relative, .{ .iterate = true }) catch {
-        try stdout.writeAll("No witnesses recorded yet (.zigttp/witnesses/ is empty).\n");
+        try stdout.writeAll("No witnesses recorded yet (.zttp/witnesses/ is empty).\n");
         return;
     };
     defer root.close(io);
@@ -201,7 +201,7 @@ fn summariseAll(
         try stdout.print("  {s}  {d} witness(es)\n", .{ path_str, total });
     }
     if (!any) {
-        try stdout.writeAll("No witnesses recorded yet (.zigttp/witnesses/ is empty).\n");
+        try stdout.writeAll("No witnesses recorded yet (.zttp/witnesses/ is empty).\n");
     }
 }
 
@@ -351,7 +351,7 @@ fn cmdSynthesize(
         return error.UnsupportedSpec;
     }
 
-    const summary = zigts.spec_discharge.suggestionFor(spec) orelse "structural failure";
+    const summary = zts.spec_discharge.suggestionFor(spec) orelse "structural failure";
 
     const dir = try witness_corpus.corpusDir(allocator, handler);
     defer allocator.free(dir);

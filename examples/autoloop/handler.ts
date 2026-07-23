@@ -3,7 +3,7 @@
 // SECRET_KEY is flagged as a secret by the env virtual module, and the
 // handler lets it flow straight into the response body. Run:
 //
-//   zigts expert --handler examples/autoloop/handler.ts \
+//   zts expert --handler examples/autoloop/handler.ts \
 //                --goal no_secret_leakage --max-iters 4
 //
 // The autoloop invokes pi_goal_check, which synthesises an executable
@@ -22,7 +22,7 @@
 //
 //   git checkout -- examples/autoloop/handler.ts
 
-import { env } from "zigttp:env";
+import { env } from "zttp:env";
 
 function handler(req: Request): Response {
     const secret = env("SECRET_KEY");

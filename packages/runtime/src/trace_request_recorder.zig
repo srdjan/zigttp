@@ -10,8 +10,8 @@
 //! plus `recordResponse(self, &response)` at each response site.
 
 const std = @import("std");
-const zq = @import("zigts");
-const compat = @import("zigts").compat;
+const zq = @import("zts");
+const compat = @import("zts").compat;
 const zruntime = @import("zruntime.zig");
 const http_types = @import("http_types.zig");
 

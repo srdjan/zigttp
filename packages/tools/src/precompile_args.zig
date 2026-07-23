@@ -2,9 +2,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-const readFilePosix = zigts.file_io.readFile;
+const readFilePosix = zts.file_io.readFile;
 
 /// stderr printer that no-ops under `zig build test` so unit tests for
 /// arg-parse error paths do not pollute the test-runner IPC stream.
@@ -207,8 +207,8 @@ pub fn collectModuleManifestPaths(
 pub fn buildManifestRegistryFromPaths(
     allocator: std.mem.Allocator,
     paths: []const []const u8,
-) !zigts.manifest_registry.Registry {
-    var registry = zigts.manifest_registry.Registry.init(allocator);
+) !zts.manifest_registry.Registry {
+    var registry = zts.manifest_registry.Registry.init(allocator);
     errdefer registry.deinit();
 
     for (paths) |path| {
@@ -218,7 +218,7 @@ pub fn buildManifestRegistryFromPaths(
         };
         defer allocator.free(bytes);
 
-        var manifest = zigts.module_manifest.parse(allocator, bytes) catch |err| {
+        var manifest = zts.module_manifest.parse(allocator, bytes) catch |err| {
             errPrint("Error parsing module manifest '{s}': {}\n", .{ path, err });
             return err;
         };
@@ -256,7 +256,7 @@ test "parsePrecompileArgSlice rejects missing build_time value" {
 test "parsePrecompileArgSlice consumes module manifest flags" {
     const argv = [_][]const u8{
         "--module-manifest",
-        "zigttp-module.json",
+        "zttp-module.json",
         "handler.ts",
         "embedded_handler.zig",
     };

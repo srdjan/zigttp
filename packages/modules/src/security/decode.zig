@@ -1,11 +1,11 @@
-//! zigttp:decode - typed request ingress helpers
+//! zttp:decode - typed request ingress helpers
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const validate = @import("validate.zig");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:decode",
+    .specifier = "zttp:decode",
     .name = "decode",
     .stateful = false,
     .exports = &.{

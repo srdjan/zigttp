@@ -1,11 +1,11 @@
-//! zigts Compile-Time Microbenchmark
+//! zts Compile-Time Microbenchmark
 //!
 //! Measures parse + codegen wall-clock time, bytes allocated, and IR-node
 //! count per compile across a small synthesized corpus of handler-shaped
 //! programs. Scaffolding only: this harness collects the numbers that
 //! Phase 8 of the perf plan uses to tune
-//! `packages/zigts/src/parser/codegen.zig#reserveCapacity` and
-//! `packages/zigts/src/intern_pool.zig` capacity hints. No tuning here.
+//! `packages/zts/src/parser/codegen.zig#reserveCapacity` and
+//! `packages/zts/src/intern_pool.zig` capacity hints. No tuning here.
 //!
 //! Usage: `zig build compile-bench -Doptimize=ReleaseFast -- [flags]`
 //! Flags:
@@ -14,7 +14,7 @@
 //!   --iterations N    Iterations per fixture (default 50).
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const compat = zq.compat;
 
 pub const std_options: std.Options = .{
@@ -376,7 +376,7 @@ fn emitJson(results: []const Result) void {
 }
 
 fn emitHuman(results: []const Result) void {
-    writeStdout("\n=== zigts compile-time microbench ===\n\n");
+    writeStdout("\n=== zts compile-time microbench ===\n\n");
     printFmt("{s:<24} {s:>12} {s:>14} {s:>12} {s:>10} {s:>8}", .{ "fixture", "ns/compile", "bytes/compile", "cg_bytes", "ir_nodes", "bc_len" });
     writeStdout("------------------------------------------------------------------------------------\n");
     for (results) |r| {

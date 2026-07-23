@@ -1,11 +1,11 @@
 .{
-    .name = .zigttp_tools,
+    .name = .zttp_tools,
     .version = "0.0.0",
-    .fingerprint = 0x1537569e2043a6cf,
+    .fingerprint = 0xbadc33f7a58d22c8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zigts = .{
-            .path = "../zigts",
+        .zts = .{
+            .path = "../zts",
         },
     },
     .paths = .{

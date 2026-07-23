@@ -1,19 +1,19 @@
 #!/bin/sh
-# zigttp installer - downloads pre-built binaries from GitHub Releases
+# zttp installer - downloads pre-built binaries from GitHub Releases
 # Usage: curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 #
 # Environment variables:
-#   ZIGTTP_VERSION     - pin to a specific version (e.g. v0.18.0)
-#   ZIGTTP_CHANNEL     - stable (default; newest non-prerelease), latest, or beta
-#   ZIGTTP_INSTALL_DIR - installation directory, default: $HOME/.zigttp
+#   ZTTP_VERSION     - pin to a specific version (e.g. v0.18.0)
+#   ZTTP_CHANNEL     - stable (default; newest non-prerelease), latest, or beta
+#   ZTTP_INSTALL_DIR - installation directory, default: $HOME/.zttp
 
 set -eu
 
 REPO="srdjan/zigttp"
-INSTALL_DIR="${ZIGTTP_INSTALL_DIR:-$HOME/.zigttp}"
+INSTALL_DIR="${ZTTP_INSTALL_DIR:-$HOME/.zttp}"
 BIN_DIR="${INSTALL_DIR}/bin"
 INSTALL_TMPDIR=""
-ZIGTTP_STAGE=""
+ZTTP_STAGE=""
 ZIGTS_STAGE=""
 RUNTIME_STAGE=""
 BACKUP_DIR=""
@@ -36,11 +36,11 @@ main() {
     resolve_version
     check_existing
 
-    printf "Installing zigttp %s (%s/%s) to %s\n" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
+    printf "Installing zttp %s (%s/%s) to %s\n" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
 
     INSTALL_TMPDIR=$(mktemp -d)
 
-    TARBALL="zigttp-${VERSION}-${OS}-${ARCH}.tar.gz"
+    TARBALL="zttp-${VERSION}-${OS}-${ARCH}.tar.gz"
     CHECKSUM="${TARBALL}.sha256"
     BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
@@ -48,11 +48,11 @@ main() {
     download "${BASE_URL}/${CHECKSUM}" "${INSTALL_TMPDIR}/${CHECKSUM}"
 
     verify_checksum "${INSTALL_TMPDIR}/${TARBALL}" "${INSTALL_TMPDIR}/${CHECKSUM}"
-    validate_archive_paths "${INSTALL_TMPDIR}/${TARBALL}" "zigttp-${VERSION}-${OS}-${ARCH}"
+    validate_archive_paths "${INSTALL_TMPDIR}/${TARBALL}" "zttp-${VERSION}-${OS}-${ARCH}"
 
     mkdir -p "$BIN_DIR"
     EXTRACT_DIR="${INSTALL_TMPDIR}/extract"
-    PAYLOAD_DIR="${EXTRACT_DIR}/zigttp-${VERSION}-${OS}-${ARCH}"
+    PAYLOAD_DIR="${EXTRACT_DIR}/zttp-${VERSION}-${OS}-${ARCH}"
     mkdir -p "$EXTRACT_DIR"
     tar xzf "${INSTALL_TMPDIR}/${TARBALL}" -C "$EXTRACT_DIR"
 
@@ -61,35 +61,35 @@ main() {
         exit 1
     fi
 
-    TRANSACTION_DIR=$(mktemp -d "${BIN_DIR}/.zigttp-transaction.XXXXXX")
-    ZIGTTP_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zigttp.XXXXXX")
-    ZIGTS_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zigts.XXXXXX")
+    TRANSACTION_DIR=$(mktemp -d "${BIN_DIR}/.zttp-transaction.XXXXXX")
+    ZTTP_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zttp.XXXXXX")
+    ZIGTS_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-zts.XXXXXX")
     RUNTIME_STAGE=$(mktemp "${TRANSACTION_DIR}/stage-runtime.XXXXXX")
     BACKUP_DIR="${TRANSACTION_DIR}/backup"
     mkdir "$BACKUP_DIR"
 
-    stage_binary "$PAYLOAD_DIR" zigttp "$ZIGTTP_STAGE"
-    stage_binary "$PAYLOAD_DIR" zigts "$ZIGTS_STAGE"
-    stage_binary "$PAYLOAD_DIR" zigttp-runtime "$RUNTIME_STAGE"
-    verify_binary "$ZIGTTP_STAGE" zigttp staged
-    verify_binary "$ZIGTS_STAGE" zigts staged
-    verify_binary "$RUNTIME_STAGE" zigttp-runtime staged
+    stage_binary "$PAYLOAD_DIR" zttp "$ZTTP_STAGE"
+    stage_binary "$PAYLOAD_DIR" zts "$ZIGTS_STAGE"
+    stage_binary "$PAYLOAD_DIR" zttp-runtime "$RUNTIME_STAGE"
+    verify_binary "$ZTTP_STAGE" zttp staged
+    verify_binary "$ZIGTS_STAGE" zts staged
+    verify_binary "$RUNTIME_STAGE" zttp-runtime staged
     backup_installed_binaries
 
     : > "${TRANSACTION_DIR}/swap-started"
     ROLLBACK_NEEDED=1
-    swap_binary "$ZIGTTP_STAGE" zigttp
-    swap_binary "$ZIGTS_STAGE" zigts
-    swap_binary "$RUNTIME_STAGE" zigttp-runtime
-    verify_binary "${BIN_DIR}/zigttp" zigttp installed
-    verify_binary "${BIN_DIR}/zigts" zigts installed
-    verify_binary "${BIN_DIR}/zigttp-runtime" zigttp-runtime installed
+    swap_binary "$ZTTP_STAGE" zttp
+    swap_binary "$ZIGTS_STAGE" zts
+    swap_binary "$RUNTIME_STAGE" zttp-runtime
+    verify_binary "${BIN_DIR}/zttp" zttp installed
+    verify_binary "${BIN_DIR}/zts" zts installed
+    verify_binary "${BIN_DIR}/zttp-runtime" zttp-runtime installed
     rm -f "${TRANSACTION_DIR}/swap-started"
     ROLLBACK_NEEDED=0
 
-    printf "\nInstalled zigttp %s to %s\n" "$VERSION" "$BIN_DIR"
-    printf "  zigttp: %s/zigttp\n" "$BIN_DIR"
-    printf "  zigts:  %s/zigts\n" "$BIN_DIR"
+    printf "\nInstalled zttp %s to %s\n" "$VERSION" "$BIN_DIR"
+    printf "  zttp: %s/zttp\n" "$BIN_DIR"
+    printf "  zts:  %s/zts\n" "$BIN_DIR"
 
     check_path
 }
@@ -118,12 +118,12 @@ detect_platform() {
 }
 
 resolve_version() {
-    if [ -n "${ZIGTTP_VERSION:-}" ]; then
-        VERSION="$ZIGTTP_VERSION"
+    if [ -n "${ZTTP_VERSION:-}" ]; then
+        VERSION="$ZTTP_VERSION"
         return
     fi
 
-    CHANNEL="${ZIGTTP_CHANNEL:-stable}"
+    CHANNEL="${ZTTP_CHANNEL:-stable}"
     case "$CHANNEL" in
         beta)
             printf "Fetching latest beta version...\n"
@@ -157,7 +157,7 @@ resolve_version() {
             fi
             ;;
         *)
-            printf "Error: unsupported ZIGTTP_CHANNEL: %s (use beta, latest, or stable)\n" "$CHANNEL" >&2
+            printf "Error: unsupported ZTTP_CHANNEL: %s (use beta, latest, or stable)\n" "$CHANNEL" >&2
             exit 1
             ;;
     esac
@@ -220,26 +220,26 @@ cleanup_stale_transaction_files() {
     # and atomic. Recover a transaction interrupted during its swap before
     # deleting its debris; pre-transaction leftovers from older installers can
     # be removed directly.
-    for transaction_dir in "${BIN_DIR}"/.zigttp-transaction.*; do
+    for transaction_dir in "${BIN_DIR}"/.zttp-transaction.*; do
         [ -d "$transaction_dir" ] || continue
         if [ -f "${transaction_dir}/swap-started" ]; then
             recover_stale_transaction "$transaction_dir"
         fi
         rm -rf "$transaction_dir"
     done
-    rm -f "${BIN_DIR}"/.zigttp-stage-zigttp.*
-    rm -f "${BIN_DIR}"/.zigttp-stage-zigts.*
-    rm -f "${BIN_DIR}"/.zigttp-stage-runtime.*
-    rm -rf "${BIN_DIR}"/.zigttp-backup.*
-    rm -f "${BIN_DIR}"/.zigttp-install-lock-candidate.*
-    rm -rf "${BIN_DIR}"/.zigttp-install-reap.*
+    rm -f "${BIN_DIR}"/.zttp-stage-zttp.*
+    rm -f "${BIN_DIR}"/.zttp-stage-zts.*
+    rm -f "${BIN_DIR}"/.zttp-stage-runtime.*
+    rm -rf "${BIN_DIR}"/.zttp-backup.*
+    rm -f "${BIN_DIR}"/.zttp-install-lock-candidate.*
+    rm -rf "${BIN_DIR}"/.zttp-install-reap.*
 }
 
 recover_stale_transaction() {
     transaction_dir="$1"
     transaction_backup="${transaction_dir}/backup"
 
-    for name in zigttp zigts zigttp-runtime; do
+    for name in zttp zts zttp-runtime; do
         backup="${transaction_backup}/${name}"
         dest="${BIN_DIR}/${name}"
         if [ -f "$backup" ]; then
@@ -256,8 +256,8 @@ recover_stale_transaction() {
 }
 
 acquire_install_lock() {
-    LOCK_FILE="${BIN_DIR}/.zigttp-install-lock"
-    LOCK_CANDIDATE=$(mktemp "${BIN_DIR}/.zigttp-install-lock-candidate.XXXXXX")
+    LOCK_FILE="${BIN_DIR}/.zttp-install-lock"
+    LOCK_CANDIDATE=$(mktemp "${BIN_DIR}/.zttp-install-lock-candidate.XXXXXX")
     printf '%s\n' "$$" > "$LOCK_CANDIDATE"
 
     while :; do
@@ -270,7 +270,7 @@ acquire_install_lock() {
 
         lock_pid=""
         if ! IFS= read -r lock_pid < "$LOCK_FILE"; then
-            printf "Error: another zigttp installer owns %s\n" "$LOCK_FILE" >&2
+            printf "Error: another zttp installer owns %s\n" "$LOCK_FILE" >&2
             exit 1
         fi
         case "$lock_pid" in
@@ -280,7 +280,7 @@ acquire_install_lock() {
                 ;;
         esac
         if kill -0 "$lock_pid" 2>/dev/null; then
-            printf "Error: another zigttp installer is running (pid %s)\n" "$lock_pid" >&2
+            printf "Error: another zttp installer is running (pid %s)\n" "$lock_pid" >&2
             exit 1
         fi
 
@@ -298,12 +298,12 @@ acquire_install_lock() {
 
 acquire_recovery_claim() {
     stale_pid="$1"
-    REAP_FILE="${BIN_DIR}/.zigttp-install-reap.${stale_pid}"
+    REAP_FILE="${BIN_DIR}/.zttp-install-reap.${stale_pid}"
 
     while ! ln "$LOCK_CANDIDATE" "$REAP_FILE" 2>/dev/null; do
         reaper_pid=""
         if ! IFS= read -r reaper_pid < "$REAP_FILE"; then
-            printf "Error: another zigttp installer is recovering stale state\n" >&2
+            printf "Error: another zttp installer is recovering stale state\n" >&2
             exit 1
         fi
         case "$reaper_pid" in
@@ -313,7 +313,7 @@ acquire_recovery_claim() {
                 ;;
         esac
         if kill -0 "$reaper_pid" 2>/dev/null; then
-            printf "Error: another zigttp installer is recovering stale state (pid %s)\n" "$reaper_pid" >&2
+            printf "Error: another zttp installer is recovering stale state (pid %s)\n" "$reaper_pid" >&2
             exit 1
         fi
 
@@ -350,7 +350,7 @@ verify_binary() {
 }
 
 backup_installed_binaries() {
-    for name in zigttp zigts zigttp-runtime; do
+    for name in zttp zts zttp-runtime; do
         if [ -e "${BIN_DIR}/${name}" ] || [ -L "${BIN_DIR}/${name}" ]; then
             cp -p "${BIN_DIR}/${name}" "${BACKUP_DIR}/${name}"
         else
@@ -390,15 +390,15 @@ cleanup() {
 
     rollback_failed=0
     if [ "$ROLLBACK_NEEDED" = "1" ]; then
-        if ! restore_binary zigttp; then rollback_failed=1; fi
-        if ! restore_binary zigts; then rollback_failed=1; fi
-        if ! restore_binary zigttp-runtime; then rollback_failed=1; fi
+        if ! restore_binary zttp; then rollback_failed=1; fi
+        if ! restore_binary zts; then rollback_failed=1; fi
+        if ! restore_binary zttp-runtime; then rollback_failed=1; fi
         if [ "$rollback_failed" = "1" ]; then cleanup_status=1; fi
     fi
 
     if [ "$rollback_failed" = "0" ]; then
-        if [ -n "$ZIGTTP_STAGE" ]; then
-            rm -f "$ZIGTTP_STAGE" || :
+        if [ -n "$ZTTP_STAGE" ]; then
+            rm -f "$ZTTP_STAGE" || :
         fi
         if [ -n "$ZIGTS_STAGE" ]; then
             rm -f "$ZIGTS_STAGE" || :
@@ -448,16 +448,16 @@ binary_has_expected_version() {
 }
 
 check_existing() {
-    if binary_has_expected_version zigttp zigttp &&
-        binary_has_expected_version zigts zigts &&
-        binary_has_expected_version zigttp-runtime zigttp; then
-        printf "zigttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
+    if binary_has_expected_version zttp zttp &&
+        binary_has_expected_version zts zts &&
+        binary_has_expected_version zttp-runtime zttp; then
+        printf "zttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
         exit 0
     fi
 
-    if [ -x "${BIN_DIR}/zigttp" ]; then
-        CURRENT=$("${BIN_DIR}/zigttp" version 2>/dev/null | sed 's/^zigttp //' || echo "unknown")
-        printf "Upgrading zigttp from %s to %s\n" "$CURRENT" "$VERSION"
+    if [ -x "${BIN_DIR}/zttp" ]; then
+        CURRENT=$("${BIN_DIR}/zttp" version 2>/dev/null | sed 's/^zttp //' || echo "unknown")
+        printf "Upgrading zttp from %s to %s\n" "$CURRENT" "$VERSION"
     fi
 }
 
@@ -494,12 +494,12 @@ verify_checksum() {
         (cd "$(dirname "$tarball")" && sha256sum -c "$(basename "$checksum_file")" --quiet)
     elif command -v shasum >/dev/null 2>&1; then
         (cd "$(dirname "$tarball")" && shasum -a 256 -c "$(basename "$checksum_file")" --quiet)
-    elif [ "${ZIGTTP_SKIP_CHECKSUM:-}" = "1" ]; then
-        printf "Warning: sha256sum/shasum not found; ZIGTTP_SKIP_CHECKSUM=1 set, proceeding without integrity check\n" >&2
+    elif [ "${ZTTP_SKIP_CHECKSUM:-}" = "1" ]; then
+        printf "Warning: sha256sum/shasum not found; ZTTP_SKIP_CHECKSUM=1 set, proceeding without integrity check\n" >&2
         return 0
     else
         printf "Error: neither sha256sum nor shasum found; cannot verify download integrity.\n" >&2
-        printf "Install coreutils (Linux) or perl (for shasum), or set ZIGTTP_SKIP_CHECKSUM=1 to bypass at your own risk.\n" >&2
+        printf "Install coreutils (Linux) or perl (for shasum), or set ZTTP_SKIP_CHECKSUM=1 to bypass at your own risk.\n" >&2
         return 1
     fi
 }
@@ -584,7 +584,7 @@ check_path() {
     case ":${PATH}:" in
         *":${BIN_DIR}:"*) ;;
         *)
-            printf "\nAdd zigttp to your PATH:\n"
+            printf "\nAdd zttp to your PATH:\n"
             printf "  export PATH=\"%s:\$PATH\"\n" "$BIN_DIR"
             printf "\nTo make it permanent, add the line above to your shell profile\n"
             printf "  (~/.bashrc, ~/.zshrc, or ~/.profile)\n"
@@ -592,6 +592,6 @@ check_path() {
     esac
 }
 
-if [ "${ZIGTTP_INSTALLER_SOURCE_ONLY:-}" != "1" ]; then
+if [ "${ZTTP_INSTALLER_SOURCE_ONLY:-}" != "1" ]; then
     main
 fi

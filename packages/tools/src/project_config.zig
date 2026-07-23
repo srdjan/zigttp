@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 pub const ProjectConfig = struct {
     root_dir: []const u8,
@@ -72,7 +72,7 @@ pub fn discover(
     defer allocator.free(current);
 
     while (true) {
-        const manifest_path = try std.fs.path.resolve(allocator, &.{ current, "zigttp.json" });
+        const manifest_path = try std.fs.path.resolve(allocator, &.{ current, "zttp.json" });
         defer allocator.free(manifest_path);
 
         if (std.Io.Dir.accessAbsolute(io, manifest_path, .{})) |_| {
@@ -98,7 +98,7 @@ pub fn loadAbsolute(
     io: std.Io,
     manifest_path: []const u8,
 ) !ProjectConfig {
-    const bytes = try zigts.file_io.readFile(allocator, manifest_path, 1024 * 1024);
+    const bytes = try zts.file_io.readFile(allocator, manifest_path, 1024 * 1024);
     defer allocator.free(bytes);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
@@ -158,7 +158,7 @@ fn findStartDir(
     var owned = true;
     defer if (owned) allocator.free(normalized);
 
-    if (std.mem.eql(u8, std.fs.path.basename(input), "zigttp.json")) {
+    if (std.mem.eql(u8, std.fs.path.basename(input), "zttp.json")) {
         const dir_name = std.fs.path.dirname(normalized) orelse return error.InvalidProjectConfig;
         return try allocator.dupe(u8, dir_name);
     }
@@ -268,7 +268,7 @@ test "project config parses and defaults public directory" {
 
     try std.Io.Dir.createDirPath(tmp.dir, io, "public");
     try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/app.ts",
@@ -280,7 +280,7 @@ test "project config parses and defaults public directory" {
         ,
     });
 
-    const manifest_path = try std.fs.path.resolve(std.testing.allocator, &.{ tmp.sub_path, "zigttp.json" });
+    const manifest_path = try std.fs.path.resolve(std.testing.allocator, &.{ tmp.sub_path, "zttp.json" });
     defer std.testing.allocator.free(manifest_path);
 
     var config = try loadAbsolute(std.testing.allocator, io, manifest_path);
@@ -306,7 +306,7 @@ test "discover finds manifest from relative handler path" {
 
     try std.Io.Dir.createDirPath(tmp.dir, io, "src");
     try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/handler.ts"

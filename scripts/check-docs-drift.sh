@@ -7,7 +7,7 @@ fail() {
 }
 
 modules_doc="docs/virtual-modules/README.md"
-registry_file="packages/zigts/src/builtin_modules.zig"
+registry_file="packages/zts/src/builtin_modules.zig"
 
 [[ -f "$modules_doc" ]] || fail "missing $modules_doc"
 [[ -f "$registry_file" ]] || fail "missing $registry_file"
@@ -124,7 +124,7 @@ compare_doc_list() {
 module_count=$(
   awk '
     /pub const builtin_governance_entries/ { in_entries = 1 }
-    in_entries && /\.specifier = "zigttp:/ { count += 1 }
+    in_entries && /\.specifier = "zttp:/ { count += 1 }
     in_entries && /^};/ { print count; exit }
   ' "$registry_file"
 )
@@ -135,7 +135,7 @@ doc_count=$(
   awk '
     /^## Module Catalog/ { in_catalog = 1; next }
     /^## / && in_catalog { exit }
-    in_catalog && /^\| `zigttp:/ { count += 1 }
+    in_catalog && /^\| `zttp:/ { count += 1 }
     END { print count + 0 }
   ' "$modules_doc"
 )
@@ -155,7 +155,7 @@ while IFS= read -r specifier; do
 done < <(
   awk '
     /pub const builtin_governance_entries/ { in_entries = 1 }
-    in_entries && /\.specifier = "zigttp:/ {
+    in_entries && /\.specifier = "zttp:/ {
       line = $0
       sub(/^.*\.specifier = "/, "", line)
       sub(/".*$/, "", line)
@@ -213,19 +213,19 @@ if grep -n "threaded and evented I/O paths" docs/performance.md >/dev/null; then
 fi
 
 module_count_refs="$(
-  grep -E -n '[0-9]+[^[:cntrl:]]*`zigttp:\*`[^[:cntrl:]]*modules|[0-9]+[^[:cntrl:]]*(native|built-in)[^[:cntrl:]]*modules[^[:cntrl:]]*`zigttp:\*`' \
+  grep -E -n '[0-9]+[^[:cntrl:]]*`zttp:\*`[^[:cntrl:]]*modules|[0-9]+[^[:cntrl:]]*(native|built-in)[^[:cntrl:]]*modules[^[:cntrl:]]*`zttp:\*`' \
     README.md docs/README.md docs/user-guide.md docs/roadmap.md 2>/dev/null || true
 )"
 if [[ -n "$module_count_refs" ]]; then
-  fail "front-door docs hardcode zigttp:* module counts; link to docs/virtual-modules/README.md instead"
+  fail "front-door docs hardcode zttp:* module counts; link to docs/virtual-modules/README.md instead"
 fi
 
 mock_replay_refs="$(
-  grep -R "zigttp mock --replay" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md 2>/dev/null |
+  grep -R "zttp mock --replay" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md 2>/dev/null |
     grep -v '^docs/witnesses.md:' || true
 )"
 if [[ -n "$mock_replay_refs" ]]; then
-  fail "docs advertise unsupported zigttp mock --replay"
+  fail "docs advertise unsupported zttp mock --replay"
 fi
 
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

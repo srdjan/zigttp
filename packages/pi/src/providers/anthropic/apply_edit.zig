@@ -10,7 +10,7 @@ const turn = @import("../../turn.zig");
 pub const tool_name = "apply_edit";
 
 pub const tool_description =
-    "Propose a complete file edit. The zigttp compiler runs edit-simulate " ++
+    "Propose a complete file edit. The zttp compiler runs edit-simulate " ++
     "on the content before it reaches the user; if new violations appear, " ++
     "you will be re-prompted with the diagnostic and must try again.";
 
@@ -89,7 +89,7 @@ test "maybeRemap: non-matching tool batch passes through unchanged" {
     defer arena.deinit();
 
     const calls = [_]turn.ToolCall{
-        .{ .id = "toolu_meta", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_meta", .name = "zts_expert_meta", .args_json = "{}" },
     };
     const reply: turn.AssistantReply = .{
         .response = .{ .tool_calls = &calls },
@@ -97,7 +97,7 @@ test "maybeRemap: non-matching tool batch passes through unchanged" {
 
     const out = try maybeRemap(arena.allocator(), reply, null);
     switch (out.response) {
-        .tool_calls => |out_calls| try testing.expectEqualStrings("zigts_expert_meta", out_calls[0].name),
+        .tool_calls => |out_calls| try testing.expectEqualStrings("zts_expert_meta", out_calls[0].name),
         else => return error.TestFailed,
     }
 }
@@ -129,7 +129,7 @@ test "maybeRemap: apply_edit in a mixed tool batch stays as tool_calls" {
 
     const calls = [_]turn.ToolCall{
         .{ .id = "toolu_edit", .name = tool_name, .args_json = "{\"file\":\"h.ts\",\"content\":\"new\"}" },
-        .{ .id = "toolu_meta", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_meta", .name = "zts_expert_meta", .args_json = "{}" },
     };
     const reply: turn.AssistantReply = .{
         .response = .{ .tool_calls = &calls },

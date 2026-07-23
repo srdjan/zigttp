@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const trace = zq.trace;
 const idempotency_ledger = @import("idempotency_ledger.zig");
 
@@ -30,7 +30,7 @@ pub const DurableStore = union(enum) {
 
     /// Returns an allocated absolute path `<durable_dir>/<name>` and
     /// ensures the directory exists. Caller owns the returned slice.
-    /// Used by non-signal subsystems (`zigttp:websocket`, `zigttp:fetch`)
+    /// Used by non-signal subsystems (`zttp:websocket`, `zttp:fetch`)
     /// to carve out namespaced storage under the shared durable root
     /// without colliding with `signals/`, `scheduled/`, or top-level
     /// `durable-*.jsonl` oplog files.

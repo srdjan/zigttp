@@ -3,7 +3,7 @@
 //!
 //! The tool loads the handler at `path`, runs the FlowChecker, and for each
 //! diagnostic whose property tag appears in the requested `goals` set,
-//! synthesises a witness using `zigts.counterexample.solve`. Each witness
+//! synthesises a witness using `zts.counterexample.solve`. Each witness
 //! carries a concrete Request plus the virtual-module stub sequence needed
 //! to drive the handler into the violating state. The same shape feeds the
 //! runtime witness-replay path used by the expert loop.
@@ -23,16 +23,16 @@
 //! path, then re-invokes this tool until `ok` is true.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
 
-const ir = zigts.parser;
-const counterexample = zigts.counterexample;
-const flow_checker = zigts.flow_checker;
-const json_utils = zigts.json_utils;
-const handler_verifier = zigts.handler_verifier;
+const ir = zts.parser;
+const counterexample = zts.counterexample;
+const flow_checker = zts.flow_checker;
+const json_utils = zts.json_utils;
+const handler_verifier = zts.handler_verifier;
 
 const name = "pi_goal_check";
 
@@ -117,7 +117,7 @@ fn execute(
     const absolute = try common.resolveInsideWorkspace(allocator, root, args[0]);
     defer allocator.free(absolute);
 
-    const source = zigts.file_io.readFile(
+    const source = zts.file_io.readFile(
         allocator,
         absolute,
         common.default_output_limit,
@@ -149,7 +149,7 @@ fn execute(
         }
     }
 
-    var strip_result = zigts.strip(allocator, source, .{
+    var strip_result = zts.strip(allocator, source, .{
         .comptime_env = .{},
     }) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -160,9 +160,9 @@ fn execute(
     };
     defer strip_result.deinit();
 
-    var atoms = zigts.context.AtomTable.init(allocator);
+    var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = zigts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -182,7 +182,7 @@ fn execute(
         );
     };
 
-    var checker = zigts.FlowChecker.init(allocator, ir_view, &atoms);
+    var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     _ = checker.check(handler_fn) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -210,10 +210,10 @@ fn execute(
     // Persist materialised witnesses into the on-disk corpus so they
     // accumulate across goal-check invocations. The corpus is keyed by
     // the workspace-relative handler path. Failures are non-fatal.
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, args[0]) catch null;
+    const corpus_dir = zts.witness_corpus.corpusDir(allocator, args[0]) catch null;
     defer if (corpus_dir) |d| allocator.free(d);
     if (corpus_dir) |d| {
-        zigts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
+        zts.witness_corpus.ensureCorpusDir(allocator, d, args[0]) catch {};
     }
 
     var witness_count: usize = 0;
@@ -245,7 +245,7 @@ fn execute(
         defer witness.deinit(allocator);
 
         if (corpus_dir) |d| {
-            if (zigts.witness_corpus.persist(allocator, d, witness)) |pres| {
+            if (zts.witness_corpus.persist(allocator, d, witness)) |pres| {
                 var owned = pres;
                 owned.deinit(allocator);
             } else |_| {}

@@ -4,7 +4,7 @@
 //! The PI agent host registers `recordEquivalenceReceipt` via a function
 //! pointer at startup (see `dev_cli.zig`, next to the perf-probe and
 //! witness-replay injections). PI cannot import this directly: extracting a
-//! contract needs the compile pipeline (`zigts_cli.precompile`), signing
+//! contract needs the compile pipeline (`zts_cli.precompile`), signing
 //! needs the persistent attest identity, and the ledger pulls in the deploy
 //! stack - and the runtime binaries consume PI, so a direct dependency would
 //! invert the build graph.
@@ -15,19 +15,19 @@
 //!      `contract_diff` classification `prove-behavior` reports, upgraded so
 //!      a changed/removed response path reads as breaking),
 //!   3. signs the verdict with the persistent attest keypair, and
-//!   4. appends a signed `kind=equivalence` row to `.zigttp/proofs.jsonl`.
+//!   4. appends a signed `kind=equivalence` row to `.zttp/proofs.jsonl`.
 //!
 //! Best-effort: a source that fails to compile, a missing `$HOME`, or an
 //! unwritable ledger must never abort the apply.
 
 const std = @import("std");
-const zq = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zq = @import("zts");
+const zts_cli = @import("zts_cli");
 const proof_ledger = @import("proof_ledger.zig");
 const identity = @import("attest/identity.zig");
-const review = @import("zigttp_proof_review").review;
+const review = @import("zttp_proof_review").review;
 
-const precompile = zigts_cli.precompile;
+const precompile = zts_cli.precompile;
 const contract_diff = zq.contract_diff;
 const equivalence_receipt = zq.equivalence_receipt;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -171,7 +171,7 @@ fn contractHashHex(allocator: std.mem.Allocator, contract: *const zq.HandlerCont
 }
 
 /// A `kind=equivalence` row carries its evidence in the `equivalence` object;
-/// `facts` only needs a `contract_sha` so `zigttp proofs` can key the row.
+/// `facts` only needs a `contract_sha` so `zttp proofs` can key the row.
 fn minimalFacts(allocator: std.mem.Allocator, sha: []const u8) !review.ReviewFacts {
     const contract_sha = try allocator.dupe(u8, sha);
     errdefer allocator.free(contract_sha);
@@ -253,7 +253,7 @@ test "contractHashHex hashes the serialized contract JSON" {
 // the `prove-behavior` CLI); their unit tests live there too.
 //
 // The full compile -> diff -> sign -> ledger chain is exercised end-to-end by
-// the `zigttp prove-behavior` CLI (shared verdict computation) and covered
+// the `zttp prove-behavior` CLI (shared verdict computation) and covered
 // per layer: signing in `equivalence_receipt.zig`, ledger round-trip in
 // `proof_ledger.zig`. Spinning the whole JS compile pipeline inside a unit
 // test under a non-leak-checked allocator is deliberately avoided here.

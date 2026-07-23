@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const project_config_mod = @import("project_config");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const proofs_cli = @import("proofs_cli.zig");
 const proof_cli = @import("proof_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
@@ -69,16 +69,16 @@ test {
 fn ensureModelBackendOrExit() void {
     if (pi_app.envHasModelBackend()) return;
     std.debug.print(
-        \\zigttp expert needs a model backend.
+        \\zttp expert needs a model backend.
         \\
         \\Quickest path:
-        \\  zigttp auth claude   # paste your key once, stored at ~/.zigttp/providers.json
+        \\  zttp auth claude   # paste your key once, stored at ~/.zttp/providers.json
         \\
-        \\Or set one of these environment variables and run `zigttp expert` again:
+        \\Or set one of these environment variables and run `zttp expert` again:
         \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
         \\  OPENAI_API_KEY
         \\
-        \\See `zigttp expert --help` for details.
+        \\See `zttp expert --help` for details.
         \\
     , .{});
     std.process.exit(1);
@@ -95,12 +95,12 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
     switch (cli_args.validateExpertArgs(expert_args)) {
         .ok => {},
         .unknown_flag => |flag| {
-            std.debug.print("zigttp expert does not accept flag '{s}'. See `zigttp expert --help`.\n", .{flag});
+            std.debug.print("zttp expert does not accept flag '{s}'. See `zttp expert --help`.\n", .{flag});
             std.process.exit(1);
         },
         .unexpected_arg => |arg| {
             std.debug.print(
-                "zigttp expert does not accept subcommand or positional argument '{s}'. See `zigttp expert --help`.\n",
+                "zttp expert does not accept subcommand or positional argument '{s}'. See `zttp expert --help`.\n",
                 .{arg},
             );
             std.process.exit(1);
@@ -178,7 +178,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.MissingProjectName) {
-                std.debug.print("zigttp init requires a project name.\n\n", .{});
+                std.debug.print("zttp init requires a project name.\n\n", .{});
                 init_command.printInitHelp();
                 std.process.exit(1);
             }
@@ -198,7 +198,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.process.exit(1);
             }
             if (err == error.MissingExtensionName) {
-                std.debug.print("zigttp init --extension requires a name.\n\n", .{});
+                std.debug.print("zttp init --extension requires a name.\n\n", .{});
                 init_command.printInitHelp();
                 std.process.exit(1);
             }
@@ -263,7 +263,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.process.exit(1);
             }
             if (err == error.OutputExists) {
-                std.debug.print("--out target already exists. Pick a new directory; zigttp demo will not overwrite files.\n", .{});
+                std.debug.print("--out target already exists. Pick a new directory; zttp demo will not overwrite files.\n", .{});
                 std.process.exit(1);
             }
             if (err == error.InvalidOutputPath) {
@@ -284,7 +284,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Map parse/usage failures to a clean nonzero exit with a hint instead of
         // propagating a raw Zig error (which prints a stack trace).
         runtime_cli.serveCommandWithEnviron(allocator, user_args[1..], init.environ) catch |err| {
-            std.debug.print("serve: {s}. Run `zigttp serve --help` for usage.\n", .{@errorName(err)});
+            std.debug.print("serve: {s}. Run `zttp serve --help` for usage.\n", .{@errorName(err)});
             std.process.exit(1);
         };
         return;
@@ -338,9 +338,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             if (err == error.UnknownOption or err == error.TooManyArguments) {
                 if (err == error.UnknownOption) {
-                    std.debug.print("zigttp test accepts a single optional tests.jsonl path; flags are not supported here.\n\n", .{});
+                    std.debug.print("zttp test accepts a single optional tests.jsonl path; flags are not supported here.\n\n", .{});
                 } else {
-                    std.debug.print("zigttp test accepts at most one tests.jsonl path.\n\n", .{});
+                    std.debug.print("zttp test accepts at most one tests.jsonl path.\n\n", .{});
                 }
                 test_command.printTestHelp();
                 std.process.exit(1);
@@ -352,20 +352,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         return;
     }
-    // Delegate the full shared analyzer surface to the same code path `zigts`
-    // uses. Membership lives in one place (`zigts_cli.commands`), so the two
+    // Delegate the full shared analyzer surface to the same code path `zts`
+    // uses. Membership lives in one place (`zts_cli.commands`), so the two
     // binaries can never expose a different command set. `compile` is handled
     // separately below: it builds a binary here but precompiles to .zig in
-    // `zigts`, so it is deliberately excluded from the shared registry.
-    if (zigts_cli.isAnalyzerCommand(command)) {
-        // Inject the persistent-keypair signer so `zigttp link` emits a signed
-        // kind=workflow receipt over the hypermedia verdict. The keyless `zigts`
+    // `zts`, so it is deliberately excluded from the shared registry.
+    if (zts_cli.isAnalyzerCommand(command)) {
+        // Inject the persistent-keypair signer so `zttp link` emits a signed
+        // kind=workflow receipt over the hypermedia verdict. The keyless `zts`
         // binary leaves this null and prints no receipt.
-        zigts_cli.system_build.receipt_probe = @import("hypermedia_probe_lib.zig").recordWorkflowReceipt;
-        const analyzer_context: zigts_cli.RunContext = .{
+        zts_cli.system_build.receipt_probe = @import("hypermedia_probe_lib.zig").recordWorkflowReceipt;
+        const analyzer_context: zts_cli.RunContext = .{
             .receipt_probe = @import("semantics_probe_lib.zig").recordSemanticsReceipt,
         };
-        zigts_cli.runWithContext(allocator, user_args, analyzer_context) catch |err| {
+        zts_cli.runWithContext(allocator, user_args, analyzer_context) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);
@@ -383,7 +383,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 err == error.TooManyArguments)
             {
                 std.debug.print(
-                    "zigttp {s}: invalid arguments ({s}). Run `zigttp {s} --help` for usage.\n",
+                    "zttp {s}: invalid arguments ({s}). Run `zttp {s} --help` for usage.\n",
                     .{ command, @errorName(err), command },
                 );
                 std.process.exit(1);
@@ -434,7 +434,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "ledger")) {
         // Session ledger management (list, resume, export, replay). Lives only
-        // in the developer CLI; the pi-free `zigts` analyzer binary does not
+        // in the developer CLI; the pi-free `zts` analyzer binary does not
         // carry it.
         try pi_app.runLedgerCommand(allocator, user_args[1..]);
         return;
@@ -445,8 +445,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     if (std.mem.eql(u8, command, "deploy")) {
         if (deployArgsRequestCloud(user_args[1..])) |flag| {
             std.debug.print(
-                "zigttp deploy with `{s}` selects hosted cloud deploy, which is not available in this beta.\n" ++
-                    "Run `zigttp deploy` without the flag to build a self-contained binary you can run anywhere.\n",
+                "zttp deploy with `{s}` selects hosted cloud deploy, which is not available in this beta.\n" ++
+                    "Run `zttp deploy` without the flag to build a self-contained binary you can run anywhere.\n",
                 .{flag},
             );
             std.process.exit(1);
@@ -481,12 +481,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             },
             error.MissingArgument => {
-                std.debug.print("zigttp verify: <url> is required\n\n", .{});
+                std.debug.print("zttp verify: <url> is required\n\n", .{});
                 verify_cli.printHelp();
                 std.process.exit(verify_cli.exit_arg_error);
             },
             error.UnknownArgument, error.TooManyArguments, error.InvalidTrustKey => {
-                std.debug.print("zigttp verify: invalid arguments\n\n", .{});
+                std.debug.print("zttp verify: invalid arguments\n\n", .{});
                 verify_cli.printHelp();
                 std.process.exit(verify_cli.exit_arg_error);
             },
@@ -569,27 +569,27 @@ test "stored provider injection is limited to expert direct dispatch" {
 }
 
 test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {
-    const path = try resolveDeveloperServeBinary(std.testing.allocator, "/tmp/bin/zigttp");
+    const path = try resolveDeveloperServeBinary(std.testing.allocator, "/tmp/bin/zttp");
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/tmp/bin/zigttp", path);
+    try std.testing.expectEqualStrings("/tmp/bin/zttp", path);
 
     const fallback = try resolveDeveloperServeBinary(std.testing.allocator, "");
     defer std.testing.allocator.free(fallback);
-    try std.testing.expectEqualStrings("zigttp", fallback);
+    try std.testing.expectEqualStrings("zttp", fallback);
 }
 
 test "resolveReentryBinaryAfterChdir preserves PATH lookup for bare names" {
-    const bare = try resolveReentryBinaryAfterChdir(std.testing.allocator, "zigttp", "/repo");
+    const bare = try resolveReentryBinaryAfterChdir(std.testing.allocator, "zttp", "/repo");
     defer std.testing.allocator.free(bare);
-    try std.testing.expectEqualStrings("zigttp", bare);
+    try std.testing.expectEqualStrings("zttp", bare);
 
-    const relative = try resolveReentryBinaryAfterChdir(std.testing.allocator, "./zig-out/bin/zigttp", "/repo");
+    const relative = try resolveReentryBinaryAfterChdir(std.testing.allocator, "./zig-out/bin/zttp", "/repo");
     defer std.testing.allocator.free(relative);
-    try std.testing.expect(std.mem.endsWith(u8, relative, "/repo/zig-out/bin/zigttp"));
+    try std.testing.expect(std.mem.endsWith(u8, relative, "/repo/zig-out/bin/zttp"));
 
-    const absolute = try resolveReentryBinaryAfterChdir(std.testing.allocator, "/usr/local/bin/zigttp", "/repo");
+    const absolute = try resolveReentryBinaryAfterChdir(std.testing.allocator, "/usr/local/bin/zttp", "/repo");
     defer std.testing.allocator.free(absolute);
-    try std.testing.expectEqualStrings("/usr/local/bin/zigttp", absolute);
+    try std.testing.expectEqualStrings("/usr/local/bin/zttp", absolute);
 }
 
 test "doctorPathExists accepts relative paths" {
@@ -606,7 +606,7 @@ test "doctorPathExists accepts relative paths" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try tmp.dir.writeFile(io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "examples/handler/handler.ts"
@@ -628,9 +628,9 @@ test "doctorPathExists accepts relative paths" {
 }
 
 test "release doctor options parse json and out path" {
-    const opts = try cli_release_check.parseReleaseDoctorOptions(&.{ "--json", "--out", ".zigttp/release-passport.json" });
+    const opts = try cli_release_check.parseReleaseDoctorOptions(&.{ "--json", "--out", ".zttp/release-passport.json" });
     try std.testing.expect(opts.json);
-    try std.testing.expectEqualStrings(".zigttp/release-passport.json", opts.out_path.?);
+    try std.testing.expectEqualStrings(".zttp/release-passport.json", opts.out_path.?);
     try std.testing.expectError(error.InvalidArgument, cli_release_check.parseReleaseDoctorOptions(&.{"--out"}));
     try std.testing.expectError(error.InvalidArgument, cli_release_check.parseReleaseDoctorOptions(&.{"--bad"}));
 }
@@ -715,7 +715,7 @@ test "doctorCommand passes configured sqlite path into analyzer" {
 
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.writeFile(io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/handler.ts",
@@ -735,7 +735,7 @@ test "doctorCommand passes configured sqlite path into analyzer" {
     try tmp.dir.writeFile(io, .{
         .sub_path = "src/handler.ts",
         .data =
-        \\import { sql, sqlMany } from "zigttp:sql";
+        \\import { sql, sqlMany } from "zttp:sql";
         \\
         \\sql("listUsers", "SELECT id, name FROM users ORDER BY id ASC");
         \\
@@ -768,7 +768,7 @@ const ReleaseDoctorFixtureOptions = struct {
 };
 
 fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {
-    try tmp.dir.createDirPath(io, "packages/zigts/src");
+    try tmp.dir.createDirPath(io, "packages/zts/src");
     try tmp.dir.createDirPath(io, "packages/runtime/src");
     try tmp.dir.createDirPath(io, "docs/virtual-modules");
     try tmp.dir.createDirPath(io, "docs");
@@ -779,13 +779,13 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .sub_path = "build.zig.zon",
         .data =
         \\.{
-        \\    .name = .zigttp,
+        \\    .name = .zttp,
         \\    .version = "0.18.0",
         \\}
         ,
     });
     try tmp.dir.writeFile(io, .{
-        .sub_path = "packages/zigts/src/root.zig",
+        .sub_path = "packages/zts/src/root.zig",
         .data =
         \\pub const version = struct {
         \\    pub const string = "0.18.0";
@@ -821,7 +821,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\bash scripts/test-examples.sh
         \\bash scripts/test-install-archive-safety.sh
         \\bash scripts/check-semantics-spec.sh
-        \\zigts meta --json
+        \\zts meta --json
         ,
     });
     try tmp.dir.writeFile(io, .{
@@ -855,7 +855,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\bash scripts/test-examples.sh
         \\bash scripts/test-install-archive-safety.sh
         \\bash scripts/check-semantics-spec.sh
-        \\./zig-out/bin/zigttp doctor --release --json
+        \\./zig-out/bin/zttp doctor --release --json
         \\contents: write
         ,
     });
@@ -886,7 +886,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\# Virtual Modules
         \\| Module | Exports | Capabilities |
         \\|---|---|---|
-        \\| `zigttp:env` | `env` | `env`, `policy_check` |
+        \\| `zttp:env` | `env` | `env`, `policy_check` |
         ,
     });
     try tmp.dir.writeFile(io, .{
@@ -909,7 +909,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "packages/runtime/src/dev_cli.zig",
-        .data = "zigttp verify <url>\nproofs\n--no-attest\n",
+        .data = "zttp verify <url>\nproofs\n--no-attest\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "packages/runtime/src/proofs_cli.zig",

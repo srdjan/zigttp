@@ -1,4 +1,4 @@
-//! `zigttp doctor` and its diagnostic printers, extracted from dev_cli.zig.
+//! `zttp doctor` and its diagnostic printers, extracted from dev_cli.zig.
 //!
 //! Validates the project discovered from the current directory (or an
 //! explicit path / handler file) and prints a checklist for the files and
@@ -9,8 +9,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
-const zigts_cli = @import("zigts_cli");
-const precompile = zigts_cli.precompile;
+const zts_cli = @import("zts_cli");
+const precompile = zts_cli.precompile;
 const self_extract = @import("self_extract.zig");
 const cli_release_check = @import("cli_release_check.zig");
 const cli_paths = @import("cli_paths.zig");
@@ -23,7 +23,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
     }
 
     if (argv.len > 1) {
-        std.debug.print("zigttp doctor accepts at most one path.\n\n", .{});
+        std.debug.print("zttp doctor accepts at most one path.\n\n", .{});
         printDoctorHelp();
         return error.InvalidArgument;
     }
@@ -39,7 +39,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
     if (project) |*cfg| {
         var failures: usize = 0;
 
-        std.debug.print("zigttp doctor\n", .{});
+        std.debug.print("zttp doctor\n", .{});
         std.debug.print("Project root: {s}\n\n", .{cfg.root_dir});
 
         printDoctorOk("manifest", cfg.manifest_path);
@@ -126,19 +126,19 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
         std.debug.print("\n", .{});
         if (failures > 0) {
             std.debug.print("Doctor: {d} required check{s} failed\n", .{ failures, if (failures == 1) @as([]const u8, "") else "s" });
-            std.debug.print("Next: fix the failed row above, then run `zigttp doctor` again.\n", .{});
+            std.debug.print("Next: fix the failed row above, then run `zttp doctor` again.\n", .{});
             return error.DoctorFailed;
         }
         std.debug.print("Doctor: OK\n", .{});
-        std.debug.print("Next: zigttp dev\n", .{});
+        std.debug.print("Next: zttp dev\n", .{});
         return;
     }
 
     if (start_path) |path| {
-        std.debug.print("No zigttp.json found. Treating '{s}' as ad hoc source.\n", .{path});
+        std.debug.print("No zttp.json found. Treating '{s}' as ad hoc source.\n", .{path});
         std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{}) catch |err| {
             std.debug.print("[fail] source   cannot read {s}: {}\n", .{ path, err });
-            std.debug.print("Next: pass a readable handler path or run inside a project with zigttp.json.\n", .{});
+            std.debug.print("Next: pass a readable handler path or run inside a project with zttp.json.\n", .{});
             return error.FileNotFound;
         };
         std.debug.print("Doctor: OK\n", .{});
@@ -150,11 +150,11 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
 
 pub fn printDoctorHelp() void {
     const help =
-        \\zigttp doctor [path]
-        \\zigttp doctor --release [--json] [--out FILE]
+        \\zttp doctor [path]
+        \\zttp doctor --release [--json] [--out FILE]
         \\
         \\Validate the project discovered from the current directory, a handler
-        \\path, or a zigttp.json path. Prints a checklist for the files and
+        \\path, or a zttp.json path. Prints a checklist for the files and
         \\runtime options that affect local development.
         \\
         \\With --release, validates the current beta release evidence and prints
@@ -166,9 +166,9 @@ pub fn printDoctorHelp() void {
         \\  sqlite/durable settings, and outbound HTTP configuration.
         \\
         \\Examples:
-        \\  zigttp doctor
-        \\  zigttp doctor src/handler.ts
-        \\  zigttp doctor --release --json
+        \\  zttp doctor
+        \\  zttp doctor src/handler.ts
+        \\  zttp doctor --release --json
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -187,13 +187,13 @@ pub fn runDoctorAnalyzerForProject(
 
 fn printDoctorAnalyzerError(err: anyerror) void {
     std.debug.print("[fail] check    handler analyzer could not run: {}\n", .{err});
-    std.debug.print("       next     run `zigttp check` for full diagnostics after fixing the project paths\n", .{});
+    std.debug.print("       next     run `zttp check` for full diagnostics after fixing the project paths\n", .{});
 }
 
 fn printDoctorCheckFailure(check: *const precompile.CheckResult) void {
     std.debug.print("[fail] check    handler analyzer found {d} error(s)\n", .{check.totalErrors()});
     printCheckStageFailures(check, "       ");
-    std.debug.print("       next     run `zigttp check` for full diagnostics\n", .{});
+    std.debug.print("       next     run `zttp check` for full diagnostics\n", .{});
 }
 
 pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []const u8) void {
@@ -216,20 +216,20 @@ fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {
     defer allocator.free(self_path);
 
     const runtime_path = cli_paths.resolveRuntimeBinary(allocator, self_path) catch {
-        printDoctorSkip("runtime", "zigttp-runtime not found beside zigttp");
+        printDoctorSkip("runtime", "zttp-runtime not found beside zttp");
         return;
     };
     defer allocator.free(runtime_path);
 
-    if (std.mem.endsWith(u8, runtime_path, "zigttp-runtime")) {
+    if (std.mem.endsWith(u8, runtime_path, "zttp-runtime")) {
         printDoctorOk("runtime", runtime_path);
     } else {
         std.debug.print("[warn] runtime  using fallback template: {s}\n", .{runtime_path});
     }
 }
 
-/// Non-failing readiness row: does `zigttp expert` have a provider key? Mirrors
-/// the auth/expert resolution exactly: stored `~/.zigttp/providers.json` values
+/// Non-failing readiness row: does `zttp expert` have a provider key? Mirrors
+/// the auth/expert resolution exactly: stored `~/.zttp/providers.json` values
 /// are injected into the env first, then the same env vars are read with the
 /// same "blank counts as missing" trimming the expert fail-fast path applies.
 fn printDoctorExpertKey(allocator: std.mem.Allocator) void {
@@ -239,7 +239,7 @@ fn printDoctorExpertKey(allocator: std.mem.Allocator) void {
     } else if (doctorExpertKeyEnv("OPENAI_API_KEY")) {
         printDoctorOk("expert", "OPENAI_API_KEY configured");
     } else {
-        std.debug.print("[info] expert   no provider key; run `zigttp auth claude` to enable `zigttp expert`\n", .{});
+        std.debug.print("[info] expert   no provider key; run `zttp auth claude` to enable `zttp expert`\n", .{});
     }
 }
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const proof_enrichment = @import("proof_enrichment.zig");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
@@ -110,7 +110,7 @@ pub fn exportSessionLedger(
     }
 
     buf = aw.toArrayList();
-    try zigts.file_io.writeFile(allocator, out_path, buf.items);
+    try zts.file_io.writeFile(allocator, out_path, buf.items);
 }
 
 pub fn collectSessionLedger(
@@ -211,7 +211,7 @@ pub fn readLedgerFile(
     allocator: std.mem.Allocator,
     input_path: []const u8,
 ) !ExportBundle {
-    const raw = try zigts.file_io.readFile(allocator, input_path, 64 * 1024 * 1024);
+    const raw = try zts.file_io.readFile(allocator, input_path, 64 * 1024 * 1024);
     defer allocator.free(raw);
 
     var lines = std.mem.splitScalar(u8, raw, '\n');
@@ -245,7 +245,7 @@ pub fn replayBundleInWorkspace(
         const absolute = try tools_common.resolveInsideWorkspace(allocator, workspace_root, patch.payload.file);
         defer allocator.free(absolute);
 
-        const current_before = zigts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
+        const current_before = zts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
@@ -261,7 +261,7 @@ pub fn replayBundleInWorkspace(
         }
 
         try ensureParentDir(allocator, absolute);
-        try zigts.file_io.writeFile(allocator, absolute, patch.payload.after);
+        try zts.file_io.writeFile(allocator, absolute, patch.payload.after);
 
         var analysis = try proof_enrichment.analyzePatch(
             allocator,
@@ -273,7 +273,7 @@ pub fn replayBundleInWorkspace(
         );
         defer analysis.deinit(allocator);
 
-        const current_hash = zigts.rule_registry.policyHash();
+        const current_hash = zts.rule_registry.policyHash();
         if (!std.mem.eql(u8, &current_hash, patch.payload.policy_hash)) {
             return .{
                 .kind = .policy_drift,
@@ -330,7 +330,7 @@ pub fn replayLedgerOntoRef(
     const root = try tools_common.workspaceRoot(allocator);
     defer allocator.free(root);
 
-    const worktree_dir = try std.fmt.allocPrint(allocator, "/tmp/zigts-ledger-replay-{d}", .{nowUnixMs()});
+    const worktree_dir = try std.fmt.allocPrint(allocator, "/tmp/zts-ledger-replay-{d}", .{nowUnixMs()});
     defer allocator.free(worktree_dir);
 
     const add_argv = [_][]const u8{ "git", "worktree", "add", "--detach", worktree_dir, onto_ref };
@@ -435,7 +435,7 @@ fn summaryU32(obj: std.json.ObjectMap, key: []const u8) u32 {
 /// null for a session that never wrote one (empty or in-progress). Best-effort:
 /// an unreadable file or a malformed line is skipped, never fatal.
 fn readLastSessionSummary(allocator: std.mem.Allocator, events_path: []const u8) !?SummaryStat {
-    const bytes = zigts.file_io.readFile(allocator, events_path, 16 * 1024 * 1024) catch return null;
+    const bytes = zts.file_io.readFile(allocator, events_path, 16 * 1024 * 1024) catch return null;
     defer allocator.free(bytes);
 
     var found: ?SummaryStat = null;
@@ -746,12 +746,12 @@ fn printReplayResult(result: ReplayResult) void {
 
 fn printHelp() void {
     const help =
-        \\zigttp ledger - export, replay, or aggregate verified_patch ledgers
+        \\zttp ledger - export, replay, or aggregate verified_patch ledgers
         \\
         \\Usage:
-        \\  zigttp ledger export --session <id> --out <path>
-        \\  zigttp ledger replay --input <path> --onto <git-ref>
-        \\  zigttp ledger stats
+        \\  zttp ledger export --session <id> --out <path>
+        \\  zttp ledger replay --input <path> --onto <git-ref>
+        \\  zttp ledger stats
         \\
         \\`stats` aggregates every session's summary for the current workspace
         \\into the staked metrics: expert success rate, median round-trips to
@@ -773,7 +773,7 @@ test "collectSessionLedger exports empty ledger when events file is missing" {
     var tmp = try initTmp(testing.allocator);
     defer tmp.cleanup(testing.allocator);
 
-    var env_override = try EnvOverride.set(testing.allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    var env_override = try EnvOverride.set(testing.allocator, "ZTTP_SESSIONS_DIR", tmp.abs_path);
     defer env_override.restore(testing.allocator);
 
     const hash = try session_paths.cwdHashFull(testing.allocator);
@@ -862,7 +862,7 @@ test "readLedgerFile round-trips exported verified patch payload" {
     try writePatchLine(&aw.writer, patch);
     try aw.writer.writeByte('\n');
     buf = aw.toArrayList();
-    try zigts.file_io.writeFile(testing.allocator, path, buf.items);
+    try zts.file_io.writeFile(testing.allocator, path, buf.items);
 
     var bundle = try readLedgerFile(testing.allocator, path);
     defer bundle.deinit(testing.allocator);
@@ -879,7 +879,7 @@ test "replayBundleInWorkspace detects policy drift" {
 
     const file_path = try tmp.childPath(testing.allocator, "handler.ts");
     defer testing.allocator.free(file_path);
-    try zigts.file_io.writeFile(testing.allocator, file_path, "function handler(req: Request): Response { return Response.json({ ok: true }); }");
+    try zts.file_io.writeFile(testing.allocator, file_path, "function handler(req: Request): Response { return Response.json({ ok: true }); }");
 
     const patches = try testing.allocator.alloc(LedgerPatch, 1);
     patches[0] = .{

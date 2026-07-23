@@ -23,11 +23,11 @@
 //! tool exit. A missing corpus is not an error: it returns total:0.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_utils = zigts.json_utils;
-const witness_corpus = zigts.witness_corpus;
+const json_utils = zts.json_utils;
+const witness_corpus = zts.witness_corpus;
 
 const name = "pi_witnesses";
 
@@ -71,7 +71,7 @@ fn execute(
     }
 
     const handler_path = args[0];
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch {
+    const corpus_dir = zts.witness_corpus.corpusDir(allocator, handler_path) catch {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to compute corpus directory for {s}\n",
@@ -199,7 +199,7 @@ test "execute lists persisted entries with summary and counts" {
 
     // Seed the corpus directly via the witness_corpus API so the test does
     // not depend on flow_checker producing a witness from sample source.
-    const counterexample = zigts.counterexample;
+    const counterexample = zts.counterexample;
 
     const dir = try witness_corpus.corpusDir(allocator, "h.ts");
     defer allocator.free(dir);

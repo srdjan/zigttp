@@ -1,6 +1,6 @@
 //! Small JSON string-escape helper shared by the request + tools_schema
 //! serializers. Kept local to `anthropic/` rather than re-exporting from
-//! zigts to avoid widening the named-module surface for one function.
+//! zts to avoid widening the named-module surface for one function.
 
 const std = @import("std");
 

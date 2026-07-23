@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:cache",
+  "specifier": "zttp:cache",
   "source": "packages/modules/src/data/cache.zig",
   "requiredCapabilities": [
     "clock",

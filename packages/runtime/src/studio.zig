@@ -1,12 +1,12 @@
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
-const review = @import("zigttp_proof_review").review;
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
+const review = @import("zttp_proof_review").review;
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
-const compat = zigts.compat;
+const compat = zts.compat;
 const demo = @import("demo.zig");
 const proof_quest = @import("proof_quest.zig");
 
@@ -96,7 +96,7 @@ const CallerReceipt = struct {
         errdefer allocator.free(fp);
         const verify_url = try std.fmt.allocPrint(allocator, "http://{s}:{d}/", .{ input.host, input.port });
         errdefer allocator.free(verify_url);
-        const verify_command = try std.fmt.allocPrint(allocator, "zigttp verify {s}", .{verify_url});
+        const verify_command = try std.fmt.allocPrint(allocator, "zttp verify {s}", .{verify_url});
         errdefer allocator.free(verify_command);
         const well_known_url = try std.fmt.allocPrint(allocator, "http://{s}:{d}{s}", .{
             input.host,
@@ -341,7 +341,7 @@ pub const State = struct {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        _ = try zigts_cli.precompile.runGenTests(allocator, self.handler_path, &aw.writer);
+        _ = try zts_cli.precompile.runGenTests(allocator, self.handler_path, &aw.writer);
         buf = aw.toArrayList();
         return try buf.toOwnedSlice(allocator);
     }
@@ -390,7 +390,7 @@ pub const State = struct {
     ) ![]u8 {
         if (!isHexKey(key)) return error.InvalidWitnessKey;
 
-        const corpus_dir = zigts.witness_corpus.corpusDir(allocator, self.handler_path) catch return error.WitnessNotFound;
+        const corpus_dir = zts.witness_corpus.corpusDir(allocator, self.handler_path) catch return error.WitnessNotFound;
         defer allocator.free(corpus_dir);
 
         const file_path = try std.fmt.allocPrint(
@@ -400,7 +400,7 @@ pub const State = struct {
         );
         defer allocator.free(file_path);
 
-        const bytes = zigts.file_io.readFile(allocator, file_path, 1 * 1024 * 1024) catch |err| switch (err) {
+        const bytes = zts.file_io.readFile(allocator, file_path, 1 * 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => return error.WitnessNotFound,
             else => return err,
         };
@@ -412,7 +412,7 @@ pub const State = struct {
             .{ corpus_dir, key },
         );
         defer allocator.free(marker_path);
-        const pinned = zigts.file_io.fileExists(allocator, marker_path);
+        const pinned = zts.file_io.fileExists(allocator, marker_path);
 
         var aw: std.Io.Writer.Allocating = .init(allocator);
         defer aw.deinit();
@@ -465,10 +465,10 @@ fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
 }
 
 pub fn isStudioPath(path: []const u8) bool {
-    if (std.mem.eql(u8, path, "/_zigttp/studio")) return true;
-    if (std.mem.eql(u8, path, "/_zigttp/studio/")) return true;
-    if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) return true;
-    if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) return true;
+    if (std.mem.eql(u8, path, "/_zttp/studio")) return true;
+    if (std.mem.eql(u8, path, "/_zttp/studio/")) return true;
+    if (std.mem.eql(u8, path, "/_zttp/studio/state.json")) return true;
+    if (std.mem.eql(u8, path, "/_zttp/studio/tests.jsonl")) return true;
     if (std.mem.eql(u8, path, caller_verify_path)) return true;
     if (std.mem.eql(u8, path, demo.state_path)) return true;
     if (std.mem.eql(u8, path, demo.action_path)) return true;
@@ -477,8 +477,8 @@ pub fn isStudioPath(path: []const u8) bool {
     return false;
 }
 
-pub const sse_path = "/_zigttp/studio/events";
-pub const caller_verify_path = "/_zigttp/studio/caller-verify.json";
+pub const sse_path = "/_zttp/studio/events";
+pub const caller_verify_path = "/_zttp/studio/caller-verify.json";
 pub const demo_state_path = demo.state_path;
 pub const demo_action_path = demo.action_path;
 
@@ -514,10 +514,10 @@ pub fn upgradeToSse(state: *State, fd: std.posix.fd_t, allocator: std.mem.Alloca
     try state.subscribe(fd);
 }
 
-/// If `path` is `/_zigttp/studio/witness/<key>.json` and `<key>` is a valid
+/// If `path` is `/_zttp/studio/witness/<key>.json` and `<key>` is a valid
 /// hex string, return the key slice (borrowed from `path`). Otherwise null.
 pub fn witnessDetailKey(path: []const u8) ?[]const u8 {
-    const prefix = "/_zigttp/studio/witness/";
+    const prefix = "/_zttp/studio/witness/";
     const suffix = ".json";
     if (!std.mem.startsWith(u8, path, prefix)) return null;
     if (!std.mem.endsWith(u8, path, suffix)) return null;
@@ -637,7 +637,7 @@ fn factsJson(
     caller_receipt: ?*const CallerReceipt,
 ) ![]u8 {
     const witnesses = try loadWitnessEntries(allocator, handler_path);
-    defer if (witnesses) |entries| zigts.witness_corpus.freeEntries(allocator, entries);
+    defer if (witnesses) |entries| zts.witness_corpus.freeEntries(allocator, entries);
     const witness_total: usize = if (witnesses) |entries| entries.len else 0;
     const verdict = review.classify(update.delta);
 
@@ -855,10 +855,10 @@ fn writeRecentJson(json: *std.json.Stringify, recent: []const RecentEntry) !void
 fn loadWitnessEntries(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
-) !?[]zigts.witness_corpus.Entry {
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return null;
+) !?[]zts.witness_corpus.Entry {
+    const corpus_dir = zts.witness_corpus.corpusDir(allocator, handler_path) catch return null;
     defer allocator.free(corpus_dir);
-    return zigts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
+    return zts.witness_corpus.loadEntries(allocator, corpus_dir) catch |err| switch (err) {
         error.WitnessCorpusMissing => null,
         else => err,
     };
@@ -896,25 +896,25 @@ fn writeNextActionsJson(
             .kind = "add_specs",
             .severity = "info",
             .title = "Narrow source-level proof guardrails",
-            .command = "import type { Spec } from \"zigttp:types\"; type Guardrails = Spec<\"idempotent\" | \"deterministic\" | \"injection_safe\">;",
+            .command = "import type { Spec } from \"zttp:types\"; type Guardrails = Spec<\"idempotent\" | \"deterministic\" | \"injection_safe\">;",
             .detail = "Add a Spec<...> alias and intersect it with the handler return type to narrow the default active set.",
         });
     }
 
     if (!specsPass(facts)) {
-        const command = try std.fmt.allocPrint(allocator, "zigts check {s} --json", .{handler_path});
+        const command = try std.fmt.allocPrint(allocator, "zts check {s} --json", .{handler_path});
         defer allocator.free(command);
         try writeAction(json, .{
             .kind = "repair_specs",
             .severity = "error",
             .title = "Repair failed declared specs",
             .command = command,
-            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zigttp expert via /specs <handler>.",
+            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zttp expert via /specs <handler>.",
         });
     }
 
     if (witness_total > 0) {
-        const command = try std.fmt.allocPrint(allocator, "zigttp witnesses list {s}", .{handler_path});
+        const command = try std.fmt.allocPrint(allocator, "zttp witnesses list {s}", .{handler_path});
         defer allocator.free(command);
         try writeAction(json, .{
             .kind = "inspect_witnesses",
@@ -932,7 +932,7 @@ fn writeNextActionsJson(
             .kind = "review_breaking_delta",
             .severity = "error",
             .title = "Review breaking proof delta",
-            .command = "zigttp proofs diff HEAD~1 HEAD",
+            .command = "zttp proofs diff HEAD~1 HEAD",
             .detail = "The current proof delta removes surface or demotes a property. Review before deploy.",
         });
     } else if (declared_specs_pass) {
@@ -940,15 +940,15 @@ fn writeNextActionsJson(
             .kind = "deploy_ready",
             .severity = "success",
             .title = "Proof state is deploy-ready",
-            .command = "zigttp deploy",
+            .command = "zttp deploy",
             .detail = "The handler verifies, active specs pass, and the proof delta is not breaking.",
         });
         try writeAction(json, .{
             .kind = "share_badge",
             .severity = "success",
             .title = "Write a proof badge",
-            .command = "zigttp deploy && zigttp proofs badge",
-            .detail = "After the local deploy writes a ledger row, export ./zigttp-proof.svg and the README markdown snippet.",
+            .command = "zttp deploy && zttp proofs badge",
+            .detail = "After the local deploy writes a ledger row, export ./zttp-proof.svg and the README markdown snippet.",
         });
     }
     try json.endArray();
@@ -987,9 +987,9 @@ fn specsPass(facts: *const review.ReviewFacts) bool {
 fn writeWitnessesJson(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    entries: ?[]const zigts.witness_corpus.Entry,
+    entries: ?[]const zts.witness_corpus.Entry,
 ) !void {
-    const visible = entries orelse &[_]zigts.witness_corpus.Entry{};
+    const visible = entries orelse &[_]zts.witness_corpus.Entry{};
 
     try json.beginObject();
     try json.objectField("total");
@@ -998,8 +998,8 @@ fn writeWitnessesJson(
     try json.objectField("byProperty");
     try json.beginObject();
     if (visible.len > 0) {
-        const counts = try zigts.witness_corpus.countByPropertySlice(allocator, visible);
-        defer zigts.witness_corpus.freeCounts(allocator, counts);
+        const counts = try zts.witness_corpus.countByPropertySlice(allocator, visible);
+        defer zts.witness_corpus.freeCounts(allocator, counts);
         for (counts) |c| {
             try json.objectField(c.property);
             try json.write(c.count);
@@ -1107,7 +1107,7 @@ pub const index_html =
     \\<head>
     \\<meta charset="utf-8">
     \\<meta name="viewport" content="width=device-width, initial-scale=1">
-    \\<title>zigttp studio</title>
+    \\<title>zttp studio</title>
     \\<style>
     \\:root{color-scheme:dark;--bg:#090b0f;--panel:#11151d;--line:#273140;--text:#eef3f8;--muted:#8d9bab;--ok:#49d17d;--warn:#f1b84b;--bad:#ff6b6b;--accent:#64b5ff}
     \\*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -1139,11 +1139,11 @@ pub const index_html =
     \\</head>
     \\<body><main>
     \\<dialog id="onboarding"><h2>welcome to studio</h2><ol><li><strong>Proven Surface</strong> lists the routes, env vars, and egress hosts the compiler extracted from your handler.</li><li><strong>Property pills</strong> are the proofs the compiler discharged. Watch them flip when you save.</li><li><strong>Witnesses</strong> capture the request that would break a proof. Click one to see the failing path.</li><li>Press <code>.</code> to reopen this overlay any time.</li></ol><p class="hint">Edit your handler. Watch the proof flip live.</p><div class="actions"><button id="onboardingDismiss">Got it</button></div></dialog>
-    \\<header><div><h1>zigttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. A proof substrate for humans and AI agents.</div></div><div class="status" id="status" role="status" aria-live="polite">connecting</div></header>
-    \\<section id="terminalMirror" hidden><details id="terminalDetails"><summary><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zigttp dev</code></span></summary><div id="terminalHint">collapsed on small screens</div><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></details></section>
+    \\<header><div><h1>zttp studio</h1><div class="sub">Your terminal HUD, hyperlinked. A proof substrate for humans and AI agents.</div></div><div class="status" id="status" role="status" aria-live="polite">connecting</div></header>
+    \\<section id="terminalMirror" hidden><details id="terminalDetails"><summary><h2>Live HUD - terminal mirror</h2><span class="echo">same frame as <code>zttp dev</code></span></summary><div id="terminalHint">collapsed on small screens</div><pre id="frameMirror" aria-label="Proof card frame mirrored from the terminal HUD"></pre></details></section>
     \\<section id="questPanel" hidden><div><h2 id="questTitle">Proof Passport</h2><p id="questMessage"></p></div><div id="questActions"></div></section>
     \\<section id="demoPanel" hidden><div><h2>Proof Theater</h2><p id="demoTitle"></p><p class="empty" id="demoWorkspace"></p></div><div id="demoActions"></div><div id="demoWitness" hidden></div></section>
-    \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button id="lensTabProperties" role="tab" aria-selected="true" aria-controls="lensPanelProperties" data-lens="properties" class="active">Properties</button><button id="lensTabTrade" role="tab" aria-selected="false" aria-controls="lensPanelTrade" tabindex="-1" data-lens="trade">Trade</button><button id="lensTabHandover" role="tab" aria-selected="false" aria-controls="lensPanelHandover" tabindex="-1" data-lens="handover">Handover</button><button id="lensTabCaller" role="tab" aria-selected="false" aria-controls="lensPanelCaller" tabindex="-1" data-lens="caller">Caller View</button></div><div id="lensPanelProperties" role="tabpanel" aria-labelledby="lensTabProperties" class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (active)</h2><div id="specs"></div></div><div id="lensPanelTrade" role="tabpanel" aria-labelledby="lensTabTrade" class="lensPane" data-lens="trade" hidden><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div id="lensPanelHandover" role="tabpanel" aria-labelledby="lensTabHandover" class="lensPane" data-lens="handover" hidden><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus" role="status" aria-live="polite"></span></div></div><div id="lensPanelCaller" role="tabpanel" aria-labelledby="lensTabCaller" class="lensPane" data-lens="caller" hidden><h2>Caller View</h2><p class="empty" style="margin:0 0 12px">The proof receipt an outside HTTP caller can verify.</p><pre id="callerPre"></pre><div id="callerActions"><button id="callerVerify">Verify caller receipt</button><span id="callerStatus" role="status" aria-live="polite"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul><span id="actionCopyStatus" role="status" aria-live="polite"></span></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zigttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
+    \\<section class="grid"><div class="pane"><div id="lensBar" role="tablist" aria-label="Proof lens"><button id="lensTabProperties" role="tab" aria-selected="true" aria-controls="lensPanelProperties" data-lens="properties" class="active">Properties</button><button id="lensTabTrade" role="tab" aria-selected="false" aria-controls="lensPanelTrade" tabindex="-1" data-lens="trade">Trade</button><button id="lensTabHandover" role="tab" aria-selected="false" aria-controls="lensPanelHandover" tabindex="-1" data-lens="handover">Handover</button><button id="lensTabCaller" role="tab" aria-selected="false" aria-controls="lensPanelCaller" tabindex="-1" data-lens="caller">Caller View</button></div><div id="lensPanelProperties" role="tabpanel" aria-labelledby="lensTabProperties" class="lensPane active" data-lens="properties"><h2>Verdict</h2><div class="big" id="verdict">...</div><div id="timeline"></div><div id="diagnosticsBlock" hidden><h2 style="color:var(--bad)">Diagnostics</h2><ul id="diagnosticsList"></ul></div><dl id="summary"></dl><h2 style="margin-top:24px">Properties</h2><div id="properties"></div><h2 style="margin-top:24px" id="specsHeading" hidden>Specs (active)</h2><div id="specs"></div></div><div id="lensPanelTrade" role="tabpanel" aria-labelledby="lensTabTrade" class="lensPane" data-lens="trade" hidden><h2>Trade</h2><p class="empty" style="margin:0 0 12px">Each proven property paired with the substrate restrictions that bought it.</p><ul id="tradeRows"></ul></div><div id="lensPanelHandover" role="tabpanel" aria-labelledby="lensTabHandover" class="lensPane" data-lens="handover" hidden><h2>AI Handover</h2><p class="empty" style="margin:0 0 12px">A proof certificate you can paste into Cursor, Claude, or any coding agent.</p><pre id="handoverPre"></pre><div id="handoverActions"><button id="handoverCopy">Copy to clipboard</button><span id="handoverStatus" role="status" aria-live="polite"></span></div></div><div id="lensPanelCaller" role="tabpanel" aria-labelledby="lensTabCaller" class="lensPane" data-lens="caller" hidden><h2>Caller View</h2><p class="empty" style="margin:0 0 12px">The proof receipt an outside HTTP caller can verify.</p><pre id="callerPre"></pre><div id="callerActions"><button id="callerVerify">Verify caller receipt</button><span id="callerStatus" role="status" aria-live="polite"></span></div></div></div><div class="pane"><h2>Proven Surface</h2><div id="surface"></div><h2 style="margin-top:24px">Next Actions</h2><ul id="actions"></ul><span id="actionCopyStatus" role="status" aria-live="polite"></span></div><div class="pane"><section id="counterexampleBlock" hidden><h2 style="color:var(--bad)">Counterexample</h2><div id="counterexampleBody"></div></section><h2>Proof Delta</h2><div id="delta"></div><h2 style="margin-top:24px" id="witnessesHeading" hidden>Witnesses</h2><div id="witnessesCounts"></div><ul id="witnessesList"></ul><h2 style="margin-top:24px">Generated Tests</h2><p><a id="testsLink" href="/_zttp/studio/tests.jsonl" download="handler.tests.jsonl">Download tests.jsonl</a> <span class="empty">regenerated on every recompile</span></p></div></section>
     \\<footer><select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select><input id="url" value="/" aria-label="URL"><button id="send">Send</button></footer>
     \\<pre id="response" role="status" aria-live="polite"></pre>
     \\</main><script>
@@ -1160,7 +1160,7 @@ pub const index_html =
     \\function witnessRows(entries){return (entries||[]).map(e=>`<li class="witness" data-key="${esc(e.key)}"><code>${esc(e.key.slice(0,12))}</code>${e.pinned?' <span class="pill add">pinned</span>':""} <span class="pill off">${esc(e.property)}</span> ${esc(e.summary)}<div class="detail"></div></li>`).join("")}
     \\function fmtUnix(s){if(!s)return"";const d=new Date(s*1000);return d.toISOString().replace("T"," ").replace(/\.\d+Z$/,"Z")}
     \\function renderWitness(d){const meta=(d.events||[]).find(e=>e.type==="witness")||{};const req=(d.events||[]).find(e=>e.type==="request")||{};const ios=(d.events||[]).filter(e=>e.type==="io");const headers=req.headers&&Object.keys(req.headers).length?JSON.stringify(req.headers):"none";const body=req.body==null?"none":(typeof req.body==="string"?req.body:JSON.stringify(req.body));const origin=meta.origin?`line ${meta.origin.line}, col ${meta.origin.column}`:"";const sink=meta.sink?`line ${meta.sink.line}, col ${meta.sink.column}`:"";const stubs=ios.length?`<pre>${esc(ios.map(e=>`#${e.seq} ${e.module}.${e.fn} -> ${typeof e.result==="string"?e.result:JSON.stringify(e.result)}`).join("\n"))}</pre>`:'<span class="empty">none</span>';return `<div class="row"><dt>property</dt><dd>${esc(meta.property||"")}</dd><dt>origin</dt><dd>${esc(origin)}</dd><dt>sink</dt><dd>${esc(sink)}</dd><dt>summary</dt><dd>${esc(meta.summary||"")}</dd><dt>request</dt><dd><code>${esc(req.method||"")} ${esc(req.url||"")}</code></dd><dt>headers</dt><dd>${esc(headers)}</dd><dt>body</dt><dd>${esc(body)}</dd><dt>io stubs</dt><dd>${stubs}</dd><dt>pinned</dt><dd>${d.pinned?"yes":"no"}</dd></div>`}
-    \\async function toggleWitness(li){const detail=li.querySelector(".detail");if(li.classList.contains("open")){li.classList.remove("open");return}li.classList.add("open");if(detail.dataset.loaded==="1")return;detail.innerHTML='<span class="empty">loading...</span>';try{const r=await fetch(`/_zigttp/studio/witness/${encodeURIComponent(li.dataset.key)}.json`,{cache:"no-store"});if(!r.ok){detail.innerHTML=`<span class="empty">HTTP ${r.status}</span>`;return}const d=await r.json();detail.innerHTML=renderWitness(d);detail.dataset.loaded="1"}catch(e){detail.innerHTML=`<span class="empty">${esc(String(e))}</span>`}}
+    \\async function toggleWitness(li){const detail=li.querySelector(".detail");if(li.classList.contains("open")){li.classList.remove("open");return}li.classList.add("open");if(detail.dataset.loaded==="1")return;detail.innerHTML='<span class="empty">loading...</span>';try{const r=await fetch(`/_zttp/studio/witness/${encodeURIComponent(li.dataset.key)}.json`,{cache:"no-store"});if(!r.ok){detail.innerHTML=`<span class="empty">HTTP ${r.status}</span>`;return}const d=await r.json();detail.innerHTML=renderWitness(d);detail.dataset.loaded="1"}catch(e){detail.innerHTML=`<span class="empty">${esc(String(e))}</span>`}}
     \\function toggleDisclosure(el){el.classList.toggle("open");const b=el.querySelector("button[aria-expanded]");if(b)b.setAttribute("aria-expanded",el.classList.contains("open")?"true":"false")}
     \\document.addEventListener("click",ev=>{const li=ev.target.closest("li.witness");if(li){toggleWitness(li);return}const pr=ev.target.closest(".prop.has-trace");if(pr){toggleDisclosure(pr);return}const sp=ev.target.closest(".spec.has-diag");if(sp)toggleDisclosure(sp)})
     \\function readiness(r){if(!r)return"";return `<h2>Release Checklist</h2><ul><li>${r.declaredSpecsPass?"✓":"✗"} active specs pass</li><li>${r.deployReady?"✓":"✗"} deploy verdict: <code>${esc(r.deployVerdict)}</code></li></ul>`}
@@ -1177,8 +1177,8 @@ pub const index_html =
     \\function renderCounterexample(cx){const block=$("counterexampleBlock");const body=$("counterexampleBody");if(!cx){block.hidden=true;body.innerHTML="";return}block.hidden=false;const req=cx.failingRequest?`${cx.failingRequest.method} ${cx.failingRequest.url}${cx.failingRequest.body?" body="+cx.failingRequest.body:""}`:"structural proof cause";body.innerHTML=`<dl class="row"><dt>property</dt><dd><span class="bad">-${esc(cx.label||cx.field||"property")}</span></dd><dt>source</dt><dd><code>${esc(cx.handlerPath||"")}:${cx.line||0}:${cx.column||0}</code></dd><dt>snippet</dt><dd><code>${esc(cx.snippet||"")}</code></dd><dt>why</dt><dd class="hint">${esc(cx.suggestion||"inspect the demoted property and repair the source")}</dd><dt>request</dt><dd>${esc(req)}</dd>${replayRow("previous",cx.previousResponse)}${replayRow("current",cx.currentResponse)}<dt>next</dt><dd>[r] replay live · [s] pin regression · [a] ask expert</dd></dl>`}
     \\function demoButton(a){const label={introduce_bug:"Introduce unsafe edit",repair_bug:"Repair",deploy:"Deploy local",reset:"Reset"}[a]||a;return `<button data-demo-action="${esc(a)}">${esc(label)}</button>`}
     \\function renderDemo(d){$("demoPanel").hidden=false;$("demoTitle").textContent=d.title||d.step||"";$("demoWorkspace").textContent=d.workspace?`workspace: ${d.workspace}`:"";$("demoActions").innerHTML=(d.availableActions||[]).map(demoButton).join("");const w=d.witness;const lines=[];if(w){lines.push(`property: ${esc(w.property)}<br>request: ${esc(w.request)}<br>span: ${esc(w.span)}<br>path: ${esc(w.failingPath)}`)}else if(d.receipt){lines.push(`receipt: ${esc(d.receipt.ledger)} · service ${esc(d.receipt.service)}`)}if(d.expertCommand){lines.push(`open in expert REPL: <code>${esc(d.expertCommand)}</code>`)}if(d.verifyCommand){lines.push(`verify caller receipt: <code>${esc(d.verifyCommand)}</code>`)}if(d.wellKnownUrl){lines.push(`well-known proof: <code>${esc(d.wellKnownUrl)}</code>`)}const p=d.proofPassport||{};if(p.ledgerReady){lines.push(`passport: session <code>${esc(p.sessionId||d.sessionId||"")}</code> has verified ledger context`)}$("demoWitness").hidden=lines.length===0;$("demoWitness").innerHTML=lines.join("<br>")}
-    \\async function pullDemo(){try{const r=await fetch("/_zigttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
-    \\async function runDemoAction(action){const r=await fetch("/_zigttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
+    \\async function pullDemo(){try{const r=await fetch("/_zttp/studio/demo/state.json",{cache:"no-store"});if(r.status===404){$("demoPanel").hidden=true;return}if(r.ok)renderDemo(await r.json())}catch(e){}}
+    \\async function runDemoAction(action){const r=await fetch("/_zttp/studio/demo/action",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action})});if(!r.ok){$("demoWitness").hidden=false;$("demoWitness").textContent=`action failed: HTTP ${r.status} ${await r.text()}`;return}await pull();await pullDemo()}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("[data-demo-action]");if(b)runDemoAction(b.dataset.demoAction)})
     \\let terminalMirrorTouched=false;function syncTerminalMirrorViewport(){const d=$("terminalDetails");if(!d||terminalMirrorTouched)return;d.open=!window.matchMedia("(max-width:900px)").matches}
     \\function renderFrameMirror(s){const sec=$("terminalMirror");const pre=$("frameMirror");if(!sec||!pre)return;const txt=s&&typeof s.frame==="string"?s.frame:"";if(!txt){sec.hidden=true;pre.textContent="";return}sec.hidden=false;pre.textContent=txt;syncTerminalMirrorViewport()}
@@ -1190,26 +1190,26 @@ pub const index_html =
     \\function renderTrade(facts){const props=(facts&&facts.properties)||{};const ul=$("tradeRows");while(ul.firstChild)ul.removeChild(ul.firstChild);TRADE_TABLE.forEach(r=>ul.appendChild(tradeRowEl(r,!!props[r.prop])))}
     \\function renderHandover(s){const cert=(s&&s.proofCertificate)||"";$("handoverPre").textContent=cert||"(no certificate yet - waiting for first proof)"}
     \\function clip(s,n){s=String(s||"");return s.length>n?s.slice(0,n)+"...":s}
-    \\function renderCaller(s){const c=s&&s.callerReceipt;if(!c){$("callerPre").textContent="(not attested yet)\n\nWaiting for a proven receipt. Rebuild without --no-attest if this remains empty." ;return}const local=/https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/)/.test(c.verifyCommand||c.wellKnownUrl||"");const label=local?"Verify locally":"Verify from anywhere";$("callerPre").textContent=`Response headers\n  Zigttp-Proofs: ${c.proofsHeader||"(none)"}\n  Zigttp-Attest: ${clip(c.attestHeader,72)}\n\nWell-known doc\n  ${c.wellKnownUrl}\n\n${label}\n  ${c.verifyCommand}\n\nKey fingerprint\n  ${clip(c.keyFingerprint,32)}`}
+    \\function renderCaller(s){const c=s&&s.callerReceipt;if(!c){$("callerPre").textContent="(not attested yet)\n\nWaiting for a proven receipt. Rebuild without --no-attest if this remains empty." ;return}const local=/https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/)/.test(c.verifyCommand||c.wellKnownUrl||"");const label=local?"Verify locally":"Verify from anywhere";$("callerPre").textContent=`Response headers\n  Zttp-Proofs: ${c.proofsHeader||"(none)"}\n  Zttp-Attest: ${clip(c.attestHeader,72)}\n\nWell-known doc\n  ${c.wellKnownUrl}\n\n${label}\n  ${c.verifyCommand}\n\nKey fingerprint\n  ${clip(c.keyFingerprint,32)}`}
     \\let activeLens="properties";
-    \\function applyLens(name){activeLens=name;document.querySelectorAll("#lensBar button").forEach(b=>{const on=b.dataset.lens===name;b.classList.toggle("active",on);b.setAttribute("aria-selected",on?"true":"false");b.tabIndex=on?0:-1});document.querySelectorAll(".lensPane").forEach(p=>{const on=p.dataset.lens===name;p.classList.toggle("active",on);p.hidden=!on});try{localStorage.setItem("zigttp.studio.lens",name)}catch(e){}}
+    \\function applyLens(name){activeLens=name;document.querySelectorAll("#lensBar button").forEach(b=>{const on=b.dataset.lens===name;b.classList.toggle("active",on);b.setAttribute("aria-selected",on?"true":"false");b.tabIndex=on?0:-1});document.querySelectorAll(".lensPane").forEach(p=>{const on=p.dataset.lens===name;p.classList.toggle("active",on);p.hidden=!on});try{localStorage.setItem("zttp.studio.lens",name)}catch(e){}}
     \\document.addEventListener("click",ev=>{const b=ev.target.closest("#lensBar button");if(b)applyLens(b.dataset.lens)});
     \\document.getElementById("lensBar").addEventListener("keydown",ev=>{const keys=["ArrowLeft","ArrowRight","Home","End"];if(!keys.includes(ev.key))return;ev.preventDefault();const tabs=[...document.querySelectorAll("#lensBar button")];let i=tabs.findIndex(b=>b.dataset.lens===activeLens);if(ev.key==="Home")i=0;else if(ev.key==="End")i=tabs.length-1;else i=(i+(ev.key==="ArrowRight"?1:-1)+tabs.length)%tabs.length;applyLens(tabs[i].dataset.lens);tabs[i].focus()});
-    \\(function(){let saved="properties";try{saved=localStorage.getItem("zigttp.studio.lens")||"properties"}catch(e){}if(saved==="trade"||saved==="handover"||saved==="caller")applyLens(saved)})();
+    \\(function(){let saved="properties";try{saved=localStorage.getItem("zttp.studio.lens")||"properties"}catch(e){}if(saved==="trade"||saved==="handover"||saved==="caller")applyLens(saved)})();
     \\async function copyHandover(){const cert=$("handoverPre").textContent||"";const status=$("handoverStatus");try{await navigator.clipboard.writeText(cert);status.textContent="copied"}catch(e){status.textContent="copy failed - select and copy manually"}setTimeout(()=>{status.textContent=""},2400)}
     \\{const b=$("handoverCopy");if(b)b.onclick=copyHandover}
-    \\async function verifyCaller(){const status=$("callerStatus");status.textContent="verifying";try{const r=await fetch("/_zigttp/studio/caller-verify.json",{cache:"no-store"});if(!r.ok){status.textContent=`verify failed: HTTP ${r.status}`;return}const v=await r.json();status.textContent=`verified ${clip(v.keyFingerprint,12)}`}catch(e){status.textContent="verify failed - check server and attestation settings"}}
+    \\async function verifyCaller(){const status=$("callerStatus");status.textContent="verifying";try{const r=await fetch("/_zttp/studio/caller-verify.json",{cache:"no-store"});if(!r.ok){status.textContent=`verify failed: HTTP ${r.status}`;return}const v=await r.json();status.textContent=`verified ${clip(v.keyFingerprint,12)}`}catch(e){status.textContent="verify failed - check server and attestation settings"}}
     \\{const b=$("callerVerify");if(b)b.onclick=verifyCaller}
-    \\async function pull(){try{const r=await fetch("/_zigttp/studio/state.json",{cache:"no-store"});const s=await r.json();render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){$("status").textContent=String(e)}}
+    \\async function pull(){try{const r=await fetch("/_zttp/studio/state.json",{cache:"no-store"});const s=await r.json();render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){$("status").textContent=String(e)}}
     \\let pollTimer=null;function startPolling(){if(!pollTimer)pollTimer=setInterval(pull,750)}function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
-    \\function startEvents(){let es;try{es=new EventSource("/_zigttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{const s=JSON.parse(ev.data);render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
+    \\function startEvents(){let es;try{es=new EventSource("/_zttp/studio/events")}catch(e){startPolling();return}es.onmessage=ev=>{stopPolling();try{const s=JSON.parse(ev.data);render(s);if(s&&s.facts)renderTrade(s.facts);renderHandover(s);renderCaller(s)}catch(e){}};es.onerror=()=>{es.close();startPolling()}}
     \\startEvents();pull();pullDemo();setInterval(pullDemo,1200);
     \\$("send").onclick=async()=>{const b=$("send");const out=$("response");b.disabled=true;b.textContent="Sending...";out.textContent="loading...";try{const r=await fetch($("url").value,{method:$("method").value});out.textContent=`HTTP ${r.status}\n`+await r.text()}catch(e){out.textContent=`Request failed\n${String(e)}`}finally{b.disabled=false;b.textContent="Send"}}
     \\function openOnboarding(){const d=$("onboarding");if(d&&!d.open&&typeof d.showModal==="function")d.showModal()}
-    \\function closeOnboarding(){const d=$("onboarding");if(d&&d.open)d.close();try{localStorage.setItem("zigttp.onboarding.seen","1")}catch(e){}}
+    \\function closeOnboarding(){const d=$("onboarding");if(d&&d.open)d.close();try{localStorage.setItem("zttp.onboarding.seen","1")}catch(e){}}
     \\{const b=$("onboardingDismiss");if(b)b.onclick=closeOnboarding}
     \\document.addEventListener("keydown",ev=>{if(ev.key!==".")return;const t=ev.target;if(t&&/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))return;ev.preventDefault();const d=$("onboarding");if(d&&d.open)closeOnboarding();else openOnboarding()})
-    \\let onboardingChecked=false;function maybeOpenOnboarding(s){if(onboardingChecked)return;if(!s||s.status==="checking")return;onboardingChecked=true;let seen="0";try{seen=localStorage.getItem("zigttp.onboarding.seen")||"0"}catch(e){}if(seen==="1")return;const urgent=s.status==="error"||s.verdict==="breaking"||!!s.counterexample||(s.diagnostics||[]).length>0;if(!urgent)openOnboarding()}
+    \\let onboardingChecked=false;function maybeOpenOnboarding(s){if(onboardingChecked)return;if(!s||s.status==="checking")return;onboardingChecked=true;let seen="0";try{seen=localStorage.getItem("zttp.onboarding.seen")||"0"}catch(e){}if(seen==="1")return;const urgent=s.status==="error"||s.verdict==="breaking"||!!s.counterexample||(s.diagnostics||[]).length>0;if(!urgent)openOnboarding()}
     \\document.querySelector("#terminalDetails summary").addEventListener("click",ev=>{terminalMirrorTouched=true;ev.currentTarget.parentElement.classList.add("user-open")})
     \\window.addEventListener("resize",syncTerminalMirrorViewport)
     \\document.addEventListener("click",async ev=>{const b=ev.target.closest("[data-copy-command]");if(!b)return;const a=lastActions[Number(b.dataset.copyCommand)];const status=$("actionCopyStatus");if(!a)return;try{await navigator.clipboard.writeText(a.command||"");status.textContent="command copied"}catch(e){status.textContent="copy failed - select the command manually"}setTimeout(()=>{status.textContent=""},2400)})
@@ -1217,10 +1217,10 @@ pub const index_html =
 ;
 
 test "studio path matcher is scoped to studio endpoints" {
-    try std.testing.expect(isStudioPath("/_zigttp/studio"));
-    try std.testing.expect(isStudioPath("/_zigttp/studio/state.json"));
+    try std.testing.expect(isStudioPath("/_zttp/studio"));
+    try std.testing.expect(isStudioPath("/_zttp/studio/state.json"));
     try std.testing.expect(isStudioPath(sse_path));
-    try std.testing.expect(!isStudioPath("/_zigttp/durable/contract"));
+    try std.testing.expect(!isStudioPath("/_zttp/durable/contract"));
 }
 
 test "broadcast on a State with no subscribers does not allocate or leak" {
@@ -1231,7 +1231,7 @@ test "broadcast on a State with no subscribers does not allocate or leak" {
 }
 
 test "studio HTML client wires EventSource with polling fallback" {
-    try std.testing.expect(std.mem.indexOf(u8, index_html, "new EventSource(\"/_zigttp/studio/events\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "new EventSource(\"/_zttp/studio/events\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "startPolling") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "setInterval(pull,750)") != null);
 }
@@ -1245,7 +1245,7 @@ test "studio HTML wires the diagnostics card" {
 test "studio HTML wires the on-boarding overlay" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"onboarding\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "welcome to studio") != null);
-    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp.onboarding.seen") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zttp.onboarding.seen") != null);
     try std.testing.expect(std.mem.indexOf(u8, index_html, "openOnboarding") != null);
 }
 
@@ -1297,18 +1297,18 @@ test "errorJson omits diagnostics field when slice is empty or null" {
 test "witnessDetailKey accepts hex keys and rejects bad shapes" {
     try std.testing.expectEqualStrings(
         "abc123",
-        witnessDetailKey("/_zigttp/studio/witness/abc123.json").?,
+        witnessDetailKey("/_zttp/studio/witness/abc123.json").?,
     );
     try std.testing.expectEqualStrings(
         "5adb97e49d3781ba300ffac0e47dcd1ea6efa9079992502041544b84944eb892",
-        witnessDetailKey("/_zigttp/studio/witness/5adb97e49d3781ba300ffac0e47dcd1ea6efa9079992502041544b84944eb892.json").?,
+        witnessDetailKey("/_zttp/studio/witness/5adb97e49d3781ba300ffac0e47dcd1ea6efa9079992502041544b84944eb892.json").?,
     );
-    try std.testing.expect(witnessDetailKey("/_zigttp/studio/witness/.json") == null);
-    try std.testing.expect(witnessDetailKey("/_zigttp/studio/witness/abc.txt") == null);
-    try std.testing.expect(witnessDetailKey("/_zigttp/studio/witness/../etc/passwd.json") == null);
-    try std.testing.expect(witnessDetailKey("/_zigttp/studio/witness/has-dash.json") == null);
-    try std.testing.expect(witnessDetailKey("/_zigttp/studio/witness/ABC123.json") != null);
-    try std.testing.expect(isStudioPath("/_zigttp/studio/witness/abc123.json"));
+    try std.testing.expect(witnessDetailKey("/_zttp/studio/witness/.json") == null);
+    try std.testing.expect(witnessDetailKey("/_zttp/studio/witness/abc.txt") == null);
+    try std.testing.expect(witnessDetailKey("/_zttp/studio/witness/../etc/passwd.json") == null);
+    try std.testing.expect(witnessDetailKey("/_zttp/studio/witness/has-dash.json") == null);
+    try std.testing.expect(witnessDetailKey("/_zttp/studio/witness/ABC123.json") != null);
+    try std.testing.expect(isStudioPath("/_zttp/studio/witness/abc123.json"));
 }
 
 test "factsJson includes release readiness and next actions" {
@@ -1454,7 +1454,7 @@ test "studio HTML exposes the proof-lens tab bar and three lens panes" {
     try std.testing.expect(std.mem.indexOf(u8, index_html, "id=\"handoverCopy\"") != null);
 
     // Active-lens persistence so a returning developer keeps their view.
-    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp.studio.lens") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zttp.studio.lens") != null);
 
     // The AI-substrate framing lives in the header subtitle as a quiet
     // undertone; the explicit pitch text lives in the Handover certificate.
@@ -1527,7 +1527,7 @@ test "factsJson carries Proof Passport snapshot when provided" {
         .declared_specs = &.{},
     };
     const delta = review.ReviewDelta{};
-    const actions = [_][]const u8{ "zigttp check", "zigttp deploy" };
+    const actions = [_][]const u8{ "zttp check", "zttp deploy" };
     const body = try factsJson(allocator, "src/handler.ts", .{
         .facts = &facts,
         .baseline = null,
@@ -1547,7 +1547,7 @@ test "factsJson carries Proof Passport snapshot when provided" {
 
     try std.testing.expect(std.mem.indexOf(u8, body, "\"quest\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"stage\":\"complete\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"availableActions\":[\"zigttp check\",\"zigttp deploy\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"availableActions\":[\"zttp check\",\"zttp deploy\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"complete\":true") != null);
 }
 

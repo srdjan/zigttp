@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const compat = zq.compat;
 
 const contract_runtime = @import("contract_runtime.zig");
@@ -78,7 +78,7 @@ pub const HandlerPool = struct {
     /// Mutex protecting concurrent trace file writes
     trace_mutex: ?*zq.trace.TraceMutex,
     /// E2E panic-injection path for testing real panic recovery and slot
-    /// quarantine. Set from RuntimeConfig or the ZIGTTP_DEBUG_PANIC_PATH env
+    /// quarantine. Set from RuntimeConfig or the ZTTP_DEBUG_PANIC_PATH env
     /// var at init; null in production.
     debug_panic_path: ?[]const u8 = null,
 
@@ -210,7 +210,7 @@ pub const HandlerPool = struct {
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
             .trace_mutex = null,
-            .debug_panic_path = config.debug_panic_path orelse if (std.c.getenv("ZIGTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
+            .debug_panic_path = config.debug_panic_path orelse if (std.c.getenv("ZTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
         };
         errdefer self.deinit();
 
@@ -856,7 +856,7 @@ pub const HandlerPool = struct {
         if (self.debug_panic_path) |pp| {
             const effective_path = if (request.path.len > 0) request.path else request.url;
             if (std.mem.eql(u8, effective_path, pp)) {
-                @panic("zigttp_debug_panic_path");
+                @panic("zttp_debug_panic_path");
             }
         }
 

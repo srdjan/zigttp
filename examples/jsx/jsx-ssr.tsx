@@ -56,7 +56,7 @@ function getTodos(): Todo[] {
 function handler(req: Request): Response {
     const todos = getTodos();
     const page = (
-        <Layout title="zigttp-server JSX Demo">
+        <Layout title="zttp-server JSX Demo">
             <Card title="Welcome">
                 <p>This page was rendered on the server using JSX!</p>
             </Card>

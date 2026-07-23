@@ -1,7 +1,7 @@
-//! Append-only ledger of proof events. One JSONL line per `zigttp deploy`,
-//! per `dev --watch --prove` swap, and per `zigts check` success.
+//! Append-only ledger of proof events. One JSONL line per `zttp deploy`,
+//! per `dev --watch --prove` swap, and per `zts check` success.
 //!
-//! Storage: `.zigttp/proofs.jsonl`. Lines are appended via POSIX `O_APPEND`;
+//! Storage: `.zttp/proofs.jsonl`. Lines are appended via POSIX `O_APPEND`;
 //! concurrent writers within the PIPE_BUF window (4 KiB on Linux/macOS)
 //! cannot tear lines. Lines exceeding that window are safe under a single
 //! writer.
@@ -10,10 +10,10 @@
 //! the ledger inherits that contract.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const review = @import("zigttp_proof_review").review;
-const state = @import("zigttp_proof_review").state;
-const json_util = @import("zigttp_proof_review").json_util;
+const zts = @import("zts");
+const review = @import("zttp_proof_review").review;
+const state = @import("zttp_proof_review").state;
+const json_util = @import("zttp_proof_review").json_util;
 
 pub const EventKind = enum {
     deploy,
@@ -53,9 +53,9 @@ pub const EventKind = enum {
 };
 
 /// Payload of a `kind=perf` row. The `sig` field is the compact JWS
-/// produced by `zigts.perf_receipt.sign` over the same numeric fields;
+/// produced by `zts.perf_receipt.sign` over the same numeric fields;
 /// downstream verifiers re-hash the handler bytes and call
-/// `zigts.perf_receipt.verify` to confirm the operator's signature.
+/// `zts.perf_receipt.verify` to confirm the operator's signature.
 ///
 /// `sample_count == 0` means the probe was skipped (handler capabilities
 /// disqualified it: see proof_enrichment.zig). The row still records the
@@ -76,7 +76,7 @@ pub const PerfPayload = struct {
 };
 
 /// Payload of a `kind=equivalence` row (proof-carrying changes). The `sig`
-/// field is the compact JWS produced by `zigts.equivalence_receipt.sign`
+/// field is the compact JWS produced by `zts.equivalence_receipt.sign`
 /// over the verdict-defining fields; a verifier re-derives the signing input
 /// and checks the operator's signature. `classification` is one of
 /// equivalent / equivalent_modulo_laws / additive / breaking, and
@@ -131,7 +131,7 @@ pub const Event = struct {
 };
 
 pub fn ledgerPath() []const u8 {
-    return ".zigttp/proofs.jsonl";
+    return ".zttp/proofs.jsonl";
 }
 
 pub const AppendParams = struct {
@@ -238,7 +238,7 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
 
     const bytes = aw.writer.buffered();
 
-    const fd = try zigts.file_io.openAppend(allocator, ledgerPath());
+    const fd = try zts.file_io.openAppend(allocator, ledgerPath());
     defer std.Io.Threaded.closeFd(fd);
 
     var written: usize = 0;
@@ -257,13 +257,13 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
 /// Reads in chronological order (oldest first). A missing ledger file
 /// returns an empty slice. Caller frees with `freeEvents`.
 pub fn readEvents(allocator: std.mem.Allocator) ![]Event {
-    const bytes = zigts.file_io.readFile(allocator, ledgerPath(), MAX_LEDGER_BYTES) catch |err| switch (err) {
+    const bytes = zts.file_io.readFile(allocator, ledgerPath(), MAX_LEDGER_BYTES) catch |err| switch (err) {
         error.FileNotFound => return try allocator.alloc(Event, 0),
         // The ledger is append-only with no rotation, so it grows past the cap
         // on a long-lived dev/CI runner. Rather than brick the entire proofs
         // subsystem with a hard error, read the trailing window (recent events
         // are the useful ones for list/show/diff/watch).
-        error.FileTooBig => try zigts.file_io.readFileTail(allocator, ledgerPath(), MAX_LEDGER_BYTES),
+        error.FileTooBig => try zts.file_io.readFileTail(allocator, ledgerPath(), MAX_LEDGER_BYTES),
         else => return err,
     };
     defer allocator.free(bytes);
@@ -515,7 +515,7 @@ fn parsePerfPayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Perf
 
 const testing = std.testing;
 
-/// Chdir to a tmp dir for tests that need an isolated `.zigttp/` root.
+/// Chdir to a tmp dir for tests that need an isolated `.zttp/` root.
 /// Returned slice is the previous cwd; caller frees with the testing
 /// allocator and restores via `std.Io.Threaded.chdir`.
 pub fn chdirTmpForTest(tmp: *std.testing.TmpDir) ![:0]u8 {
@@ -715,7 +715,7 @@ test "readEvents rejects malformed lines" {
 
     for (cases) |line| {
         // writeFile uses O_TRUNC, so each iteration starts fresh.
-        try zigts.file_io.writeFile(testing.allocator, ledgerPath(), line);
+        try zts.file_io.writeFile(testing.allocator, ledgerPath(), line);
         try testing.expectError(error.InvalidLedgerLine, readEvents(testing.allocator));
     }
 }
@@ -783,7 +783,7 @@ test "appendEvent without perf payload omits the field for back-compat" {
 
     // Confirm the JSON has no "perf" key so old consumers see exactly
     // what they saw pre-Slice H.
-    const raw = try zigts.file_io.readFile(testing.allocator, ledgerPath(), 8192);
+    const raw = try zts.file_io.readFile(testing.allocator, ledgerPath(), 8192);
     defer testing.allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"perf\"") == null);
 

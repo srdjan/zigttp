@@ -2,13 +2,13 @@
 //! handler authoring plan plus a compiler-verified candidate source.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const proof_enrichment = @import("../proof_enrichment.zig");
 const common = @import("common.zig");
 
-const json_utils = zigts.json_utils;
+const json_utils = zts.json_utils;
 
 const name = "pi_feature_plan";
 
@@ -70,7 +70,7 @@ pub fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const source = zigts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
@@ -261,9 +261,9 @@ pub fn synthesizeRoute(
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    const has_router = std.mem.indexOf(u8, source, "zigttp:router") != null;
+    const has_router = std.mem.indexOf(u8, source, "zttp:router") != null;
     const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
-    const has_spec_import = std.mem.indexOf(u8, source, "from \"zigttp:types\"") != null;
+    const has_spec_import = std.mem.indexOf(u8, source, "from \"zttp:types\"") != null;
     const has_guardrails_alias = std.mem.indexOf(u8, source, "type Guardrails =") != null;
 
     if (!has_router) {
@@ -273,12 +273,12 @@ pub fn synthesizeRoute(
         // satisfies by construction; if the user later adds Date.now() or
         // egress they will see ZTS500 immediately and know which spec broke.
         if (!has_spec_import) {
-            try out.appendSlice(allocator, "import type { Spec } from \"zigttp:types\";\n");
+            try out.appendSlice(allocator, "import type { Spec } from \"zttp:types\";\n");
         }
-        try out.appendSlice(allocator, "import { routerMatch } from \"zigttp:router\";\n");
+        try out.appendSlice(allocator, "import { routerMatch } from \"zttp:router\";\n");
     }
-    if (spec.body_schema != null and std.mem.indexOf(u8, source, "zigttp:validate") == null) {
-        try out.appendSlice(allocator, "import { validateJson } from \"zigttp:validate\";\n");
+    if (spec.body_schema != null and std.mem.indexOf(u8, source, "zttp:validate") == null) {
+        try out.appendSlice(allocator, "import { validateJson } from \"zttp:validate\";\n");
     }
     if (out.items.len > 0 and source.len > 0) try out.append(allocator, '\n');
 
@@ -400,8 +400,8 @@ pub fn buildSteps(
         for (steps.items) |*step| step.deinit(allocator);
         steps.deinit(allocator);
     }
-    if (std.mem.indexOf(u8, source, "zigttp:router") == null) {
-        try steps.append(allocator, try ui_payload.FeaturePlanStep.init(allocator, "ensure_router", "ensure router import", "Add routerMatch from zigttp:router."));
+    if (std.mem.indexOf(u8, source, "zttp:router") == null) {
+        try steps.append(allocator, try ui_payload.FeaturePlanStep.init(allocator, "ensure_router", "ensure router import", "Add routerMatch from zttp:router."));
     }
     try steps.append(allocator, try ui_payload.FeaturePlanStep.init(allocator, "add_route_entry", "add route table entry", "Bind the method/path pair to the generated handler."));
     const handler_detail = try std.fmt.allocPrint(allocator, "Generate {s} for {s} {s}.", .{ handler_name, spec.method, spec.path });
@@ -451,11 +451,11 @@ test "synthesizeRoute replaces a plain handler with router dispatch" {
     // Forge-synthesized handlers carry the author-declared spec set from
     // day one: Spec import, Guardrails alias, and the intersection on
     // the dispatcher's return type.
-    try testing.expect(std.mem.indexOf(u8, proposed, "import type { Spec } from \"zigttp:types\"") != null);
+    try testing.expect(std.mem.indexOf(u8, proposed, "import type { Spec } from \"zttp:types\"") != null);
     try testing.expect(std.mem.indexOf(u8, proposed, "type Guardrails = Spec<") != null);
     try testing.expect(std.mem.indexOf(u8, proposed, "Response & Guardrails") != null);
 
-    var result = try @import("zigts_cli").edit_simulate.simulate(testing.allocator, .{
+    var result = try @import("zts_cli").edit_simulate.simulate(testing.allocator, .{
         .file = "handler.ts",
         .content = proposed,
         .before = source,

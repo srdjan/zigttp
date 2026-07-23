@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:text",
+  "specifier": "zttp:text",
   "source": "packages/modules/src/platform/text.zig",
   "requiredCapabilities": [],
   "exports": [

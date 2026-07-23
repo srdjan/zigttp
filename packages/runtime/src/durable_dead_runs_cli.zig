@@ -66,7 +66,7 @@ pub fn runWith(
     stderr: *std.Io.Writer,
 ) !void {
     const opts = parseOptions(argv) catch |err| {
-        try stderr.writeAll("zigttp durable dead-runs: invalid arguments\n\n");
+        try stderr.writeAll("zttp durable dead-runs: invalid arguments\n\n");
         try writeHelp(stderr);
         return err;
     };
@@ -77,12 +77,12 @@ pub fn runWith(
     }
 
     const durable_dir = opts.durable_dir orelse {
-        try stderr.writeAll("zigttp durable dead-runs: --durable <DIR> is required\n");
+        try stderr.writeAll("zttp durable dead-runs: --durable <DIR> is required\n");
         return error.MissingDurableDir;
     };
     if (opts.id) |id| {
         if (!dead_runs.isValidDeadRunId(id)) {
-            try stderr.writeAll("zigttp durable dead-runs: id must use letters, numbers, '-' or '_'\n");
+            try stderr.writeAll("zttp durable dead-runs: id must use letters, numbers, '-' or '_'\n");
             return error.InvalidDeadRunId;
         }
     }
@@ -137,7 +137,7 @@ fn parseCommand(arg: []const u8) ?Command {
 }
 
 fn missingId(stderr: *std.Io.Writer) !void {
-    try stderr.writeAll("zigttp durable dead-runs: id is required\n");
+    try stderr.writeAll("zttp durable dead-runs: id is required\n");
     return error.MissingId;
 }
 
@@ -163,7 +163,7 @@ fn showCommand(
     stderr: *std.Io.Writer,
 ) !void {
     const payload = (try dead_runs.readDeadRun(allocator, durable_dir, id)) orelse {
-        try stderr.print("zigttp durable dead-runs: not found: {s}\n", .{id});
+        try stderr.print("zttp durable dead-runs: not found: {s}\n", .{id});
         return error.NotFound;
     };
     defer allocator.free(payload);
@@ -201,13 +201,13 @@ fn discardCommand(
 fn writeActionError(stderr: *std.Io.Writer, id: []const u8, err: anyerror) !void {
     switch (err) {
         error.DeadRunMissing => {
-            try stderr.print("zigttp durable dead-runs: not found: {s}\n", .{id});
+            try stderr.print("zttp durable dead-runs: not found: {s}\n", .{id});
         },
         error.DeadRunAlreadyDiscarded => {
-            try stderr.print("zigttp durable dead-runs: already discarded, cannot replay: {s}\n", .{id});
+            try stderr.print("zttp durable dead-runs: already discarded, cannot replay: {s}\n", .{id});
         },
         error.InvalidDeadRunRecord => {
-            try stderr.print("zigttp durable dead-runs: record is corrupt: {s}\n", .{id});
+            try stderr.print("zttp durable dead-runs: record is corrupt: {s}\n", .{id});
         },
         else => {},
     }
@@ -215,13 +215,13 @@ fn writeActionError(stderr: *std.Io.Writer, id: []const u8, err: anyerror) !void
 
 fn writeHelp(writer: *std.Io.Writer) !void {
     try writer.writeAll(
-        \\zigttp durable dead-runs - inspect durable runs that permanently failed recovery
+        \\zttp durable dead-runs - inspect durable runs that permanently failed recovery
         \\
         \\Usage:
-        \\  zigttp durable dead-runs list --durable <DIR>
-        \\  zigttp durable dead-runs show --durable <DIR> <ID>
-        \\  zigttp durable dead-runs replay --durable <DIR> <ID>
-        \\  zigttp durable dead-runs discard --durable <DIR> <ID>
+        \\  zttp durable dead-runs list --durable <DIR>
+        \\  zttp durable dead-runs show --durable <DIR> <ID>
+        \\  zttp durable dead-runs replay --durable <DIR> <ID>
+        \\  zttp durable dead-runs discard --durable <DIR> <ID>
         \\
     );
 }
@@ -293,7 +293,7 @@ test "durable dead-runs cli rejects unsafe ids" {
 
     try std.testing.expectError(
         error.InvalidDeadRunId,
-        runWith(allocator, &.{ "show", "--durable", "/tmp/zigttp-durable", "../x" }, &out.writer, &err.writer),
+        runWith(allocator, &.{ "show", "--durable", "/tmp/zttp-durable", "../x" }, &out.writer, &err.writer),
     );
     try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "id must use") != null);
 }

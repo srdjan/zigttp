@@ -1,8 +1,8 @@
 //! Capsule-replay probe (PI side) — the expert loop's awareness of the Proof
 //! Flight Recorder.
 //!
-//! When a workspace has a recorded capsule (`.zigttp/capsules/default/`, from
-//! `zigttp dev --record-proof`), every applied expert edit can be replayed
+//! When a workspace has a recorded capsule (`.zttp/capsules/default/`, from
+//! `zttp dev --record-proof`), every applied expert edit can be replayed
 //! against it: do the requests the developer actually exercised still
 //! reproduce? A regression means the edit changed observed behavior on a real
 //! request — the single most concrete "you broke something" signal the loop

@@ -1,16 +1,16 @@
 # Restrictions to Proofs
 
 This document is generated from `packages/tools/src/json_diagnostics.zig`.
-It maps each zigts language restriction to the failure class it eliminates
-and the proof it unlocks. Run `zigts restrictions` for the live table.
+It maps each zts language restriction to the failure class it eliminates
+and the proof it unlocks. Run `zts restrictions` for the live table.
 
 Every entry is a deliberate cut from JavaScript or TypeScript that buys
 a specific soundness guarantee. The author-declared intent assertions
-(extracted with `-Dcontract`) and the contract diff (`zigttp proofs show`)
+(extracted with `-Dcontract`) and the contract diff (`zttp proofs show`)
 live above these cuts; the cuts themselves are what make those
 higher-level claims possible.
 
-The proof card's `Trade` lens in `zigttp dev` (press `Tab` to rotate)
+The proof card's `Trade` lens in `zttp dev` (press `Tab` to rotate)
 and the matching tab in Studio render a per-property view of this table
 against the current handler, so you can see exactly which restrictions
 earned each `[+]` chip.
@@ -32,7 +32,7 @@ earned each `[+]` chip.
 | `null` | dual absent-value sentinels | optional-narrowing proof totality | use undefined |
 | `== / !=` | implicit coercion paths | sound type-directed comparison | use === / !== |
 | `++ / --` | hidden in-place mutation in expressions | explicit assignment effects and state isolation | use x = x + 1 |
-| `regex` | opaque accept set and catastrophic backtracking | shape-checkable validation via zigttp:validate schemas | use string methods (includes, startsWith, etc.) |
+| `regex` | opaque accept set and catastrophic backtracking | shape-checkable validation via zttp:validate schemas | use string methods (includes, startsWith, etc.) |
 | `delete` | hidden-class shape mutation | shape-stable property access | build a new object literal with only the keys you keep |
 | `enum` | dual numeric/string lookup and non-exhaustive cases | exhaustive match coverage on discriminated unions | use object literals or discriminated unions |
 | `decorator (@)` | implicit metaprogramming and target rewriting | static call-graph and visible effect composition | use function composition |

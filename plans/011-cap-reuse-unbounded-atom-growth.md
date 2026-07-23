@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files listed as in scope. If any STOP condition occurs, stop and report; do not improvise around it. When done, update the status row for this plan in `plans/README.md`, unless a reviewer says they maintain the index.
 >
-> **Drift check, run first**: `git diff --name-only a4a731bd -- packages/runtime/src/runtime_pool.zig packages/runtime/src/contract_runtime.zig packages/zigts/src/context.zig`
+> **Drift check, run first**: `git diff --name-only a4a731bd -- packages/runtime/src/runtime_pool.zig packages/runtime/src/contract_runtime.zig packages/zts/src/context.zig`
 > Empty means no drift. If any path appears, re-open it and compare against the Current state excerpts before editing.
 
 ## Status
@@ -38,15 +38,15 @@
   };
   ```
   `rt.user_data` is cast to `*Runtime` a few lines above (`runtime_pool.zig:678`), and `packages/runtime/src/zruntime.zig:158-160` confirms `Runtime` has a `ctx: *zq.Context` field, so `rt.ctx.atoms` is reachable from inside this function via the same cast already used for `runtime.prepareForPoolRelease()`.
-- `packages/zigts/src/context.zig:2023` — `pub fn count(self: *AtomTable) usize` already exists and returns the current interned-atom count (see `test "AtomTable count"` at `context.zig:2475`).
-- `packages/zigts/src/context.zig:1969` — the hard cap: `if (self.next_id >= 0xFFFE) return error.OutOfMemory;` (0xFFFE = 65,534).
+- `packages/zts/src/context.zig:2023` — `pub fn count(self: *AtomTable) usize` already exists and returns the current interned-atom count (see `test "AtomTable count"` at `context.zig:2475`).
+- `packages/zts/src/context.zig:1969` — the hard cap: `if (self.next_id >= 0xFFFE) return error.OutOfMemory;` (0xFFFE = 65,534).
 
 ## Commands you will need
 
 | Purpose | Command | Expected on success |
 |---|---|---|
 | Build | `zig build` | exit 0 |
-| zigts tests (AtomTable) | `zig build test-zigts` | success |
+| zts tests (AtomTable) | `zig build test-zts` | success |
 | ZRuntime tests (pooling policy) | `zig build test-zruntime` | success |
 | Format gate | `zig fmt --check build.zig packages/` | no output |
 | Full local gate | `bash scripts/verify.sh` | exit 0 |
@@ -82,7 +82,7 @@
 
 In `contract_runtime.zig`'s `PoolingThresholds`, add `max_dynamic_atoms: u32 = <default>`. Pick a default with real headroom below 0xFFFE (65,534) but high enough not to force needless recycles for legitimately shape-diverse handlers — e.g. 32,768 (half the hard cap) is a reasonable starting point; state your chosen default and rationale in the commit message.
 
-**Verify**: `zig build test-zigts` -> success (no behavior change yet, just a new field with a default).
+**Verify**: `zig build test-zts` -> success (no behavior change yet, just a new field with a default).
 
 ### Step 2: Add the recycle branch
 
@@ -94,7 +94,7 @@ In `runtime_pool.zig`'s `policy_recycle` switch, change the `.reuse_unbounded` a
 
 Add a test that drives a `reuse_unbounded`-policy runtime through enough distinct atom interns to cross the new threshold and asserts it gets recycled (`self.recycles` counter increments, or the pool drops and reissues a fresh runtime on next acquire) rather than continuing to accumulate. Model the harness after existing pooling-policy tests in `contract_runtime.zig`/`runtime_pool.zig`. Also add (or confirm existing coverage for) a test that a `reuse_unbounded` runtime *under* the threshold is *not* recycled, to guard against a fix that recycles too eagerly.
 
-**Verify**: `zig build test-zruntime test-zigts` -> success; the "recycles once over threshold" test fails against the pre-fix `.reuse_unbounded => false` code (temporarily revert Step 2 locally to confirm, then reapply) — do not skip this red-proof.
+**Verify**: `zig build test-zruntime test-zts` -> success; the "recycles once over threshold" test fails against the pre-fix `.reuse_unbounded => false` code (temporarily revert Step 2 locally to confirm, then reapply) — do not skip this red-proof.
 
 ## Test plan
 
@@ -109,7 +109,7 @@ All must hold:
 
 - [ ] `reuse_unbounded` runtimes are recycled once their interned dynamic-atom count reaches the new configurable ceiling, using the existing `dropRuntime` mechanism.
 - [ ] The other three pooling policies are unchanged.
-- [ ] `zig build test-zruntime test-zigts` exit 0.
+- [ ] `zig build test-zruntime test-zts` exit 0.
 - [ ] `bash scripts/verify.sh` exit 0.
 - [ ] New tests cover both over-threshold (recycles) and under-threshold (does not recycle) cases, with the over-threshold case proven to fail pre-fix.
 - [ ] No files outside the in-scope list are modified.

@@ -5,7 +5,7 @@
 //! facts, and renders a single concise card the user reads before any upload
 //! starts. Vocabulary is deliberately aligned with `live_reload.formatUpgradeDiff`:
 //! `safe` / `safe_with_additions` / `breaking`. Vocabulary alignment matters
-//! because a developer iterating with `zigttp dev --watch --prove` should see
+//! because a developer iterating with `zttp dev --watch --prove` should see
 //! the same words at deploy time without context-switching.
 //!
 //! Persistence rule: ReviewFacts contains only contract-derived identifiers.
@@ -20,9 +20,9 @@
 
 const std = @import("std");
 const json_util = @import("json_util.zig");
-const zigts_cli = @import("zigts_cli");
+const zts_cli = @import("zts_cli");
 
-const ProvenFacts = zigts_cli.deploy_manifest.ProvenFacts;
+const ProvenFacts = zts_cli.deploy_manifest.ProvenFacts;
 
 // Verdict mirrors `upgrade_verifier.UpgradeVerdict` so the deploy-time card
 // uses the same words the watch-loop diff already trains the user on. We do
@@ -44,7 +44,7 @@ pub const Verdict = enum {
 };
 
 /// Mirrors `contract_diff.ProofLevel`. Duplicated locally so review.zig stays
-/// independent of zigts contract types and so persisted JSON uses simple
+/// independent of zts contract types and so persisted JSON uses simple
 /// stable strings rather than re-exporting the engine enum.
 pub const ProofLevel = enum {
     complete,
@@ -102,7 +102,7 @@ pub const SpecState = struct {
     /// `dupeSortedDedupedSpecs`.
     diagnostic_code: ?[]const u8 = null,
     /// One-line explanation of why the spec failed (e.g. "property not
-    /// discharged", "contradicts import of zigttp:cache"). Owned when set.
+    /// discharged", "contradicts import of zttp:cache"). Owned when set.
     diagnostic_message: ?[]const u8 = null,
     /// Source line in the handler that caused the demotion. Only populated
     /// for ZTS500 when the verifier captured a `PropertyCause`.
@@ -263,7 +263,7 @@ pub const ReviewFacts = struct {
     /// (so we cannot drift from what `buildProofLabels` and `extractProvenFacts`
     /// have already canonicalised). Capability strings come from
     /// `contract.capabilities.slice()` in the caller; we accept them as a
-    /// borrowed list to keep this module free of zigts contract types.
+    /// borrowed list to keep this module free of zts contract types.
     /// Active specs come from `contract.declared_specs.items` and the
     /// matching not-discharged set is derived by the caller (the contract
     /// already classifies them via spec_discharge).
@@ -745,7 +745,7 @@ pub const RenderOptions = struct {
 
 /// ProofCard is the source-agnostic projection a renderer needs. It borrows
 /// every field from longer-lived data (a DeployReview, a ledger entry, a
-/// live-reload session) so the same card can drive deploy, `zigttp proofs
+/// live-reload session) so the same card can drive deploy, `zttp proofs
 /// show`, the live HUD, and HTML/SVG export. No allocations, no ownership.
 ///
 /// Fields are intentionally a strict subset of DeployReview plus a few that
@@ -1007,7 +1007,7 @@ fn dupeSortedDedupedStrings(
 
 fn dupeSortedDedupedRoutes(
     allocator: std.mem.Allocator,
-    items: []const zigts_cli.deploy_manifest.ProvenRoute,
+    items: []const zts_cli.deploy_manifest.ProvenRoute,
 ) ![]const Route {
     if (items.len == 0) {
         return try allocator.alloc(Route, 0);
@@ -1372,7 +1372,7 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
     const egress_in = [_][]const u8{"api.example.com"};
     const cache_in = [_][]const u8{"sessions"};
     const caps_in = [_][]const u8{ "network", "clock" };
-    const ProvenRoute = zigts_cli.deploy_manifest.ProvenRoute;
+    const ProvenRoute = zts_cli.deploy_manifest.ProvenRoute;
     const routes_in = [_]ProvenRoute{
         .{ .pattern = "/users", .is_prefix = true },
         .{ .pattern = "/healthz", .is_prefix = false },

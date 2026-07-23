@@ -1,46 +1,46 @@
 # Virtual Modules
 
-Virtual modules are native Zig APIs imported from `zigttp:*` specifiers. The
-current built-in set is registered in `packages/zigts/src/builtin_modules.zig`;
+Virtual modules are native Zig APIs imported from `zttp:*` specifiers. The
+current built-in set is registered in `packages/zts/src/builtin_modules.zig`;
 public module specs live in `packages/modules/module-specs/`.
 
-Use `zigttp modules --json` for the live export list from the built binary.
+Use `zttp modules --json` for the live export list from the built binary.
 
 ## Module Catalog
 
 | Module | Exports | Capabilities |
 |---|---|---|
-| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
-| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
-| `zigttp:compose` | `guard`, `pipe` | none |
-| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
-| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
-| `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | `runtime_callback` |
-| `zigttp:env` | `env` | `env`, `policy_check` |
-| `zigttp:fetch` | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
-| `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
-| `zigttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
-| `zigttp:io` | `parallel`, `race` | `runtime_callback` |
-| `zigttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
-| `zigttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` | `runtime_callback` |
-| `zigttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
-| `zigttp:router` | `routerMatch` | none |
-| `zigttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
-| `zigttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |
-| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
-| `zigttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
-| `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
-| `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
-| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
-| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
-| `zigttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
+| `zttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
+| `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
+| `zttp:compose` | `guard`, `pipe` | none |
+| `zttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
+| `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
+| `zttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | `runtime_callback` |
+| `zttp:env` | `env` | `env`, `policy_check` |
+| `zttp:fetch` | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
+| `zttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
+| `zttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
+| `zttp:io` | `parallel`, `race` | `runtime_callback` |
+| `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
+| `zttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` | `runtime_callback` |
+| `zttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
+| `zttp:router` | `routerMatch` | none |
+| `zttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
+| `zttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |
+| `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
+| `zttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
+| `zttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
+| `zttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
+| `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
+| `zttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
+| `zttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
 
 ## Common Usage
 
 ```ts
-import { env } from "zigttp:env";
-import { routerMatch } from "zigttp:router";
-import { sha256 } from "zigttp:crypto";
+import { env } from "zttp:env";
+import { routerMatch } from "zttp:router";
+import { sha256 } from "zttp:crypto";
 
 function handler(req: Request): Response {
     const routes = { "GET /users/:id": true };
@@ -62,15 +62,15 @@ durability boundary need configuration:
 
 | Module | Requirement |
 |---|---|
-| `zigttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
-| `zigttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
-| `zigttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
-| `zigttp:service` | Run with `--system <file>` or set `"system"` in `zigttp.json`. |
-| `zigttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. Dead letters stay under `<durable>/workflow-queue/dead` until `zigttp workflow-queue replay` or `discard`. |
-| `zigttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. This is separate from the persisted workflow queue used by `--workflow-queue`. |
-| `zigttp:durable` | Run with `--durable <dir>`. Durable workflow proof properties appear under `durable.workflow.properties` in `contract.json` and under `durableWorkflow*` fields in proof receipts. |
-| `zigttp:websocket` | Run through the server WebSocket gateway. `setAutoResponse(ws, request, response)` installs a codec-level reply; room keys are request paths, and `getWebSockets(room)` returns every live peer in that room. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
-| `zigttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
+| `zttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
+| `zttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
+| `zttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
+| `zttp:service` | Run with `--system <file>` or set `"system"` in `zttp.json`. |
+| `zttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. Dead letters stay under `<durable>/workflow-queue/dead` until `zttp workflow-queue replay` or `discard`. |
+| `zttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. This is separate from the persisted workflow queue used by `--workflow-queue`. |
+| `zttp:durable` | Run with `--durable <dir>`. Durable workflow proof properties appear under `durable.workflow.properties` in `contract.json` and under `durableWorkflow*` fields in proof receipts. |
+| `zttp:websocket` | Run through the server WebSocket gateway. `setAutoResponse(ws, request, response)` installs a codec-level reply; room keys are request paths, and `getWebSockets(room)` returns every live peer in that room. Peer closes dispatch `onClose(ws, code, reason)` with parsed close metadata. |
+| `zttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
 ## Effects
 
@@ -93,11 +93,11 @@ For capability governance internals, see
 
 ## Type-Only Imports
 
-`zigttp:types` is stripped before runtime and is not in the native module
+`zttp:types` is stripped before runtime and is not in the native module
 registry. It provides proof annotation aliases:
 
 ```ts
-import type { Spec, Proof, Effects } from "zigttp:types";
+import type { Spec, Proof, Effects } from "zttp:types";
 ```
 
 See [TypeScript](../typescript.md) and

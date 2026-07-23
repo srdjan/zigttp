@@ -1,8 +1,8 @@
-# Plan 008: Correct `zigttp:io` return-type metadata for `parallel` and `race`
+# Plan 008: Correct `zttp:io` return-type metadata for `parallel` and `race`
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files listed as in scope. If any STOP condition occurs, stop and report; do not improvise around it. When done, update the status row for this plan in `plans/README.md`, unless a reviewer says they maintain the index.
 >
-> **Drift check, run first**: `git diff --name-only 560239d -- packages/zigts/src/modules/workflow/io.zig packages/modules/module-specs/workflow/io.json packages/zigts/src/builtin_modules.zig`
+> **Drift check, run first**: `git diff --name-only 560239d -- packages/zts/src/modules/workflow/io.zig packages/modules/module-specs/workflow/io.json packages/zts/src/builtin_modules.zig`
 > Empty means no drift. If any path appears, re-open it and compare against the Current state excerpts before editing.
 
 ## Status
@@ -16,15 +16,15 @@
 
 ## Why this matters
 
-The `zigttp:io` exports `parallel` and `race` declare their return kind as `.string`, but `parallel` returns a JS array and `race` returns a Response object (or `undefined`). This wrong metadata flows into the type checker, the bool checker, the generated `.d.ts` signatures, the `modules --json` surface, and the expert agent's view of the module — every consumer is told these return strings. A handler doing `const r = parallel([...]); r[0].json()` is type-checked as if `r` were a string. The binding-vs-spec audit (ZVM009) cannot catch it because the JSON spec mirrors the same wrong value.
+The `zttp:io` exports `parallel` and `race` declare their return kind as `.string`, but `parallel` returns a JS array and `race` returns a Response object (or `undefined`). This wrong metadata flows into the type checker, the bool checker, the generated `.d.ts` signatures, the `modules --json` surface, and the expert agent's view of the module — every consumer is told these return strings. A handler doing `const r = parallel([...]); r[0].json()` is type-checked as if `r` were a string. The binding-vs-spec audit (ZVM009) cannot catch it because the JSON spec mirrors the same wrong value.
 
 ## Current state
 
-`packages/zigts/src/modules/workflow/io.zig:31-40`:
+`packages/zts/src/modules/workflow/io.zig:31-40`:
 
 ```zig
 pub const binding = mb.ModuleBinding{
-    .specifier = "zigttp:io",
+    .specifier = "zttp:io",
     .name = "io",
     .required_capabilities = &.{.runtime_callback},
     .stateful = true,
@@ -49,16 +49,16 @@ The JSON spec mirrors the wrong value, `packages/modules/module-specs/workflow/i
 ]
 ```
 
-`ReturnKind` is defined at `packages/zigts/src/module_binding.zig:1167`; its `jsTypeName` map (`:1190-1195`) includes `.string -> "string"`, `.object -> "object"`, `.unknown -> "unknown"`, `.optional_string`, `.optional_object`. The analogous outbound module declares `.returns = .object` for both `fetch` and `fetchWithRetry` (`packages/modules/src/net/fetch.zig:35,48`) — that is the correct precedent to follow. The registry-assertion test pattern lives near `packages/zigts/src/builtin_modules.zig:202-229`.
+`ReturnKind` is defined at `packages/zts/src/module_binding.zig:1167`; its `jsTypeName` map (`:1190-1195`) includes `.string -> "string"`, `.object -> "object"`, `.unknown -> "unknown"`, `.optional_string`, `.optional_object`. The analogous outbound module declares `.returns = .object` for both `fetch` and `fetchWithRetry` (`packages/modules/src/net/fetch.zig:35,48`) — that is the correct precedent to follow. The registry-assertion test pattern lives near `packages/zts/src/builtin_modules.zig:202-229`.
 
 ## Commands you will need
 
 | Purpose | Command | Expected on success |
 |---|---|---|
-| Engine tests | `zig build test-zigts` | build summary success |
+| Engine tests | `zig build test-zts` | build summary success |
 | Module governance / binding-vs-spec audit | `zig build test-module-governance` | success |
 | Module tests | `zig build test-modules` | success |
-| Inspect machine surface | `zig build run -- modules --json` (or run the built `zigttp modules --json`) | `parallel`/`race` show `"object"` |
+| Inspect machine surface | `zig build run -- modules --json` (or run the built `zttp modules --json`) | `parallel`/`race` show `"object"` |
 | Format gate | `zig fmt --check build.zig packages/` | no output |
 | Aggregate | `zig build test` | success |
 
@@ -66,7 +66,7 @@ The JSON spec mirrors the wrong value, `packages/modules/module-specs/workflow/i
 
 **In scope:**
 
-- `packages/zigts/src/modules/workflow/io.zig` — change both `.returns` values.
+- `packages/zts/src/modules/workflow/io.zig` — change both `.returns` values.
 - `packages/modules/module-specs/workflow/io.json` — change both `"returns"` values to match (required, or ZVM009 fails).
 - A registry assertion test (in `builtin_modules.zig` near `:202-229`, or in `io.zig`) pinning the corrected return kinds so the two copies cannot silently drift back.
 
@@ -79,7 +79,7 @@ The JSON spec mirrors the wrong value, `packages/modules/module-specs/workflow/i
 ## Git/workflow guidance
 
 - Branch: work on `main`.
-- Commit style: Conventional Commits, e.g. `fix(modules): correct zigttp:io parallel/race return metadata`.
+- Commit style: Conventional Commits, e.g. `fix(modules): correct zttp:io parallel/race return metadata`.
 - Do not push or open a PR unless the operator asks.
 
 ## Steps
@@ -98,25 +98,25 @@ Set `.returns = .object` for both exports in `io.zig:37-38`, and `"returns": "ob
 
 Add a test asserting `binding.exports[..].returns == .object` for `parallel` and `race` (model after `builtin_modules.zig:202-229`). This pins the metadata against future drift.
 
-**Verify**: `zig build test-zigts` -> success; the new test fails if either `.returns` is reverted to `.string`.
+**Verify**: `zig build test-zts` -> success; the new test fails if either `.returns` is reverted to `.string`.
 
 ### Step 4: Confirm the machine surface
 
-**Verify**: build and run `zigttp modules --json`; confirm `parallel` and `race` now report `"object"`. Run `zig fmt --check build.zig packages/` -> no output, and `zig build test` -> success.
+**Verify**: build and run `zttp modules --json`; confirm `parallel` and `race` now report `"object"`. Run `zig fmt --check build.zig packages/` -> no output, and `zig build test` -> success.
 
 ## Test plan
 
 - New registry assertion test (above) is the regression guard; it must fail on the planned-at `.string` and pass after.
-- Re-run any example handler that imports `zigttp:io` (search `examples/` for `zigttp:io`) to confirm corrected metadata does not surface a spurious type error; if it does, that is a real previously-masked diagnostic — report it (do not weaken the fix).
+- Re-run any example handler that imports `zttp:io` (search `examples/` for `zttp:io`) to confirm corrected metadata does not surface a spurious type error; if it does, that is a real previously-masked diagnostic — report it (do not weaken the fix).
 
 ## Done criteria
 
 All must hold:
 
 - [ ] `io.zig` and `io.json` both declare `object` for `parallel` and `race`.
-- [ ] `zig build test-zigts test-module-governance test-modules` all exit 0.
+- [ ] `zig build test-zts test-module-governance test-modules` all exit 0.
 - [ ] A registry test pins the corrected return kinds.
-- [ ] `zigttp modules --json` shows `"object"` for both.
+- [ ] `zttp modules --json` shows `"object"` for both.
 - [ ] `zig build test` exits 0; `zig fmt --check` clean.
 - [ ] `plans/README.md` status row updated.
 

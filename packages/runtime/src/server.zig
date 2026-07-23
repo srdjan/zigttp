@@ -120,7 +120,7 @@ fn finishStudioOwnedResponse(
     try response.putHeaderBorrowed("Content-Type", content_type);
 }
 
-/// Populate `response` for a `/_zigttp/studio*` path. Returns true if the
+/// Populate `response` for a `/_zttp/studio*` path. Returns true if the
 /// caller should send `response`, false if the path didn't match any
 /// studio route. Studio-disabled and witness-not-found are populated as
 /// 404 responses (return true). Shared by the threaded and event-loop
@@ -133,7 +133,7 @@ fn populateStudioResponse(
     response: *HttpResponse,
     allocator: std.mem.Allocator,
 ) !bool {
-    if (std.mem.eql(u8, path, "/_zigttp/studio") or std.mem.eql(u8, path, "/_zigttp/studio/")) {
+    if (std.mem.eql(u8, path, "/_zttp/studio") or std.mem.eql(u8, path, "/_zttp/studio/")) {
         try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
         response.body = studio_mod.index_html;
         return true;
@@ -144,7 +144,7 @@ fn populateStudioResponse(
         try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
         return true;
     };
-    if (std.mem.eql(u8, path, "/_zigttp/studio/state.json")) {
+    if (std.mem.eql(u8, path, "/_zttp/studio/state.json")) {
         const state_body = try studio.stateJsonCopy(allocator);
         try finishStudioOwnedResponse(response, allocator, state_body, "application/json; charset=utf-8");
         return true;
@@ -223,7 +223,7 @@ fn populateStudioResponse(
         try finishStudioOwnedResponse(response, allocator, response_body, "application/json; charset=utf-8");
         return true;
     }
-    if (std.mem.eql(u8, path, "/_zigttp/studio/tests.jsonl")) {
+    if (std.mem.eql(u8, path, "/_zttp/studio/tests.jsonl")) {
         const tests_body = try studio.generatedTests(allocator);
         try finishStudioOwnedResponse(response, allocator, tests_body, "application/x-ndjson; charset=utf-8");
         return true;
@@ -960,11 +960,11 @@ const ConnectionPool = struct {
             if (response_mod.statusAllowsBody(response.status)) {
                 if (response.prebuilt_raw) |prebuilt| {
                     // Only take the zero-construction fast path when attestation is off.
-                    // The prebuilt blob omits the Zigttp-Proofs/Zigttp-Attest header lines,
+                    // The prebuilt blob omits the Zttp-Proofs/Zttp-Attest header lines,
                     // so when attestation is active we must fall through to the normal
                     // builder; otherwise a constant-Response handler would ship attestation
                     // headers on close connections but drop them on keep-alive, making
-                    // their presence unpredictable for a third-party `zigttp verify`.
+                    // their presence unpredictable for a third-party `zttp verify`.
                     if (keep_alive and self.server.attestation_headers == null) {
                         // Prebuilt response already has keep-alive, write directly
                         try writeAllFd(fd, prebuilt);
@@ -1407,9 +1407,9 @@ pub const ServerConfig = struct {
     /// startup env validation, route pre-filtering, property logging.
     contract_json: ?[]const u8 = null,
 
-    /// Compact JWS (slice 1 of proof receipts) embedded by `zigttp compile
+    /// Compact JWS (slice 1 of proof receipts) embedded by `zttp compile
     /// --attest`. When present alongside a validated contract, the server
-    /// precomputes `Zigttp-Proofs` and `Zigttp-Attest` response headers once
+    /// precomputes `Zttp-Proofs` and `Zttp-Attest` response headers once
     /// and emits them on every HTTP response.
     attestation_jws: ?[]const u8 = null,
 
@@ -1428,11 +1428,11 @@ pub const ServerConfig = struct {
     /// means "use the policy derived from the contract properties".
     lifecycle_override: ?contract_runtime.PoolingPolicy = null,
 
-    /// Local author workbench at /_zigttp/studio.
+    /// Local author workbench at /_zttp/studio.
     studio: bool = false,
 
     /// Guided first-run proof theater layered on top of Studio. Only enabled
-    /// for `zigttp demo`, and all mutation is scoped to the generated
+    /// for `zttp demo`, and all mutation is scoped to the generated
     /// workspace.
     studio_demo_root: ?[]const u8 = null,
 };
@@ -1619,18 +1619,18 @@ pub const Server = struct {
     incident_log_fd: ?std.c.fd_t = null,
     security_logger: ?*SecurityLogger,
     studio: ?studio_mod.State,
-    /// Precomputed `Zigttp-Proofs` and `Zigttp-Attest` header strings, built
+    /// Precomputed `Zttp-Proofs` and `Zttp-Attest` header strings, built
     /// once in `start` when both a validated contract and an attestation JWS
     /// are present. Null otherwise; both response paths skip the writes.
     attestation_headers: ?attest_header_strings.HeaderStrings,
-    /// Precomputed `GET /.well-known/zigttp-attest` body, built alongside
+    /// Precomputed `GET /.well-known/zttp-attest` body, built alongside
     /// `attestation_headers`. Null on unattested builds; the route falls
     /// through to the normal handler path.
     well_known_doc: ?attest_well_known.Doc,
     /// SHA-256 fingerprint of the signer public key, lowercase hex,
     /// recovered from the embedded JWS during `Server.start` self-verify.
     /// The HUD's "Caller view" lens consumes this; verifiers can pin it
-    /// with `zigttp verify --trust-key <hex>`.
+    /// with `zttp verify --trust-key <hex>`.
     signer_fingerprint_hex: ?[64]u8,
     /// WebSocket connection registry. Initialised lazily on the first
     /// upgrade attempt; a handler with no WS exports pays zero cost.
@@ -1642,13 +1642,13 @@ pub const Server = struct {
     /// Absolute monotonic deadline for WebSocket callbacks that begin while
     /// graceful shutdown is joining frame-loop workers. Zero while serving.
     ws_shutdown_deadline_ns: std.atomic.Value(u64) = .init(0),
-    /// Co-located sub-handler registry for in-process `zigttp:workflow.call`,
+    /// Co-located sub-handler registry for in-process `zttp:workflow.call`,
     /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
     /// runtime references it via `RuntimeConfig.system_registry`. Null when no
     /// `--system` bundle is loaded. Deinitialised after the main pool so no
     /// in-flight orchestrator can still dispatch into it.
     system_runtime: ?SystemRuntime = null,
-    /// Process-owned in-memory actor queue for opt-in `zigttp:queue` delivery.
+    /// Process-owned in-memory actor queue for opt-in `zttp:queue` delivery.
     /// Deinitialised after handler pools so no runtime can hold a queue pointer.
     actor_queue: ?actor_queue.ActorQueue = null,
     /// Dev/serve policy backing storage. The contract-derived RuntimePolicy
@@ -2182,8 +2182,8 @@ pub const Server = struct {
 
         // Build the in-process sub-handler registry from `--system <manifest>`
         // and point every pooled orchestrator runtime at it. The same manifest
-        // also drives `zigttp:service` (HTTP) wiring; here it backs the
-        // in-process `zigttp:workflow.call` path.
+        // also drives `zttp:service` (HTTP) wiring; here it backs the
+        // in-process `zttp:workflow.call` path.
         if (pool_rt_config.system_config_path) |system_path| {
             self.system_runtime = try in_process_dispatch.SystemRuntime.buildFromSystemConfig(
                 self.allocator,
@@ -2261,14 +2261,14 @@ pub const Server = struct {
         // memcpy per header into the response buffer.
         if (self.contract) |*contract| {
             if (self.config.attestation_jws) |jws| {
-                // Fail-closed attestation: emit the Zigttp-Proofs / Zigttp-Attest
+                // Fail-closed attestation: emit the Zttp-Proofs / Zttp-Attest
                 // response headers and the /.well-known doc ONLY after the
                 // embedded JWS is proven to bind to the artifact this server
                 // actually loaded. `attest_envelope.verify` only proves the JWS
                 // was signed - the binding checks below are what tie it to this
                 // run. A tampered binary (swapped bytecode, or a contract.json
                 // that no longer hashes to the signed claim) therefore emits no
-                // attestation at all, so a third-party `zigttp verify` reports it
+                // attestation at all, so a third-party `zttp verify` reports it
                 // unattested rather than trusting a signature over different
                 // bytecode. Every failure path leaves attestation cleared.
                 attest: {
@@ -2362,7 +2362,7 @@ pub const Server = struct {
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
         if (self.studio != null) {
-            std.log.info("Studio available at http://{s}:{d}/_zigttp/studio", .{ self.config.host, self.config.port });
+            std.log.info("Studio available at http://{s}:{d}/_zttp/studio", .{ self.config.host, self.config.port });
         }
         std.log.info("   Pool size: {d} runtimes", .{self.config.pool_size});
     }
@@ -3520,7 +3520,7 @@ test "buildDynamicResponseHeader filters handler supplied framing headers" {
     var sync_buf: [512]u8 = undefined;
     const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation, .sync);
     const sync = sync_buf[0..sync_len];
-    try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
+    try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nZttp-Proofs: pure\r\nZttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, sync, "Content-Length: 999") == null);
     try std.testing.expect(std.mem.indexOf(u8, sync, "Connection: close") == null);
     try std.testing.expect(std.mem.indexOf(u8, sync, "Transfer-Encoding: chunked") == null);
@@ -3528,7 +3528,7 @@ test "buildDynamicResponseHeader filters handler supplied framing headers" {
     var evented_buf: [512]u8 = undefined;
     const evented_len = try buildDynamicResponseHeader(&evented_buf, &response, false, attestation, .evented);
     const evented = evented_buf[0..evented_len];
-    try std.testing.expect(std.mem.startsWith(u8, evented, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\nX-Test: one\r\nZigttp-Proofs: pure\r\nZigttp-Attest: jws\r\n\r\n"));
+    try std.testing.expect(std.mem.startsWith(u8, evented, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\nX-Test: one\r\nZttp-Proofs: pure\r\nZttp-Attest: jws\r\n\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, evented, "Content-Length: 999") == null);
     try std.testing.expect(std.mem.indexOf(u8, evented, "Transfer-Encoding: chunked") == null);
 }

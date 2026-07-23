@@ -8,7 +8,7 @@ Planned on: 2026-06-20
 Before editing, verify the in-scope files have not changed since this plan was written:
 
 ```sh
-git diff --name-only f2c637d -- packages/zigts/src/builtins/array.zig packages/zigts/src/object.zig
+git diff --name-only f2c637d -- packages/zts/src/builtins/array.zig packages/zts/src/object.zig
 ```
 
 Expected output for direct execution from the planned commit is empty. If either path appears, re-open the callback implementations and storage helpers before editing.
@@ -28,7 +28,7 @@ Several `Array.prototype` callback methods currently invoke callbacks for in-len
 
 ## Current State
 
-Evidence from `packages/zigts/src/builtins/array.zig`:
+Evidence from `packages/zts/src/builtins/array.zig`:
 
 - `arrayMap` loops `0..len`, reads `obj.getIndex(i) orelse undefined`, invokes the callback, and `arrayPush`es at lines 652-668.
 - `arrayFilter` does the same at lines 671-689.
@@ -36,7 +36,7 @@ Evidence from `packages/zigts/src/builtins/array.zig`:
 - `arrayForEach`, `arrayEvery`, and `arraySome` call callbacks for every index from `0..len` at lines 723-770.
 - `arrayFind` and `arrayFindIndex` also use every index at lines 773-805. Re-check current intended spec behavior for these before changing them.
 
-Evidence from `packages/zigts/src/object.zig`:
+Evidence from `packages/zts/src/object.zig`:
 
 - `getIndex` returns null when an element slot contains `undefined` at lines 2255-2275.
 - Length and allocated backing are explicitly decoupled for sparse arrays at lines 2278-2282.
@@ -47,8 +47,8 @@ The executor must be careful not to confuse a hole with an explicitly stored `un
 
 In scope:
 
-- `packages/zigts/src/builtins/array.zig`
-- `packages/zigts/src/object.zig` only if a presence helper is needed.
+- `packages/zts/src/builtins/array.zig`
+- `packages/zts/src/object.zig` only if a presence helper is needed.
 - Regression tests for sparse arrays.
 
 Out of scope:
@@ -82,7 +82,7 @@ Out of scope:
 4. Run:
 
    ```sh
-   zig build test-zigts --summary all
+   zig build test-zts --summary all
    zig build test --summary all
    git diff --check
    ```

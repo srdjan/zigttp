@@ -17,7 +17,7 @@
 //!   (fail-closed).
 //!
 //! NESTING: frames form a per-thread stack. An in-process sub-handler dispatch
-//! (zigttp:workflow.call) arms its own frame on top of the orchestrator's, so a
+//! (zttp:workflow.call) arms its own frame on top of the orchestrator's, so a
 //! sub-handler panic longjmps to the sub frame and surfaces as
 //! error.HandlerPanicked to the orchestrator, leaving the orchestrator's outer
 //! frame armed. Without the stack, nested arming would assert/abort.
@@ -64,7 +64,7 @@ threadlocal var active_frame: ?*Frame = null;
 
 /// Arm a recovery frame for the current thread, pushing it onto the per-thread
 /// stack. Nested arming is supported: an orchestrator handler can dispatch a
-/// co-located sub-handler in-process (zigttp:workflow.call), and the sub-call
+/// co-located sub-handler in-process (zttp:workflow.call), and the sub-call
 /// arms its own frame on top of the orchestrator's.
 pub fn arm(f: *Frame) void {
     f.msg_len = 0;

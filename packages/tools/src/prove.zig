@@ -8,10 +8,10 @@
 //! Exit codes: 0 = equivalent or additive, 1 = breaking, 2 = error.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const handler_contract = zigts.handler_contract;
-const contract_diff = zigts.contract_diff;
-const readFilePosix = zigts.file_io.readFile;
+const zts = @import("zts");
+const handler_contract = zts.handler_contract;
+const contract_diff = zts.contract_diff;
+const readFilePosix = zts.file_io.readFile;
 const upgrade_verifier = @import("upgrade_verifier.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -104,7 +104,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fs.path.join(allocator, &.{ output_dir, "proof.json" });
         defer allocator.free(path);
-        try zigts.file_io.writeFile(allocator, path, buf.items);
+        try zts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 
@@ -118,7 +118,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fs.path.join(allocator, &.{ output_dir, "proof-report.txt" });
         defer allocator.free(path);
-        try zigts.file_io.writeFile(allocator, path, buf.items);
+        try zts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 
@@ -134,7 +134,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fs.path.join(allocator, &.{ output_dir, "upgrade-manifest.json" });
         defer allocator.free(path);
-        try zigts.file_io.writeFile(allocator, path, buf.items);
+        try zts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 

@@ -1,4 +1,4 @@
-//! `zigttp proofs gate` — the pull-request proof gate.
+//! `zttp proofs gate` — the pull-request proof gate.
 //!
 //! A proof's value is realized at a trust boundary: a reviewer who did not
 //! write the code. Every other proof surface (terminal HUD, Studio, badge)
@@ -21,18 +21,18 @@
 //! PR-oriented rendering are new here.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const equivalence_probe_lib = @import("../equivalence_probe_lib.zig");
 const shared = @import("../cli_shared.zig");
 
-const contract_diff = zigts.contract_diff;
-const file_io = zigts.file_io;
+const contract_diff = zts.contract_diff;
+const file_io = zts.file_io;
 const Classification = contract_diff.Classification;
 
 const max_source_bytes = 4 * 1024 * 1024;
 
-pub const json_schema = "zigttp.proof-gate.v1";
+pub const json_schema = "zttp.proof-gate.v1";
 
 pub const Format = enum { md, json };
 
@@ -152,7 +152,7 @@ fn isSafe(c: Classification) bool {
 // ---------------------------------------------------------------------------
 
 /// Marker the GitHub Action's sticky-comment step keys on to update in place.
-pub const sticky_marker = "<!-- zigttp-proof -->";
+pub const sticky_marker = "<!-- zttp-proof -->";
 
 pub fn renderMarkdown(
     w: *std.Io.Writer,
@@ -164,7 +164,7 @@ pub fn renderMarkdown(
     signed_rows: usize,
 ) !void {
     try w.writeAll(sticky_marker);
-    try w.writeAll("\n## zigttp proof gate\n\n");
+    try w.writeAll("\n## zttp proof gate\n\n");
     try w.print("**Verdict: `{s}`**", .{verdict.toString()});
     try w.print("  ·  base `{s}` → head `{s}`", .{ base_label, head_label });
     try w.print("  ·  {d} handler{s} checked\n\n", .{ results.len, plural(results.len) });
@@ -208,7 +208,7 @@ pub fn renderMarkdown(
     }
 
     if (signed_rows > 0) {
-        try w.print("\n_Signed `kind=equivalence` receipt{s} appended to `.zigttp/proofs.jsonl` ({d} row{s})._\n", .{ plural(signed_rows), signed_rows, plural(signed_rows) });
+        try w.print("\n_Signed `kind=equivalence` receipt{s} appended to `.zttp/proofs.jsonl` ({d} row{s})._\n", .{ plural(signed_rows), signed_rows, plural(signed_rows) });
     }
 }
 
@@ -478,7 +478,7 @@ fn appendCounterexample(
     });
 }
 
-fn isHandlerContract(contract: *const zigts.HandlerContract) bool {
+fn isHandlerContract(contract: *const zts.HandlerContract) bool {
     return contract.routes.items.len > 0 or
         contract.api.routes.items.len > 0 or
         contract.behaviors.items.len > 0;
@@ -595,24 +595,24 @@ pub fn run(
     const arena = arena_state.allocator();
 
     const cwd = shared.realCwd(arena) catch {
-        try stderr.writeAll("zigttp proofs gate: cannot resolve the working directory\n");
+        try stderr.writeAll("zttp proofs gate: cannot resolve the working directory\n");
         return 2;
     };
 
     if (!refExists(arena, cwd, "HEAD")) {
-        try stderr.writeAll("zigttp proofs gate: not a git repository (no HEAD)\n");
+        try stderr.writeAll("zttp proofs gate: not a git repository (no HEAD)\n");
         return 2;
     }
 
     const base = resolveBase(arena, cwd, opts) catch {
-        try stderr.writeAll("zigttp proofs gate: base ref does not resolve (tried --base / origin/main / main)\n");
+        try stderr.writeAll("zttp proofs gate: base ref does not resolve (tried --base / origin/main / main)\n");
         return 2;
     };
     const head_label: []const u8 = opts.head orelse "working tree";
 
     const paths = changedHandlers(arena, cwd, base, opts.head) catch |err| switch (err) {
         error.BadGitRef => {
-            try stderr.print("zigttp proofs gate: cannot diff `{s}` against `{s}`\n", .{ base, head_label });
+            try stderr.print("zttp proofs gate: cannot diff `{s}` against `{s}`\n", .{ base, head_label });
             return 2;
         },
         else => return err,
@@ -654,7 +654,7 @@ pub fn run(
             // or allocation failure. Swallowing it as `no_contract` drops the
             // handler from worstVerdict, so a breaking change could pass the
             // gate. Fail closed with the tooling-failure exit code.
-            try stderr.print("zigttp proofs gate: analysis failed for `{s}`: {s}\n", .{ path, @errorName(err) });
+            try stderr.print("zttp proofs gate: analysis failed for `{s}`: {s}\n", .{ path, @errorName(err) });
             return 2;
         };
         const hr = result orelse {
@@ -676,7 +676,7 @@ pub fn run(
 
     if (opts.out) |out_path| {
         file_io.writeFile(arena, out_path, bytes) catch {
-            try stderr.print("zigttp proofs gate: cannot write report to `{s}`\n", .{out_path});
+            try stderr.print("zttp proofs gate: cannot write report to `{s}`\n", .{out_path});
             return 2;
         };
     } else {
@@ -708,7 +708,7 @@ fn readAfter(arena: std.mem.Allocator, cwd: []const u8, head: ?[]const u8, path:
 /// a request handler rather than a library/config module. Used to decide whether
 /// a DELETED file removed real routes (breaking) or was just noise.
 fn sourceIsHandler(gpa: std.mem.Allocator, src: []const u8, path: []const u8) bool {
-    var result = zigts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch return false;
+    var result = zts_cli.precompile.runCheckOnlyFromSource(gpa, src, path, null, true, null, false) catch return false;
     defer result.deinit(gpa);
     if (result.contract) |*c| return isHandlerContract(c);
     return false;
@@ -728,13 +728,13 @@ fn analyzeHandler(
     after_src: []const u8,
     sign: bool,
 ) !?HandlerResult {
-    var before_result = try zigts_cli.precompile.runCheckOnlyFromSource(gpa, before_src, path, null, true, null, false);
+    var before_result = try zts_cli.precompile.runCheckOnlyFromSource(gpa, before_src, path, null, true, null, false);
     defer before_result.deinit(gpa);
-    var after_result = try zigts_cli.precompile.runCheckOnlyFromSource(gpa, after_src, path, null, true, null, false);
+    var after_result = try zts_cli.precompile.runCheckOnlyFromSource(gpa, after_src, path, null, true, null, false);
     defer after_result.deinit(gpa);
 
-    const before_contract: ?*const zigts.HandlerContract = if (before_result.contract) |*c| c else null;
-    const after_contract: ?*const zigts.HandlerContract = if (after_result.contract) |*c| c else null;
+    const before_contract: ?*const zts.HandlerContract = if (before_result.contract) |*c| c else null;
+    const after_contract: ?*const zts.HandlerContract = if (after_result.contract) |*c| c else null;
 
     const before_is_handler = before_contract != null and isHandlerContract(before_contract.?);
     const after_is_handler = after_contract != null and isHandlerContract(after_contract.?);

@@ -1,4 +1,4 @@
-//! Workflow-receipt probe: the runtime-backed signer for the `zigttp link`
+//! Workflow-receipt probe: the runtime-backed signer for the `zttp link`
 //! hypermedia seam.
 //!
 //! The keyless tools `link` command (`system_build.zig`) computes the bundle's
@@ -7,21 +7,21 @@
 //! tools, so a direct tools -> runtime dependency would invert the build
 //! graph). The developer CLI registers `recordWorkflowReceipt` via a function
 //! pointer at startup (see `dev_cli.zig`), mirroring the perf and equivalence
-//! probe injections. The standalone `zigts` binary leaves the probe null and
+//! probe injections. The standalone `zts` binary leaves the probe null and
 //! prints no receipt.
 //!
-//! On a successful `zigttp link` this signs the hypermedia verdict (proof
+//! On a successful `zttp link` this signs the hypermedia verdict (proof
 //! level + affordance resolution) over a hash of the bundle's system contract
 //! with the persistent keypair and writes a compact `kind=workflow` JWS next to
 //! the link outputs. Best-effort: a missing `$HOME` or unwritable output dir
 //! must never abort the link.
 
 const std = @import("std");
-const zq = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zq = @import("zts");
+const zts_cli = @import("zts_cli");
 const identity = @import("attest/identity.zig");
 
-const precompile = zigts_cli.precompile;
+const precompile = zts_cli.precompile;
 const system_linker = zq.system_linker;
 const hypermedia_receipt = zq.hypermedia_receipt;
 const Sha256 = std.crypto.hash.sha2.Sha256;

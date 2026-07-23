@@ -1,8 +1,8 @@
 // Virtual module system example
-// Demonstrates import { ... } from "zigttp:*" syntax
+// Demonstrates import { ... } from "zttp:*" syntax
 
-import { env } from "zigttp:env";
-import { sha256, hmacSha256, base64Encode } from "zigttp:crypto";
+import { env } from "zttp:env";
+import { sha256, hmacSha256, base64Encode } from "zttp:crypto";
 
 type WebhookPayload = {
     event: string;
@@ -17,7 +17,7 @@ function verifyWebhook(body: string, signature: string): boolean {
 }
 
 function handler(req: Request): Response {
-    const appName = env("APP_NAME") ?? "zigttp";
+    const appName = env("APP_NAME") ?? "zttp";
     const hash = sha256(req.body);
 
     return Response.json({

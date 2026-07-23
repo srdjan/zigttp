@@ -1,10 +1,10 @@
 # Sound Mode: Type-Directed Analysis
 
-zigttp's sound mode uses compile-time type inference to catch bugs across all operators, not just boolean contexts. The compiler infers types for every expression and enforces type-safety rules at three levels: truthiness in boolean contexts, arithmetic type safety, and tautological comparison detection.
+zttp's sound mode uses compile-time type inference to catch bugs across all operators, not just boolean contexts. The compiler infers types for every expression and enforces type-safety rules at three levels: truthiness in boolean contexts, arithmetic type safety, and tautological comparison detection.
 
 ## Type-Directed Truthiness
 
-zigttp uses type-directed truthiness (TDT) in boolean contexts. Instead of rejecting all non-boolean values, the compiler uses its type knowledge to apply unambiguous truthiness rules per type. The original concise syntax (`if (x)`, `if (count)`, `if (name)`) works when the type has exactly one falsy state.
+zttp uses type-directed truthiness (TDT) in boolean contexts. Instead of rejecting all non-boolean values, the compiler uses its type knowledge to apply unambiguous truthiness rules per type. The original concise syntax (`if (x)`, `if (count)`, `if (name)`) works when the type has exactly one falsy state.
 
 Objects and functions remain rejected because they are always truthy - a condition on them is pointless and likely a bug.
 
@@ -29,9 +29,9 @@ Objects and functions remain rejected because they are always truthy - a conditi
 Every `env()`, `cacheGet()`, `parseBearer()`, `routerMatch()` call returns an optional type. Use them directly in conditions:
 
 ```javascript
-import { env } from "zigttp:env";
-import { parseBearer } from "zigttp:auth";
-import { routerMatch } from "zigttp:router";
+import { env } from "zttp:env";
+import { parseBearer } from "zttp:auth";
+import { routerMatch } from "zttp:router";
 
 const token = parseBearer(auth);
 if (token) { use(token); }        // token narrowed to string inside
@@ -105,7 +105,7 @@ When `if (!x)` and x is optional, x is narrowed to `undefined` in the then-branc
 The existing `typeof` guard narrowing and `x !== undefined` narrowing continue to work unchanged. TDT narrowing is applied when no explicit guard pattern is detected.
 
 ```javascript
-import { env } from "zigttp:env";
+import { env } from "zttp:env";
 
 const val = env("KEY");            // optional_string
 if (val) {

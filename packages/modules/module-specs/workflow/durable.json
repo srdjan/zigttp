@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:durable",
-  "source": "packages/zigts/src/modules/workflow/durable.zig",
+  "specifier": "zttp:durable",
+  "source": "packages/zts/src/modules/workflow/durable.zig",
   "requiredCapabilities": [
     "runtime_callback"
   ],

@@ -1,7 +1,7 @@
 //! Build-time replay verification + handler-test execution.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 // ============================================================================
 // Build-Time Replay Verification
@@ -14,14 +14,14 @@ pub const BuildReplayResult = struct {
 };
 
 /// Run replay verification at build time.
-/// Creates a fresh zigts context per trace for isolation (the interpreter mutates
+/// Creates a fresh zts context per trace for isolation (the interpreter mutates
 /// context state during execution). This is O(N*parse) but acceptable at build
 /// time since trace counts are typically small.
 pub fn runBuildTimeReplay(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    groups: []const zigts.trace.RequestTraceGroup,
+    groups: []const zts.trace.RequestTraceGroup,
 ) !BuildReplayResult {
     var pass: u32 = 0;
     var fail: u32 = 0;
@@ -55,41 +55,41 @@ fn executeBuildTimeHandler(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    request: zigts.trace.RequestTrace,
-    io_calls: []const zigts.trace.IoEntry,
+    request: zts.trace.RequestTrace,
+    io_calls: []const zts.trace.IoEntry,
 ) !HandlerExecResult {
-    const ctx = try zigts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
-    defer zigts.destroyContext(ctx);
-    try zigts.builtins.initBuiltins(ctx);
+    const ctx = try zts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
+    defer zts.destroyContext(ctx);
+    try zts.builtins.initBuiltins(ctx);
 
-    inline for (zigts.builtin_modules.all) |binding| {
-        try zigts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
+    inline for (zts.builtin_modules.all) |binding| {
+        try zts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
     }
 
-    var replay_state = zigts.trace.ReplayState{
+    var replay_state = zts.trace.ReplayState{
         .io_calls = io_calls,
         .cursor = 0,
         .divergences = 0,
     };
     ctx.setModuleState(
-        zigts.trace.REPLAY_STATE_SLOT,
+        zts.trace.REPLAY_STATE_SLOT,
         @ptrCast(&replay_state),
-        &zigts.trace.ReplayState.deinitOpaque,
+        &zts.trace.ReplayState.deinitOpaque,
     );
-    defer ctx.module_state[zigts.trace.REPLAY_STATE_SLOT] = null;
+    defer ctx.module_state[zts.trace.REPLAY_STATE_SLOT] = null;
 
-    var strings = zigts.StringTable.init(allocator);
+    var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
 
     var source_to_parse: []const u8 = handler_source;
-    var strip_result: ?zigts.StripResult = null;
+    var strip_result: ?zts.StripResult = null;
     defer if (strip_result) |*sr| sr.deinit();
 
     const is_ts = std.mem.endsWith(u8, handler_filename, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_filename, ".tsx");
     if (is_ts or is_tsx) {
-        var strip_diag: ?zigts.StripDiagnostic = null;
-        strip_result = zigts.strip(allocator, handler_source, .{
+        var strip_diag: ?zts.StripDiagnostic = null;
+        strip_result = zts.strip(allocator, handler_source, .{
             .tsx_mode = is_tsx,
             .diagnostic_out = &strip_diag,
         }) catch |err| {
@@ -103,7 +103,7 @@ fn executeBuildTimeHandler(
         source_to_parse = strip_result.?.code;
     }
 
-    var p = zigts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
+    var p = zts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
     defer p.deinit();
     if (std.mem.endsWith(u8, handler_filename, ".jsx") or is_tsx) {
         p.enableJsx();
@@ -116,7 +116,7 @@ fn executeBuildTimeHandler(
         try ctx.materializeShapes(shapes);
     }
 
-    const func = zigts.bytecode.FunctionBytecode{
+    const func = zts.bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -128,52 +128,52 @@ fn executeBuildTimeHandler(
         .source_map = null,
     };
 
-    var interp = zigts.Interpreter.init(ctx);
+    var interp = zts.Interpreter.init(ctx);
     _ = try interp.run(&func);
 
-    const handler_val = ctx.getGlobal(zigts.Atom.handler) orelse return error.NoHandler;
+    const handler_val = ctx.getGlobal(zts.Atom.handler) orelse return error.NoHandler;
     if (!handler_val.isObject()) return error.NoHandler;
-    const handler_obj = zigts.JSObject.fromValue(handler_val);
+    const handler_obj = zts.JSObject.fromValue(handler_val);
     if (handler_obj.class_id != .function or !handler_obj.flags.is_callable) return error.NoHandler;
 
     const hc_pool_req = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const req_obj = try ctx.createObject(null);
 
     const method_val = try ctx.createString(request.method);
-    try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.method, method_val);
+    try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.method, method_val);
 
     const url_val = try ctx.createString(request.url);
-    try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.url, url_val);
+    try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.url, url_val);
 
     if (request.body) |body| {
         const body_val = try ctx.createString(body);
-        try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.body, body_val);
+        try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.body, body_val);
     }
 
-    const args = [_]zigts.JSValue{req_obj.toValue()};
+    const args = [_]zts.JSValue{req_obj.toValue()};
     const bc_data = handler_obj.getBytecodeFunctionData() orelse return error.NotCallable;
     const result = interp.callBytecodeFunction(
         handler_obj.toValue(),
         bc_data.bytecode,
-        zigts.JSValue.undefined_val,
+        zts.JSValue.undefined_val,
         &args,
     ) catch return error.HandlerError;
 
     if (!result.isObject()) return error.InvalidResponse;
-    const result_obj = zigts.JSObject.fromValue(result);
+    const result_obj = zts.JSObject.fromValue(result);
     const hc_pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
-    const status_val = result_obj.getProperty(hc_pool, zigts.Atom.status) orelse zigts.JSValue.fromInt(200);
+    const status_val = result_obj.getProperty(hc_pool, zts.Atom.status) orelse zts.JSValue.fromInt(200);
     const actual_status: u16 = if (status_val.isInt())
         @intCast(@max(0, @min(999, status_val.getInt())))
     else
         200;
 
-    const body_val = result_obj.getProperty(hc_pool, zigts.Atom.body) orelse zigts.JSValue.undefined_val;
+    const body_val = result_obj.getProperty(hc_pool, zts.Atom.body) orelse zts.JSValue.undefined_val;
 
     return .{
         .status = actual_status,
-        .body = zigts.trace.extractStringData(body_val) orelse "",
+        .body = zts.trace.extractStringData(body_val) orelse "",
         .divergences = replay_state.divergences,
     };
 }
@@ -183,7 +183,7 @@ fn replayOneBuildTime(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    group: *const zigts.trace.RequestTraceGroup,
+    group: *const zts.trace.RequestTraceGroup,
 ) !bool {
     const r = try executeBuildTimeHandler(allocator, handler_source, handler_filename, group.request, group.io_calls);
 
@@ -191,7 +191,7 @@ fn replayOneBuildTime(
     const status_ok = r.status == expected.status;
 
     // Unescape before comparing (trace stores JSON-escaped body strings).
-    const expected_body = zigts.trace.unescapeJson(allocator, expected.body) catch expected.body;
+    const expected_body = zts.trace.unescapeJson(allocator, expected.body) catch expected.body;
     defer if (expected_body.ptr != expected.body.ptr) allocator.free(expected_body);
 
     return status_ok and std.mem.eql(u8, r.body, expected_body) and r.divergences == 0;
@@ -203,8 +203,8 @@ fn replayOneBuildTime(
 
 const BuildTestCase = struct {
     name: []const u8,
-    request: ?zigts.trace.RequestTrace = null,
-    io_calls: []const zigts.trace.IoEntry = &.{},
+    request: ?zts.trace.RequestTrace = null,
+    io_calls: []const zts.trace.IoEntry = &.{},
     expected_status: ?u16 = null,
     expected_body: ?[]const u8 = null,
     expected_body_contains: ?[]const u8 = null,
@@ -248,7 +248,7 @@ pub fn runBuildTimeTests(
             }
         }
         if (tc.expected_body) |expected| {
-            const unescaped = zigts.trace.unescapeJson(allocator, expected) catch expected;
+            const unescaped = zts.trace.unescapeJson(allocator, expected) catch expected;
             defer if (unescaped.ptr != expected.ptr) allocator.free(unescaped);
             if (!std.mem.eql(u8, r.body, unescaped)) {
                 std.debug.print("  FAIL  {s}\n        body mismatch\n        expected: {s}\n        actual:   {s}\n", .{
@@ -258,7 +258,7 @@ pub fn runBuildTimeTests(
             }
         }
         if (tc.expected_body_contains) |needle| {
-            const unescaped = zigts.trace.unescapeJson(allocator, needle) catch needle;
+            const unescaped = zts.trace.unescapeJson(allocator, needle) catch needle;
             defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
             if (std.mem.indexOf(u8, r.body, unescaped) == null) {
                 std.debug.print("  FAIL  {s}\n        body does not contain: {s}\n", .{ tc.name, unescaped });
@@ -285,8 +285,8 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     errdefer tests.deinit(allocator);
 
     var current_name: ?[]const u8 = null;
-    var current_request: ?zigts.trace.RequestTrace = null;
-    var current_io: std.ArrayList(zigts.trace.IoEntry) = .empty;
+    var current_request: ?zts.trace.RequestTrace = null;
+    var current_io: std.ArrayList(zts.trace.IoEntry) = .empty;
     defer current_io.deinit(allocator);
     var current_status: ?u16 = null;
     var current_body: ?[]const u8 = null;
@@ -296,7 +296,7 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     while (lines.next()) |line| {
         if (line.len == 0) continue;
 
-        const type_str = zigts.trace.findJsonStringValue(line, "\"type\"") orelse continue;
+        const type_str = zts.trace.findJsonStringValue(line, "\"type\"") orelse continue;
 
         if (std.mem.eql(u8, type_str, "test")) {
             if (current_name != null) {
@@ -313,27 +313,27 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
                 current_body = null;
                 current_body_contains = null;
             }
-            current_name = zigts.trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
+            current_name = zts.trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
         } else if (std.mem.eql(u8, type_str, "request")) {
             current_request = .{
-                .method = zigts.trace.findJsonStringValue(line, "\"method\"") orelse "GET",
-                .url = zigts.trace.findJsonStringValue(line, "\"url\"") orelse "/",
-                .headers_json = zigts.trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
-                .body = zigts.trace.findJsonStringValue(line, "\"body\""),
+                .method = zts.trace.findJsonStringValue(line, "\"method\"") orelse "GET",
+                .url = zts.trace.findJsonStringValue(line, "\"url\"") orelse "/",
+                .headers_json = zts.trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
+                .body = zts.trace.findJsonStringValue(line, "\"body\""),
             };
         } else if (std.mem.eql(u8, type_str, "io")) {
             try current_io.append(allocator, .{
-                .seq = @intCast(zigts.trace.findJsonIntValue(line, "\"seq\"") orelse 0),
-                .module = zigts.trace.findJsonStringValue(line, "\"module\"") orelse "",
-                .func = zigts.trace.findJsonStringValue(line, "\"fn\"") orelse "",
-                .args_json = zigts.trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
-                .result_json = zigts.trace.findJsonAnyValue(line, "\"result\"") orelse "null",
+                .seq = @intCast(zts.trace.findJsonIntValue(line, "\"seq\"") orelse 0),
+                .module = zts.trace.findJsonStringValue(line, "\"module\"") orelse "",
+                .func = zts.trace.findJsonStringValue(line, "\"fn\"") orelse "",
+                .args_json = zts.trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
+                .result_json = zts.trace.findJsonAnyValue(line, "\"result\"") orelse "null",
             });
         } else if (std.mem.eql(u8, type_str, "expect")) {
-            const status_val = zigts.trace.findJsonIntValue(line, "\"status\"");
+            const status_val = zts.trace.findJsonIntValue(line, "\"status\"");
             current_status = if (status_val) |s| @intCast(@max(0, @min(999, s))) else null;
-            current_body = zigts.trace.findJsonStringValue(line, "\"body\"");
-            current_body_contains = zigts.trace.findJsonStringValue(line, "\"bodyContains\"");
+            current_body = zts.trace.findJsonStringValue(line, "\"body\"");
+            current_body_contains = zts.trace.findJsonStringValue(line, "\"bodyContains\"");
         }
     }
 

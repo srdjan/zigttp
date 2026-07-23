@@ -1,12 +1,12 @@
 //! Line-buffered expert REPL driver.
 //!
 //! Natural language goes to the model by default. Deterministic slash commands,
-//! safe raw `zigts ...` / `zig build ...` commands, and direct tool names are
+//! safe raw `zts ...` / `zig build ...` commands, and direct tool names are
 //! routed locally.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
@@ -225,7 +225,7 @@ pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
     if (commands.isQuit(first) or commands.isHelp(first)) return true;
     if (commands.isSessionResume(first) or commands.isSessionNew(first)) return true;
     if (first.len > 0 and first[0] == '/') return true;
-    if (std.mem.eql(u8, first, "zigts") or std.mem.eql(u8, first, "zig")) return true;
+    if (std.mem.eql(u8, first, "zts") or std.mem.eql(u8, first, "zig")) return true;
     return registry.findByName(first) != null;
 }
 
@@ -272,7 +272,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     // A new user who types `help` needs the two things they actually do: state a
     // goal in plain English, and approve the verified edit.
     try w.writeAll(
-        \\How to use zigttp expert:
+        \\How to use zttp expert:
         \\  1. Type what you want in plain English, e.g. "add a GET /health route to src/handler.ts".
         \\  2. The expert drafts an edit; the analyzer verifies it and rejects any draft that fails.
         \\  3. You review the change and approve with y/N before anything is written to disk.
@@ -299,7 +299,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     for (commands.ledger_commands) |slash| {
         try w.print("  {s}\n", .{slash});
     }
-    try w.writeAll("  zigts");
+    try w.writeAll("  zts");
     for (commands.command_table) |row| {
         if (row.explicit) |name| {
             try w.print(" {s}", .{name});
@@ -379,7 +379,7 @@ fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolRes
     const path = if (handler_path.len == 0) "<handler.ts>" else handler_path;
     const msg = try std.fmt.allocPrint(
         allocator,
-        "Browser proof workbench:\n  zigttp studio {s}\n\nOpen the studio page on the running server (default http://localhost:8080/_zigttp/studio).\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
+        "Browser proof workbench:\n  zttp studio {s}\n\nOpen the studio page on the running server (default http://localhost:8080/_zttp/studio).\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
         .{path},
     );
     defer allocator.free(msg);
@@ -490,8 +490,8 @@ fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.Se
     try w.writeAll(
         "Session ledger is available from the CLI:\n" ++
             "  /ledger export <path>\n" ++
-            "  zigttp ledger export --session <id> --out <path>\n" ++
-            "  zigttp ledger replay --input <path> --onto <git-ref>\n",
+            "  zttp ledger export --session <id> --out <path>\n" ++
+            "  zttp ledger replay --input <path> --onto <git-ref>\n",
     );
 
     buf = aw.toArrayList();
@@ -533,13 +533,13 @@ fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
 fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
     const msg = try allocator.dupe(
         u8,
-        "zigttp expert - changelog\n" ++
+        "zttp expert - changelog\n" ++
             "  Full token accounting (input, cache_read, cache_write, output)\n" ++
             "  Post-apply auto-verify (verify_paths + diff review after each edit)\n" ++
             "  Session compaction (/compact)\n" ++
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
-            "  Proof ledger mode: /ledger, /chat, /ledger export, zigttp ledger replay/export\n" ++
+            "  Proof ledger mode: /ledger, /chat, /ledger export, zttp ledger replay/export\n" ++
             "  Route Forge: /feature previews route plans, /forge proves route candidates\n" ++
             "  Spec Forge: /forge spec annotates and proves handler Spec<...> intent\n" ++
             "  Author-declared specs: /specs reads Spec<...> obligations + discharge state\n" ++
@@ -843,7 +843,7 @@ pub fn run(
 /// proposition (compiler-verified edits), a copyable starter prompt, and how to
 /// drive the loop, so a new user is never met with a bare prompt. TTY-only.
 const expert_banner =
-    "zigttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
+    "zttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
     "checked by the analyzer and rejected if it fails, so you only approve edits that pass.\n" ++
     "\n" ++
     "Each turn calls your model provider and consumes API credits.\n" ++
@@ -852,7 +852,7 @@ const expert_banner =
     "Type a goal in plain English, 'help' for commands, or 'quit' to exit.\n";
 
 const expert_no_workspace_hint =
-    "\nNo handler found here. Run 'zigttp init <name>' to scaffold a project first.\n";
+    "\nNo handler found here. Run 'zttp init <name>' to scaffold a project first.\n";
 
 fn writeBanner(allocator: std.mem.Allocator) void {
     _ = std.c.write(std.c.STDOUT_FILENO, expert_banner.ptr, expert_banner.len);
@@ -865,10 +865,10 @@ fn writeBanner(allocator: std.mem.Allocator) void {
 /// banner can nudge a user who launched expert outside a project.
 fn workspaceHasHandler(allocator: std.mem.Allocator) bool {
     const candidates = [_][]const u8{
-        "zigttp.json", "src/handler.ts", "handler.ts", "src/handler.tsx", "handler.tsx",
+        "zttp.json", "src/handler.ts", "handler.ts", "src/handler.tsx", "handler.tsx",
     };
     for (candidates) |path| {
-        if (zigts.file_io.fileExists(allocator, path)) return true;
+        if (zts.file_io.fileExists(allocator, path)) return true;
     }
     return false;
 }
@@ -1354,8 +1354,8 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
 }
 
 const testing = std.testing;
-const meta_tool_mod = @import("tools/zigts_expert_meta.zig");
-const check_tool_mod = @import("tools/zigts_check.zig");
+const meta_tool_mod = @import("tools/zts_expert_meta.zig");
+const check_tool_mod = @import("tools/zts_check.zig");
 const test_tool_mod = @import("tools/zig_test_step.zig");
 
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
@@ -1397,7 +1397,7 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/forge route") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/specs <handler.ts>") != null);
             // Leads with how-to guidance and gates the tool dump behind --tools.
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zigttp expert") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zttp expert") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "help --tools") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") == null);
         },
@@ -1416,7 +1416,7 @@ test "help --tools lists the registered tool names" {
             try testing.expect(r.ok);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "Registered tools") != null);
             // Still leads with the how-to block.
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zigttp expert") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zttp expert") != null);
         },
         else => return error.TestFailed,
     }
@@ -1438,7 +1438,7 @@ test "slash view commands route locally" {
     defer reg.deinit(testing.allocator);
 
     var ledger_outcome = try dispatchLine(testing.allocator, &reg, "/ledger");
-    try expectResult(&ledger_outcome, testing.allocator, "zigttp ledger export --session", true);
+    try expectResult(&ledger_outcome, testing.allocator, "zttp ledger export --session", true);
 
     var chat_outcome = try dispatchLine(testing.allocator, &reg, "/chat");
     try expectResult(&chat_outcome, testing.allocator, "CLI REPL chat", true);
@@ -1452,11 +1452,11 @@ test "slash command routes locally" {
     try expectResult(&outcome, testing.allocator, "\"compiler_version\"", true);
 }
 
-test "explicit zigts command routes locally" {
+test "explicit zts command routes locally" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    var outcome = try dispatchLine(testing.allocator, &reg, "zigts meta");
+    var outcome = try dispatchLine(testing.allocator, &reg, "zts meta");
     try expectResult(&outcome, testing.allocator, "\"policy_version\"", true);
 }
 
@@ -1464,7 +1464,7 @@ test "raw tool name still dispatches directly" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    var outcome = try dispatchLine(testing.allocator, &reg, "zigts_expert_meta");
+    var outcome = try dispatchLine(testing.allocator, &reg, "zts_expert_meta");
     try expectResult(&outcome, testing.allocator, "\"compiler_version\"", true);
 }
 
@@ -1474,7 +1474,7 @@ test "shouldDispatchTool is false for plain natural language" {
 
     try testing.expect(!shouldDispatchTool(&reg, "add a GET route and then run tests"));
     try testing.expect(shouldDispatchTool(&reg, "/test"));
-    try testing.expect(shouldDispatchTool(&reg, "zig build test-zigts"));
+    try testing.expect(shouldDispatchTool(&reg, "zig build test-zts"));
 }
 
 test "selectApprovalFn: auto_approve resolves to loop.autoApprove" {
@@ -1657,7 +1657,7 @@ test "processSubmit: /ledger and /chat switch views" {
         .tool_result => |*r| {
             defer r.deinit(testing.allocator);
             try testing.expect(r.ok);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "zigttp ledger export --session") != null);
+            try testing.expect(std.mem.indexOf(u8, r.llm_text, "zttp ledger export --session") != null);
         },
         else => return error.TestFailed,
     }
@@ -1906,8 +1906,8 @@ test "renderStudio returns workbench command and URL" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "zigttp studio examples/handler/handler.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "http://localhost:8080/_zigttp/studio") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "zttp studio examples/handler/handler.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "http://localhost:8080/_zttp/studio") != null);
 }
 
 fn renderDiffToBuf(buf: []u8, before: ?[]const u8, after: []const u8) []const u8 {
@@ -1996,12 +1996,12 @@ test "renderLedgerGuidance shows live session metrics when turns exist" {
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "veto retries:      3") != null);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "tool calls:        4") != null);
     // CLI guidance is still appended.
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zigttp ledger export") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zttp ledger export") != null);
 }
 
 test "renderLedgerGuidance omits the metrics block for a fresh session" {
     var res = try renderLedgerGuidance(testing.allocator, .{});
     defer res.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") == null);
-    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zigttp ledger export") != null);
+    try testing.expect(std.mem.indexOf(u8, res.llm_text, "zttp ledger export") != null);
 }

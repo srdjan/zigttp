@@ -435,7 +435,7 @@ test "close echo preserves an empty client payload" {
 test "onClose receives the parsed close code and reason" {
     const allocator = std.heap.c_allocator;
     const source =
-        \\import { serializeAttachment } from "zigttp:websocket";
+        \\import { serializeAttachment } from "zttp:websocket";
         \\export function onClose(ws, code, reason) {
         \\  serializeAttachment(ws, code === 4001 && reason === "bye" ? "matched" : "wrong");
         \\}

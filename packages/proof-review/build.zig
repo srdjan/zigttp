@@ -5,28 +5,28 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
 
-    const zigts_dep = b.dependency("zigts", .{
+    const zts_dep = b.dependency("zts", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const zigts_mod = zigts_dep.module("zigts");
+    const zts_mod = zts_dep.module("zts");
 
-    const tools_dep = b.dependency("zigttp_tools", .{
+    const tools_dep = b.dependency("zttp_tools", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const zigts_cli_mod = tools_dep.module("zigts_cli");
+    const zts_cli_mod = tools_dep.module("zts_cli");
 
-    _ = b.addModule("zigttp_proof_review", .{
+    _ = b.addModule("zttp_proof_review", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
-            .{ .name = "zigts_cli", .module = zigts_cli_mod },
+            .{ .name = "zts", .module = zts_mod },
+            .{ .name = "zts_cli", .module = zts_cli_mod },
         },
     });
 
@@ -37,12 +37,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_mod },
-                .{ .name = "zigts_cli", .module = zigts_cli_mod },
+                .{ .name = "zts", .module = zts_mod },
+                .{ .name = "zts_cli", .module = zts_cli_mod },
             },
         }),
     });
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test", "Run zigttp proof-review package tests");
+    const test_step = b.step("test", "Run zttp proof-review package tests");
     test_step.dependOn(&run_tests.step);
 }

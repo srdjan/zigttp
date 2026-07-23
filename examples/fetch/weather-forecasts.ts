@@ -2,14 +2,14 @@
 // against the keyless Open-Meteo API.
 //
 // Run:
-//   zigttp serve examples/fetch/weather-forecasts.ts \
+//   zttp serve examples/fetch/weather-forecasts.ts \
 //     --outbound-host api.open-meteo.com -p 3000
 //
 // Try it:
 //   curl http://localhost:3000/weather
 
-import type { Spec } from "zigttp:types";
-import { fetch } from "zigttp:fetch";
+import type { Spec } from "zttp:types";
+import { fetch } from "zttp:fetch";
 
 type WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
 

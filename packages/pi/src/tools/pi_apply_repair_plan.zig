@@ -2,14 +2,14 @@
 //! in-memory edit candidate. This tool never writes files.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const edit_simulate = @import("zigts_cli").edit_simulate;
+const zts = @import("zts");
+const edit_simulate = @import("zts_cli").edit_simulate;
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
 
-const json_utils = zigts.json_utils;
+const json_utils = zts.json_utils;
 
 const name = "pi_apply_repair_plan";
 
@@ -65,7 +65,7 @@ pub fn execute(
         defer allocator.free(root);
         const absolute = try common.resolveInsideWorkspace(allocator, root, path);
         defer allocator.free(absolute);
-        break :blk zigts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+        break :blk zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
             return registry_mod.ToolResult.errFmt(
                 allocator,
                 name ++ ": failed to read {s}: {s}\n",

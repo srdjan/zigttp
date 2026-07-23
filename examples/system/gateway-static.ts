@@ -1,6 +1,6 @@
 // Gateway handler with static fetchSync URLs (for linking demo)
-import { env } from "zigttp:env";
-import { serviceCall } from "zigttp:service";
+import { env } from "zttp:env";
+import { serviceCall } from "zttp:service";
 
 function handler(req) {
   const appName = env("APP_NAME") ?? "demo";

@@ -18,14 +18,14 @@ const CommandRow = struct {
 };
 
 pub const command_table = [_]CommandRow{
-    .{ .slash = "/meta", .explicit = "meta", .tool = "zigts_expert_meta", .takes_trailing_args = false },
-    .{ .slash = "/features", .explicit = "features", .tool = "zigts_expert_features", .takes_trailing_args = false },
-    .{ .slash = "/modules", .explicit = "modules", .tool = "zigts_expert_modules", .takes_trailing_args = false },
-    .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zigts_expert_describe_rule", .takes_trailing_args = true },
-    .{ .slash = "/search", .explicit = "search", .tool = "zigts_expert_search", .takes_trailing_args = true },
-    .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zigts_expert_verify_paths", .takes_trailing_args = true },
-    .{ .slash = null, .explicit = "verify-modules", .tool = "zigts_expert_verify_modules", .takes_trailing_args = true },
-    .{ .slash = "/check", .explicit = "check", .tool = "zigts_check", .takes_trailing_args = true },
+    .{ .slash = "/meta", .explicit = "meta", .tool = "zts_expert_meta", .takes_trailing_args = false },
+    .{ .slash = "/features", .explicit = "features", .tool = "zts_expert_features", .takes_trailing_args = false },
+    .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_modules", .takes_trailing_args = false },
+    .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zts_expert_describe_rule", .takes_trailing_args = true },
+    .{ .slash = "/search", .explicit = "search", .tool = "zts_expert_search", .takes_trailing_args = true },
+    .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true },
+    .{ .slash = null, .explicit = "verify-modules", .tool = "zts_expert_verify_modules", .takes_trailing_args = true },
+    .{ .slash = "/check", .explicit = "check", .tool = "zts_check", .takes_trailing_args = true },
     .{ .slash = "/feature", .explicit = null, .tool = "pi_feature_plan", .takes_trailing_args = true },
     .{ .slash = "/forge", .explicit = null, .tool = "pi_forge_route", .takes_trailing_args = true },
     .{ .slash = "/specs", .explicit = null, .tool = "pi_specs_status", .takes_trailing_args = true },
@@ -55,7 +55,7 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
         return null;
     }
 
-    if (std.mem.eql(u8, argv[0], "zigts")) {
+    if (std.mem.eql(u8, argv[0], "zts")) {
         if (argv.len < 2) return null;
         inline for (command_table) |row| {
             if (row.explicit) |name| {
@@ -147,14 +147,14 @@ const testing = std.testing;
 test "lookup slash /meta returns meta tool" {
     const argv = [_][]const u8{"/meta"};
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zigts_expert_meta", cmd.tool_name);
+    try testing.expectEqualStrings("zts_expert_meta", cmd.tool_name);
     try testing.expectEqual(@as(usize, 0), cmd.args.len);
 }
 
-test "lookup explicit zigts meta returns meta tool" {
-    const argv = [_][]const u8{ "zigts", "meta" };
+test "lookup explicit zts meta returns meta tool" {
+    const argv = [_][]const u8{ "zts", "meta" };
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zigts_expert_meta", cmd.tool_name);
+    try testing.expectEqualStrings("zts_expert_meta", cmd.tool_name);
     try testing.expectEqual(@as(usize, 0), cmd.args.len);
 }
 
@@ -163,12 +163,12 @@ test "lookup unknown slash returns null" {
     try testing.expect(lookup(&argv) == null);
 }
 
-test "lookup zig build test-zigts returns zig_test_step" {
-    const argv = [_][]const u8{ "zig", "build", "test-zigts" };
+test "lookup zig build test-zts returns zig_test_step" {
+    const argv = [_][]const u8{ "zig", "build", "test-zts" };
     const cmd = lookup(&argv) orelse return error.TestFailed;
     try testing.expectEqualStrings("zig_test_step", cmd.tool_name);
     try testing.expectEqual(@as(usize, 1), cmd.args.len);
-    try testing.expectEqualStrings("test-zigts", cmd.args[0]);
+    try testing.expectEqualStrings("test-zts", cmd.args[0]);
 }
 
 test "lookup zig build my-step routes to zig_build_step" {
@@ -181,7 +181,7 @@ test "lookup zig build my-step routes to zig_build_step" {
 test "lookup /rule forwards trailing args" {
     const argv = [_][]const u8{ "/rule", "ZTS303" };
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zigts_expert_describe_rule", cmd.tool_name);
+    try testing.expectEqualStrings("zts_expert_describe_rule", cmd.tool_name);
     try testing.expectEqual(@as(usize, 1), cmd.args.len);
     try testing.expectEqualStrings("ZTS303", cmd.args[0]);
 }

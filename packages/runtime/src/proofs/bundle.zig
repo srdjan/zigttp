@@ -1,6 +1,6 @@
-//! `zigttp proofs bundle` packages a handler's contract, optional binary,
+//! `zttp proofs bundle` packages a handler's contract, optional binary,
 //! and optional replay artifacts into a directory layout a third party
-//! can verify deterministically. `zigttp proofs verify <dir>` re-checks
+//! can verify deterministically. `zttp proofs verify <dir>` re-checks
 //! every SHA-256 in the manifest against the actual file bytes.
 //!
 //! Layout under `--out <dir>`:
@@ -19,10 +19,10 @@
 //! is the authority on what fields exist.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const static_mod = @import("../server_static.zig");
 
-pub const tool_version: []const u8 = "zigttp-bundle-1";
+pub const tool_version: []const u8 = "zttp-bundle-1";
 
 pub const BundleArgs = struct {
     contract_path: []const u8,
@@ -40,11 +40,11 @@ pub const ComponentVerdict = struct {
 
 pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     if (args.contract_path.len == 0) {
-        try stderr.writeAll("zigttp proofs bundle: --contract <path> is required\n");
+        try stderr.writeAll("zttp proofs bundle: --contract <path> is required\n");
         return error.MissingContractArg;
     }
     if (args.out_dir.len == 0) {
-        try stderr.writeAll("zigttp proofs bundle: --out <dir> is required\n");
+        try stderr.writeAll("zttp proofs bundle: --out <dir> is required\n");
         return error.MissingOutArg;
     }
 
@@ -55,25 +55,25 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
 
     try ensureDir(allocator, args.out_dir);
 
-    const contract_bytes = try zigts.file_io.readFile(allocator, args.contract_path, 256 * 1024 * 1024);
+    const contract_bytes = try zts.file_io.readFile(allocator, args.contract_path, 256 * 1024 * 1024);
     defer allocator.free(contract_bytes);
     const contract_sha = sha256Hex(contract_bytes);
     const contract_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "handler.contract.json" });
     defer allocator.free(contract_dest);
-    try zigts.file_io.writeFile(allocator, contract_dest, contract_bytes);
+    try zts.file_io.writeFile(allocator, contract_dest, contract_bytes);
 
     var binary_sha_hex: ?[64]u8 = null;
     if (args.binary_path) |path| {
-        const binary_bytes = try zigts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
+        const binary_bytes = try zts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
         defer allocator.free(binary_bytes);
         const sha = sha256Hex(binary_bytes);
         binary_sha_hex = sha;
         const bin_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "binary" });
         defer allocator.free(bin_dest);
-        try zigts.file_io.writeFile(allocator, bin_dest, binary_bytes);
+        try zts.file_io.writeFile(allocator, bin_dest, binary_bytes);
         const sha_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "binary.sha256" });
         defer allocator.free(sha_dest);
-        try zigts.file_io.writeFile(allocator, sha_dest, &sha);
+        try zts.file_io.writeFile(allocator, sha_dest, &sha);
     }
 
     var replay_sha_hex: ?[64]u8 = null;
@@ -82,7 +82,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         // Replay traces are JSONL records, expected to be KB-MB. Cap below
         // the 256 MiB contract/binary limit so a misrouted binary blob
         // path fails fast instead of silently bundling.
-        const replay_bytes = try zigts.file_io.readFile(allocator, path, 32 * 1024 * 1024);
+        const replay_bytes = try zts.file_io.readFile(allocator, path, 32 * 1024 * 1024);
         defer allocator.free(replay_bytes);
         const sha = sha256Hex(replay_bytes);
         replay_sha_hex = sha;
@@ -95,7 +95,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         replay_basename = basename;
         const replay_dest = try std.fs.path.join(allocator, &.{ replay_dir, basename });
         defer allocator.free(replay_dest);
-        try zigts.file_io.writeFile(allocator, replay_dest, replay_bytes);
+        try zts.file_io.writeFile(allocator, replay_dest, replay_bytes);
     }
 
     var manifest_buf: std.ArrayList(u8) = .empty;
@@ -111,7 +111,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
 
     const manifest_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "bundle.json" });
     defer allocator.free(manifest_dest);
-    try zigts.file_io.writeFile(allocator, manifest_dest, manifest_buf.items);
+    try zts.file_io.writeFile(allocator, manifest_dest, manifest_buf.items);
 
     try stdout.print("Wrote bundle to {s}/\n", .{args.out_dir});
     try stdout.print("  handler.contract.json  sha256={s}\n", .{contract_sha});
@@ -149,8 +149,8 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
     const manifest_path = try std.fs.path.join(allocator, &.{ bundle_dir_path, "bundle.json" });
     defer allocator.free(manifest_path);
 
-    const manifest_bytes = zigts.file_io.readFile(allocator, manifest_path, 16 * 1024 * 1024) catch {
-        try stderr.print("zigttp proofs verify: cannot read manifest at '{s}'\n", .{manifest_path});
+    const manifest_bytes = zts.file_io.readFile(allocator, manifest_path, 16 * 1024 * 1024) catch {
+        try stderr.print("zttp proofs verify: cannot read manifest at '{s}'\n", .{manifest_path});
         return error.NoBundleJson;
     };
     defer allocator.free(manifest_bytes);
@@ -166,7 +166,7 @@ pub fn verify(allocator: std.mem.Allocator, bundle_dir_path: []const u8, stdout:
     // or a format it does not recognize) yields zero verdicts, and an empty
     // loop would otherwise print "verified" and exit 0 having checked nothing.
     if (verdicts.items.len == 0) {
-        try stderr.print("zigttp proofs verify: no components found in manifest '{s}'\n", .{manifest_path});
+        try stderr.print("zttp proofs verify: no components found in manifest '{s}'\n", .{manifest_path});
         return error.NoComponentsVerified;
     }
 
@@ -197,13 +197,13 @@ fn verifyComponents(
         // The manifest is untrusted input: an absolute or `..`-containing
         // component path would make the verifier hash arbitrary files.
         if (!static_mod.isPathSafe(entry.path)) {
-            try stderr.print("zigttp proofs verify: component path '{s}' escapes the bundle directory\n", .{entry.path});
+            try stderr.print("zttp proofs verify: component path '{s}' escapes the bundle directory\n", .{entry.path});
             return error.SuspiciousPath;
         }
         const file_full = try std.fs.path.join(allocator, &.{ bundle_dir_path, entry.path });
         defer allocator.free(file_full);
 
-        const file_bytes = zigts.file_io.readFile(allocator, file_full, 256 * 1024 * 1024) catch {
+        const file_bytes = zts.file_io.readFile(allocator, file_full, 256 * 1024 * 1024) catch {
             return error.MissingComponent;
         };
         defer allocator.free(file_bytes);
@@ -300,7 +300,7 @@ test "rejectSuspiciousPath blocks parent traversal and system roots" {
 test "findNextComponent reads contract entry from a minimal manifest" {
     const manifest =
         \\{
-        \\  "toolVersion": "zigttp-bundle-1",
+        \\  "toolVersion": "zttp-bundle-1",
         \\  "components": {
         \\    "contract": { "path": "handler.contract.json", "sha256": "abc1230000000000000000000000000000000000000000000000000000000abc" }
         \\  }
@@ -339,7 +339,7 @@ test "verify rejects a manifest component path with parent traversal" {
 
     // The target exists outside the bundle dir and its sha256 matches the
     // manifest, so a verifier that read it would report the component OK.
-    try zigts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
     try ensureDir(std.testing.allocator, "bundle");
     const secret_sha = sha256Hex("outside-the-bundle");
     var manifest_buf: [256]u8 = undefined;
@@ -348,7 +348,7 @@ test "verify rejects a manifest component path with parent traversal" {
         "{{\n  \"components\": {{\n    \"contract\": {{ \"path\": \"../secret\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
         .{secret_sha},
     );
-    try zigts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
@@ -366,7 +366,7 @@ test "verify rejects an absolute manifest component path" {
     defer std.testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try zigts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "secret", "outside-the-bundle");
     const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
     defer std.testing.allocator.free(cwd);
     const abs_secret = try std.fs.path.join(std.testing.allocator, &.{ cwd, "secret" });
@@ -380,7 +380,7 @@ test "verify rejects an absolute manifest component path" {
         .{ abs_secret, secret_sha },
     );
     defer std.testing.allocator.free(manifest);
-    try zigts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
@@ -398,7 +398,7 @@ test "verify passes a bundle written by writeBundle" {
     defer std.testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try zigts.file_io.writeFile(std.testing.allocator, "contract.json", "{\"routes\":[]}");
+    try zts.file_io.writeFile(std.testing.allocator, "contract.json", "{\"routes\":[]}");
 
     var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();

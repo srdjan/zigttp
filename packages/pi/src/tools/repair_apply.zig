@@ -9,7 +9,7 @@
 //! source-only `applyIntent`.
 
 const std = @import("std");
-const canonicalize = @import("zigts_cli").canonicalize;
+const canonicalize = @import("zts_cli").canonicalize;
 
 pub const Intent = struct {
     plan_id: []const u8,
@@ -19,7 +19,7 @@ pub const Intent = struct {
 };
 
 /// Recognised intent kinds. Kept in sync with `RepairIntent` in
-/// `packages/zigts/src/repair_intent.zig`: the compiler emits the typed
+/// `packages/zts/src/repair_intent.zig`: the compiler emits the typed
 /// enum, this enum is what the apply pipeline actually executes.
 /// `canonicalize_capability_key_alias` is intentionally absent — that
 /// refactor requires file-level scope analysis the AST tool runs through
@@ -382,7 +382,7 @@ test "canonicalize_capability_key_alias is not dispatched source-only" {
     // canonicalize.collect; the AST tool runs that path itself rather
     // than going through applyIntent.
     const source =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
         \\  let key = "API_KEY";
         \\  const value = env(key);

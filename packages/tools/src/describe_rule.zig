@@ -1,12 +1,12 @@
-//! `zigts describe-rule` subcommand.
+//! `zts describe-rule` subcommand.
 //!
 //! Lists all rules, describes a specific rule by name or code, or outputs
 //! the policy hash for CI assertions.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
-const writeJsonString = zigts.handler_contract.writeJsonString;
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
+const writeJsonString = zts.handler_contract.writeJsonString;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
@@ -122,7 +122,7 @@ pub fn writeRuleJson(writer: anytype, entry: *const rule_registry.RuleEntry) !vo
     }
     try writer.writeAll(",\"help\":");
     try writeJsonString(writer, entry.help);
-    // Slice B: surface the typed repair primitive so `zigttp expert` can pick
+    // Slice B: surface the typed repair primitive so `zttp expert` can pick
     // an apply primitive without parsing the prose help. Emitted only when a
     // repair is registered for the rule; null repairs stay absent so older
     // consumers see no schema change for unrepairable diagnostics.
@@ -205,10 +205,10 @@ fn writeUnknownRuleJson(writer: anytype, query: []const u8) !void {
 
 fn printHelp() void {
     const help =
-        \\zigts describe-rule - describe diagnostic rules
+        \\zts describe-rule - describe diagnostic rules
         \\
         \\Usage:
-        \\  zigts describe-rule [rule-name|code] [--json] [--hash]
+        \\  zts describe-rule [rule-name|code] [--json] [--hash]
         \\
         \\Options:
         \\  --json    Output as JSON

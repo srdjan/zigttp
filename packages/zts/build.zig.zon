@@ -1,0 +1,20 @@
+.{
+    .name = .zts,
+    .version = "0.18.0",
+    .fingerprint = 0x2478a8e0b18d886a,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zttp_sdk = .{
+            .path = "../zttp-sdk",
+        },
+        .zttp_modules = .{
+            .path = "../modules",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "deps",
+    },
+}

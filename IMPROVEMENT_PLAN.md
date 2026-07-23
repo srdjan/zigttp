@@ -1,4 +1,4 @@
-# zigttp Fresh-Eyes Implementation Plan (Archived)
+# zttp Fresh-Eyes Implementation Plan (Archived)
 
 Archived on 2026-07-02. This file is no longer the current backlog.
 
@@ -24,16 +24,16 @@ later completed, rejected, or superseded.
   `test-zruntime` in the same Zig build invocation. `build.zig` documents that
   duplicate pool-heavy roots have caused intermittent macOS teardown traps, and
   the same combined shape reproduced a local segfault once during this pass.
-- The proof-gate workflow now fails when `zigttp proofs gate` exits with an
+- The proof-gate workflow now fails when `zttp proofs gate` exits with an
   infrastructure/usage error or produces no verdict, after still posting the PR
   comment.
 - The release workflow now runs `test-panic-isolation` and checks the tag
-  version against both `build.zig.zon` and `packages/zigts/src/root.zig`.
+  version against both `build.zig.zon` and `packages/zts/src/root.zig`.
 - The docs link gate now validates local Markdown anchors for README/docs and
   `SECURITY.md`.
 - Router examples now use the current `routerMatch(routes, req)` API.
 - Witness docs and PI/tool comments no longer advertise the unsupported
-  `zigttp mock --replay` command.
+  `zttp mock --replay` command.
 
 Exit gate:
 
@@ -129,7 +129,7 @@ regressions and no silent surface expansion.
 
 Exit gate:
 
-- `zig build test-zigts`
+- `zig build test-zts`
 - Focused sparse-array, type-expression, Unicode string, and JSON escape tests
 
 ## Phase 5 - Modules, SDK, And Input Validation
@@ -137,11 +137,11 @@ Exit gate:
 Goal: align virtual-module docs, metadata, and validators with implementation
 truth.
 
-1. Fix `zigttp:io` return metadata for `parallel` and `race`, including SDK
+1. Fix `zttp:io` return metadata for `parallel` and `race`, including SDK
    `ReturnKind` support if needed.
 2. Give `fetchWithRetry` the same structured response type as `fetch`.
-3. Tighten `zigttp:validate` ISO date/datetime validation beyond shape checks.
-4. Tighten `zigttp:time` `parseIso` timezone parsing so malformed suffixes fail.
+3. Tighten `zttp:validate` ISO date/datetime validation beyond shape checks.
+4. Tighten `zttp:time` `parseIso` timezone parsing so malformed suffixes fail.
 
 Exit gate:
 
@@ -151,7 +151,7 @@ Exit gate:
 
 Goal: keep machine-facing analyzer and expert tooling explicit.
 
-1. Decide whether `ZIGTTP_CASSETTE_MODE=replay` should prevent live provider
+1. Decide whether `ZTTP_CASSETTE_MODE=replay` should prevent live provider
    network calls even when API keys are present; if yes, route provider
    selection through cassette replay and add a fake-key no-socket test.
 2. Reject unknown flags for stable analyzer commands such as `meta`,
@@ -170,7 +170,7 @@ it into this plan until the current correctness gates are green.
 
 - Aggregate: `zig build test`
 - Runtime: `zig build test-zruntime test-server test-panic-isolation`
-- Engine: `zig build test-zigts`
+- Engine: `zig build test-zts`
 - Modules/governance: `zig build test-modules test-module-governance test-capability-audit test-sdk`
 - Analyzer/tools: `zig build test-cli test-expert test-expert-app test-cassette test-expert-golden test-proof-review`
 - Docs: `zig build test-docs-drift test-doc-links`

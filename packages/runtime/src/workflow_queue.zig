@@ -1,5 +1,5 @@
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const http_types = @import("http_types.zig");
 const codec = @import("workflow_queue_envelope.zig");
 const atomic_file = @import("atomic_file.zig");

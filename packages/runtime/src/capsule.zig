@@ -1,9 +1,9 @@
 //! Proof Flight Recorder capsule: a portable, per-handler evidence bundle.
 //!
-//! A capsule unifies what zigttp already produces in scattered places -
+//! A capsule unifies what zttp already produces in scattered places -
 //! contract facts, proven specs, recorded replay traces, pinned witnesses,
 //! and (Slice 2) signed behavioral-equivalence receipts - into one directory
-//! under `.zigttp/capsules/<name>/` that can be committed, diffed, and
+//! under `.zttp/capsules/<name>/` that can be committed, diffed, and
 //! replayed. The `capsule.json` manifest is the index; data files
 //! (traces, witnesses) sit beside it and are referenced by relative path.
 //!
@@ -15,7 +15,7 @@
 //! capsule recorded under an incompatible format is never silently replayed.
 
 const std = @import("std");
-const json_utils = @import("zigts").json_utils;
+const json_utils = @import("zts").json_utils;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Bump when the manifest shape changes incompatibly. `parse` rejects any
@@ -25,7 +25,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const schema_version: u32 = 1;
 
 /// Root directory for all capsules, relative to the project working dir.
-pub const capsules_root = ".zigttp/capsules";
+pub const capsules_root = ".zttp/capsules";
 
 pub const Route = struct {
     method: []const u8,
@@ -43,7 +43,7 @@ pub const Manifest = struct {
     handler_hash: []const u8,
     /// Hex SHA-256 of the contract JSON bytes.
     contract_hash: []const u8,
-    zigttp_version: []const u8,
+    zttp_version: []const u8,
     /// Hex policy-registry hash, ties the capsule to a rule set.
     policy_hash: []const u8,
     proven_specs: []const []const u8 = &.{},
@@ -59,7 +59,7 @@ pub const Manifest = struct {
     /// Optional reference (URL or JWS) to a deploy attestation envelope.
     attestation_ref: ?[]const u8 = null,
 
-    /// Serialize as camelCase JSON, matching the `.zigttp/proofs.jsonl`
+    /// Serialize as camelCase JSON, matching the `.zttp/proofs.jsonl`
     /// convention. Deterministic field order so the bytes hash stably.
     pub fn writeJson(self: *const Manifest, writer: anytype) !void {
         try writer.writeAll("{");
@@ -68,7 +68,7 @@ pub const Manifest = struct {
         try writeStringField(writer, "handlerPath", self.handler_path);
         try writeStringField(writer, "handlerHash", self.handler_hash);
         try writeStringField(writer, "contractHash", self.contract_hash);
-        try writeStringField(writer, "zigttpVersion", self.zigttp_version);
+        try writeStringField(writer, "zttpVersion", self.zttp_version);
         try writeStringField(writer, "policyHash", self.policy_hash);
 
         try writer.writeAll(",\"provenSpecs\":");
@@ -174,7 +174,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, opts: ParseOptions) !Load
         .handler_path = try reqString(obj, "handlerPath"),
         .handler_hash = try reqString(obj, "handlerHash"),
         .contract_hash = try reqString(obj, "contractHash"),
-        .zigttp_version = try reqString(obj, "zigttpVersion"),
+        .zttp_version = try reqString(obj, "zttpVersion"),
         .policy_hash = try reqString(obj, "policyHash"),
         .proven_specs = try optStringArray(a, obj, "provenSpecs"),
         .declared_specs = try optStringArray(a, obj, "declaredSpecs"),
@@ -252,12 +252,12 @@ pub fn manifestPathAlloc(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return std.fs.path.join(allocator, &.{ capsules_root, name, "capsule.json" });
 }
 
-/// Create `.zigttp/capsules/<name>/` if absent, one segment at a time. Uses
+/// Create `.zttp/capsules/<name>/` if absent, one segment at a time. Uses
 /// the POSIX `mkdir` idiom the rest of the runtime relies on (`std.fs.cwd()`
 /// is unavailable in this build; filesystem access goes through `std.Io` or
 /// raw syscalls). `.EXIST` is success — the directory is already there.
 pub fn ensureCapsuleDir(allocator: std.mem.Allocator, name: []const u8) !void {
-    try mkdirIfAbsent(allocator, ".zigttp");
+    try mkdirIfAbsent(allocator, ".zttp");
     try mkdirIfAbsent(allocator, capsules_root);
     const dir = try capsuleDirAlloc(allocator, name);
     defer allocator.free(dir);
@@ -358,7 +358,7 @@ fn sampleManifest() Manifest {
         .handler_path = "src/handler.ts",
         .handler_hash = "aa",
         .contract_hash = "bb",
-        .zigttp_version = "0.18.0",
+        .zttp_version = "0.18.0",
         .policy_hash = "cc",
         .proven_specs = &.{ "pure", "injection_safe" },
         .declared_specs = &.{"injection_safe"},
@@ -367,7 +367,7 @@ fn sampleManifest() Manifest {
         .trace_files = &.{"traces/001.jsonl"},
         .witness_keys = &.{"abc123"},
         .redaction_notes = &.{"stripped API_KEY value"},
-        .attestation_ref = "https://example.com/.well-known/zigttp-attest",
+        .attestation_ref = "https://example.com/.well-known/zttp-attest",
     };
 }
 
@@ -383,7 +383,7 @@ test "manifest round-trips through JSON" {
     try testing.expectEqual(schema_version, m.schema_version);
     try testing.expectEqualStrings("checkout", m.name);
     try testing.expectEqualStrings("src/handler.ts", m.handler_path);
-    try testing.expectEqualStrings("0.18.0", m.zigttp_version);
+    try testing.expectEqualStrings("0.18.0", m.zttp_version);
     try testing.expectEqual(@as(usize, 2), m.proven_specs.len);
     try testing.expectEqualStrings("injection_safe", m.proven_specs[1]);
     try testing.expectEqual(@as(usize, 1), m.routes.len);
@@ -392,7 +392,7 @@ test "manifest round-trips through JSON" {
     try testing.expectEqualStrings("traces/001.jsonl", m.trace_files[0]);
     try testing.expect(m.attestation_ref != null);
     try testing.expectEqualStrings(
-        "https://example.com/.well-known/zigttp-attest",
+        "https://example.com/.well-known/zttp-attest",
         m.attestation_ref.?,
     );
 }
@@ -400,7 +400,7 @@ test "manifest round-trips through JSON" {
 test "optional fields default empty when absent" {
     const json =
         \\{"schemaVersion":1,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zigttpVersion":"v","policyHash":"c"}
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c"}
     ;
     var loaded = try parse(testing.allocator, json, .{});
     defer loaded.deinit();
@@ -412,7 +412,7 @@ test "optional fields default empty when absent" {
 test "version mismatch fails closed" {
     const json =
         \\{"schemaVersion":999,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zigttpVersion":"v","policyHash":"c"}
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c"}
     ;
     try testing.expectError(error.SchemaVersionMismatch, parse(testing.allocator, json, .{}));
 
@@ -431,7 +431,7 @@ test "missing required field rejects" {
 test "unknown fields are ignored for forward compatibility" {
     const json =
         \\{"schemaVersion":1,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zigttpVersion":"v","policyHash":"c","futureField":42}
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c","futureField":42}
     ;
     var loaded = try parse(testing.allocator, json, .{});
     defer loaded.deinit();
@@ -503,5 +503,5 @@ test "ensureCapsuleDir creates the nested capsule directory" {
     const json = try m.toJsonAlloc(testing.allocator);
     defer testing.allocator.free(json);
     // The directory exists, so writing the manifest into it succeeds.
-    try @import("zigts").file_io.writeFile(testing.allocator, manifest_path, json);
+    try @import("zts").file_io.writeFile(testing.allocator, manifest_path, json);
 }

@@ -19,7 +19,7 @@
 //! `unregister` before the fd is closed. `unregister` is idempotent.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const websocket_codec = @import("websocket_codec.zig");
 
 const c = @cImport({

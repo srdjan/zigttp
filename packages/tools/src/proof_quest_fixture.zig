@@ -2,10 +2,10 @@ const std = @import("std");
 
 pub const starter_source =
     \\// Proof Quest starter: a tiny handler with author-declared specs.
-    \\// Run `zigttp dev`, press `b`, then confirm the preview to watch
+    \\// Run `zttp dev`, press `b`, then confirm the preview to watch
     \\// deterministic flip red. Press `r` to repair it back to green.
     \\
-    \\import type { Spec } from "zigttp:types";
+    \\import type { Spec } from "zttp:types";
     \\
     \\type Guardrails = Spec<
     \\    | "deterministic"
@@ -25,10 +25,10 @@ pub const starter_source =
 
 pub const broken_source =
     \\// Proof Quest starter: a tiny handler with author-declared specs.
-    \\// Run `zigttp dev`, press `b`, then confirm the preview to watch
+    \\// Run `zttp dev`, press `b`, then confirm the preview to watch
     \\// deterministic flip red. Press `r` to repair it back to green.
     \\
-    \\import type { Spec } from "zigttp:types";
+    \\import type { Spec } from "zttp:types";
     \\
     \\type Guardrails = Spec<
     \\    | "deterministic"

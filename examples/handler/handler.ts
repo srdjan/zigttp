@@ -1,12 +1,12 @@
 // TypeScript handler example with author-declared proof obligations.
 //
-// `Spec<...>` from "zigttp:types" is a phantom marker the verifier
+// `Spec<...>` from "zttp:types" is a phantom marker the verifier
 // reads off the return type and discharges against the inferred
 // HandlerProperties. The compiler emits ZTS500 if any declared spec
 // does not hold. Witnesses for failing counterexample-rich specs
-// persist to .zigttp/witnesses/ so future builds replay them.
+// persist to .zttp/witnesses/ so future builds replay them.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "injection_safe"

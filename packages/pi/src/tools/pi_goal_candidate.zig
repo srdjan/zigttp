@@ -6,13 +6,13 @@
 //! lane in memory and returning a compiler-verified candidate source snapshot.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
 const pi_repair_plan = @import("pi_repair_plan.zig");
 const pi_apply_repair_plan = @import("pi_apply_repair_plan.zig");
 
-const json_utils = zigts.json_utils;
+const json_utils = zts.json_utils;
 
 const name = "pi_goal_candidate";
 
@@ -229,7 +229,7 @@ fn readWorkspaceFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     defer allocator.free(root);
     const absolute = try common.resolveInsideWorkspace(allocator, root, path);
     defer allocator.free(absolute);
-    return zigts.file_io.readFile(allocator, absolute, common.default_output_limit);
+    return zts.file_io.readFile(allocator, absolute, common.default_output_limit);
 }
 
 fn parsePlans(allocator: std.mem.Allocator, json_text: []const u8) !ParsedPlans {
@@ -539,7 +539,7 @@ const testing = std.testing;
 
 test "candidateFromSource verifies a guard repair in memory" {
     const source =
-        \\import { validateJson } from "zigttp:validate";
+        \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\  const result = validateJson("item", req.body);
@@ -594,7 +594,7 @@ test "execute returns verified candidate without writing the file" {
     defer tmp.cleanup(allocator);
 
     const source =
-        \\import { validateJson } from "zigttp:validate";
+        \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\  const result = validateJson("item", req.body);
@@ -618,7 +618,7 @@ test "execute returns verified candidate without writing the file" {
 
     const path = try tmp.childPath(allocator, "handler.ts");
     defer allocator.free(path);
-    const after = try zigts.file_io.readFile(allocator, path, 1024 * 1024);
+    const after = try zts.file_io.readFile(allocator, path, 1024 * 1024);
     defer allocator.free(after);
     try testing.expectEqualStrings(source, after);
 }
@@ -628,7 +628,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
     // surface denies .persist_agent_state. Routing execute through
     // pi_repair_plan.execute persisted witnesses (planFromSource with
     // persist_witnesses=true), which unconditionally creates
-    // .zigttp/witnesses/<hash>/ on disk - an effect-boundary bypass. The
+    // .zttp/witnesses/<hash>/ on disk - an effect-boundary bypass. The
     // non-persisting plan path must leave the corpus untouched.
     const allocator = testing.allocator;
     const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
@@ -638,7 +638,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
     defer tmp.cleanup(allocator);
 
     const source =
-        \\import { validateJson } from "zigttp:validate";
+        \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\  const result = validateJson("item", req.body);
@@ -660,7 +660,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
 
-    const corpus_root = try tmp.childPath(allocator, ".zigttp/witnesses");
+    const corpus_root = try tmp.childPath(allocator, ".zttp/witnesses");
     defer allocator.free(corpus_root);
-    try testing.expect(!zigts.file_io.fileExists(allocator, corpus_root));
+    try testing.expect(!zts.file_io.fileExists(allocator, corpus_root));
 }

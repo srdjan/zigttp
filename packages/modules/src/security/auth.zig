@@ -1,4 +1,4 @@
-//! zigttp:auth - Authentication and JWT utilities
+//! zttp:auth - Authentication and JWT utilities
 //!
 //! Exports:
 //!   parseBearer(header) -> string | undefined
@@ -8,13 +8,13 @@
 //!   timingSafeEqual(a, b) -> boolean
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 const base64url = std.base64.url_safe_no_pad;
 const MAC_LEN = 32;
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:auth",
+    .specifier = "zttp:auth",
     .name = "auth",
     .required_capabilities = &.{ .crypto, .clock },
     .exports = &.{

@@ -20,7 +20,7 @@
 //! is signal-safe in the common case.
 
 const std = @import("std");
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 
 pub const EventKind = enum(u8) {
     cache_hit,

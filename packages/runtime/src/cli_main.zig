@@ -15,7 +15,7 @@ test {
     // are only declared but never referenced; the explicit refs below
     // ensure every relevant proof-review file is compiled and its `test`
     // blocks collected.
-    const proof_review = @import("zigttp_proof_review");
+    const proof_review = @import("zttp_proof_review");
     _ = proof_review.printer;
     _ = proof_review.review;
     _ = proof_review.state;

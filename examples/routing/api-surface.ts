@@ -1,6 +1,6 @@
-import { routerMatch } from "zigttp:router";
-import { schemaCompile } from "zigttp:validate";
-import { decodeJson, decodeQuery } from "zigttp:decode";
+import { routerMatch } from "zttp:router";
+import { schemaCompile } from "zttp:validate";
+import { decodeJson, decodeQuery } from "zttp:decode";
 
 schemaCompile("profile.update", JSON.stringify({
     type: "object",

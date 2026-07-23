@@ -1,16 +1,16 @@
 # Edge runtime
 
-`zigttp edge` is an opt-in in-process edge runtime, available in binaries built
+`zttp edge` is an opt-in in-process edge runtime, available in binaries built
 with `zig build -Dedge`. It loads multiple handler pools behind a single
 listener and routes incoming requests to a named target based on host, method,
 and path prefix. Useful when several handlers share one bind address:
 multitenant routing, internal request fan-out, or route-level experiments.
 
 ```bash
-zigttp edge --config zigttp.edge.json    # explicit path
-zigttp edge -c zigttp.edge.json          # short form
-zigttp edge zigttp.edge.json             # positional
-zigttp edge                              # defaults to ./zigttp.edge.json
+zttp edge --config zttp.edge.json    # explicit path
+zttp edge -c zttp.edge.json          # short form
+zttp edge zttp.edge.json             # positional
+zttp edge                              # defaults to ./zttp.edge.json
 ```
 
 ## Config
@@ -44,13 +44,13 @@ The config file is JSON with three required sections - `listener`,
 | `port`     | integer  | required      | Port to listen on                                |
 | `protocol` | string   | `"http"`      | `"http"` or `"https"` - HTTPS is parsed but TLS termination is post-v1, returns an error today |
 
-For HTTPS today, run zigttp edge behind a trusted front proxy (nginx,
+For HTTPS today, run zttp edge behind a trusted front proxy (nginx,
 Caddy, a load balancer) that terminates TLS upstream.
 
 ### `handlers`
 
 An array of named handler pools. Edge startup reads, compiles, and prewarms
-every handler before binding the listener. Run `zigttp check` or `zigttp build`
+every handler before binding the listener. Run `zttp check` or `zttp build`
 for the full contract/proof verification pipeline before running edge.
 
 | Field                  | Type   | Default | Notes                                          |
@@ -63,7 +63,7 @@ for the full contract/proof verification pipeline before running edge.
 | `outboundHttp`         | boolean| `false` | Enable outbound HTTP for this handler          |
 | `outboundHost`         | string | unset   | Single allowed outbound host; also enables outbound HTTP |
 | `outboundTimeoutMs`    | integer| `10000` | Per-handler outbound HTTP timeout in milliseconds |
-| `system`               | string | unset   | Path to a `zigttp:service` registry JSON file  |
+| `system`               | string | unset   | Path to a `zttp:service` registry JSON file  |
 
 ### `routes`
 
@@ -122,7 +122,7 @@ partial loads. The edge only listens after every handler pool has initialized.
 The edge adds one header to every response:
 
 ```
-X-Zigttp-Edge-Target: <handler name>
+X-Zttp-Edge-Target: <handler name>
 ```
 
 This identifies which named pool handled the request, for debugging or
@@ -137,7 +137,7 @@ log correlation.
   surfaces as a 5xx for that route's requests until the runtime recovers
   via the existing pool replacement path.
 - Per-route rate limiting and circuit breakers are not built in. Compose
-  with `zigttp:ratelimit` inside individual handlers, or front the edge
+  with `zttp:ratelimit` inside individual handlers, or front the edge
   with a proxy that does.
 
 These are deliberately outside the current edge runtime.

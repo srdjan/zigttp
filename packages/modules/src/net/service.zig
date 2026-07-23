@@ -1,10 +1,10 @@
-//! zigttp:service - named internal service calls.
+//! zttp:service - named internal service calls.
 //!
-//! State population (parsing system.json) happens in the zigts-side
+//! State population (parsing system.json) happens in the zts-side
 //! installState shim; this module owns the per-call dispatch only.
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 
 pub const MODULE_STATE_SLOT: usize = 9; // module_slots.Slot.service
@@ -59,7 +59,7 @@ pub const ServiceState = struct {
 };
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:service",
+    .specifier = "zttp:service",
     .name = "service",
     // .network: serviceCall dispatches via the runtime's fetch path (HTTP).
     // .filesystem: install-time read of system.json for service registry.

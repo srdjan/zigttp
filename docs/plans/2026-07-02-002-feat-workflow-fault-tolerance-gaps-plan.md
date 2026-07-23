@@ -252,7 +252,7 @@ caps, without changing runtime behavior in this unit.
 **Files**
 
 - `packages/runtime/src/runtime_workflow.zig`
-- `packages/zigts/src/modules/workflow/io.zig`
+- `packages/zts/src/modules/workflow/io.zig`
 - `docs/durable-workflows.md`
 
 **Approach**
@@ -367,10 +367,10 @@ at runtime.
 
 **Files**
 
-- `packages/zigts/src/rule_registry.zig`
-- `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/effect_inference.zig`
-- `packages/zigts/src/contract_builder.zig` (not `spec_discharge.zig` — see
+- `packages/zts/src/rule_registry.zig`
+- `packages/zts/src/contract_types.zig`
+- `packages/zts/src/effect_inference.zig`
+- `packages/zts/src/contract_builder.zig` (not `spec_discharge.zig` — see
   Amendment above)
 - `packages/tools/src/precompile_check.zig`,
   `packages/proof-review/src/spec_diagnostic.zig` (exhaustive switches over
@@ -390,7 +390,7 @@ at runtime.
   (`owner` function index + borrowed `workflow_fn` name), populated in
   `handleCall` right where the existing import-resolution branch already
   checks `imported.module`/`imported.name` — when
-  `durable_callback_depth > 0` and the callee is `zigttp:workflow`'s
+  `durable_callback_depth > 0` and the callee is `zttp:workflow`'s
   `call`/`saga`/`fanout`/`follow`, append a violation. No new "inside
   step()" tracking was needed, as planned.
 - `contract_builder.zig`'s `build()` gained a new unconditional "Phase 4d"
@@ -407,7 +407,7 @@ at runtime.
   closure nested in step()"`, `"ZTS509 does not fire for workflow.call in a
   function never reached from step()"`.
 - Zero `ZTS509` hits across every `examples/workflow/*.ts` file, confirmed
-  via `zigttp check --json` (no false positives on legitimate top-level
+  via `zttp check --json` (no false positives on legitimate top-level
   usage).
 
 #### U4 - ZTS509 negative/positive test matrix (scope corrected)
@@ -717,10 +717,10 @@ already established.
 
 **Files**
 
-- `packages/zigts/src/saga_extractor.zig` (new)
-- `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/handler_contract.zig`
-- `packages/zigts/src/contract_builder.zig` (wires the extractor into
+- `packages/zts/src/saga_extractor.zig` (new)
+- `packages/zts/src/contract_types.zig`
+- `packages/zts/src/handler_contract.zig`
+- `packages/zts/src/contract_builder.zig` (wires the extractor into
   `build()` and finds `saga`'s import binding slot; not in the original
   Files list, but extraction needs a call site)
 
@@ -728,7 +728,7 @@ already established.
 
 - Mirrored `intent_extractor.zig`'s pattern exactly: a `Deps`/`AtomResolver`
   struct, a linear scan over every IR node for `.call` tags whose callee
-  resolves (via a small self-contained import scan for `zigttp:workflow`'s
+  resolves (via a small self-contained import scan for `zttp:workflow`'s
   `saga`) to the tracked binding slot, then a literal walk of the first
   argument as an array of object literals (`name` literal string required,
   `run`/`compensate` presence-only, unknown sibling key or non-literal
@@ -781,9 +781,9 @@ originally scoped.
 
 **Files**
 
-- `packages/zigts/src/rule_registry.zig`
-- `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/contract_builder.zig` (not `system_linker.zig` — see
+- `packages/zts/src/rule_registry.zig`
+- `packages/zts/src/contract_types.zig`
+- `packages/zts/src/contract_builder.zig` (not `system_linker.zig` — see
   Amendment above)
 - `packages/tools/src/precompile_check.zig`,
   `packages/proof-review/src/spec_diagnostic.zig` (exhaustive
@@ -804,7 +804,7 @@ originally scoped.
   does not fire for a fully-covered static saga"`, `"ZTS510 never fires
   for a dynamically-constructed saga"` (all in `contract_builder.zig`).
 - Zero `ZTS510` hits across every `examples/workflow/*.ts` file, confirmed
-  via `zigttp check --json` — `saga-orchestrator.ts`'s real
+  via `zttp check --json` — `saga-orchestrator.ts`'s real
   `ship`-is-last-with-no-compensate pattern is correctly proven, not
   flagged.
 
@@ -812,7 +812,7 @@ originally scoped.
 
 **Goal**
 
-Surface the proof verdict to receipts, `contract.json`, and `zigttp
+Surface the proof verdict to receipts, `contract.json`, and `zttp
 verify`, the same way existing durable-workflow properties are surfaced.
 
 **Requirements**
@@ -825,9 +825,9 @@ verify`, the same way existing durable-workflow properties are surfaced.
 
 **Files**
 
-- `packages/zigts/src/contract_json_writer.zig`
-- `packages/zigts/src/contract_json_parser.zig`
-- `packages/zigts/src/handler_contract.zig` (test only)
+- `packages/zts/src/contract_json_writer.zig`
+- `packages/zts/src/contract_json_parser.zig`
+- `packages/zts/src/handler_contract.zig` (test only)
 
 **Approach**
 
@@ -878,7 +878,7 @@ other across the full saga shape space.
 **Tests**
 
 - See U9/U10/U11's Tests lists — this unit's matrix is the union of all
-  three, run together as `test-zigts` (1466 passed, 1 skipped, 0 failed).
+  three, run together as `test-zts` (1466 passed, 1 skipped, 0 failed).
 
 ---
 
@@ -897,7 +897,7 @@ proof coverage ordinary links already get.
 
 **Files**
 
-- `packages/zigts/src/system_linker.zig`
+- `packages/zts/src/system_linker.zig`
 
 **Approach**
 
@@ -974,7 +974,7 @@ prints on failure.
 
 **Tests**
 
-- Every new/extended example verified via `zig-out/bin/zigttp serve` +
+- Every new/extended example verified via `zig-out/bin/zttp serve` +
   `curl` directly, then wired into `scripts/test-examples.sh`'s
   `run_live_workflow` harness. Final `bash scripts/test-examples.sh`: 38
   suites, 38 passed, 0 failed.
@@ -1018,7 +1018,7 @@ prints on failure.
 |---|---|
 | Format | `zig fmt --check build.zig packages/` |
 | Runtime workflow tests | `zig build test-zruntime` |
-| ZigTS/proof tests | `zig build test-zigts` |
+| ZigTS/proof tests | `zig build test-zts` |
 | CLI tests (Phase 3, 7's `durable dead-runs`) | `zig build test-cli` |
 | Examples | `bash scripts/test-examples.sh` |
 | Docs | `zig build test-docs-drift test-doc-links` |
@@ -1029,7 +1029,7 @@ Manual drills to keep with the implementation branch:
 
 - Quarantine a durable run (force 10 consecutive recovery failures), kill
   and restart the process, confirm it stays quarantined until
-  `zigttp durable dead-runs replay <id>` is run.
+  `zttp durable dead-runs replay <id>` is run.
 - Compile a handler with `step(() => call("x", {}))` and confirm ZTS509
   fails the build with an actionable message.
 - Compile the existing `saga-orchestrator.ts` example unmodified and

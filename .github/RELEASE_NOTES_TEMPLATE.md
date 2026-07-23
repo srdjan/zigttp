@@ -1,4 +1,4 @@
-# zigttp vX.Y.Z
+# zttp vX.Y.Z
 
 <!--
 Curated release notes. The Release workflow also auto-generates a commit-level
@@ -41,4 +41,4 @@ attached below.
 ## Verification
 
 - Toolchain: Zig `0.16.0`
-- Policy hash: `<output of zigts describe-rule --hash>`
+- Policy hash: `<output of zts describe-rule --hash>`

@@ -2,18 +2,18 @@
 //!
 //! Runs the full analysis pipeline on proposed file content and optionally
 //! compares against the original to determine which violations are new.
-//! Used by the `zigts edit-simulate` CLI subcommand and the interactive
+//! Used by the `zts edit-simulate` CLI subcommand and the interactive
 //! expert loop.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const project_config_mod = @import("project_config");
 const json_diag = precompile.json_diag;
-const rule_error = zigts.rule_error;
-const file_io = zigts.file_io;
-const writeJsonString = zigts.handler_contract.writeJsonString;
-const HandlerProperties = zigts.handler_contract.HandlerProperties;
+const rule_error = zts.rule_error;
+const file_io = zts.file_io;
+const writeJsonString = zts.handler_contract.writeJsonString;
+const HandlerProperties = zts.handler_contract.HandlerProperties;
 
 const max_stdin_json_bytes: usize = 20 * 1024 * 1024;
 
@@ -21,9 +21,9 @@ pub const EditSimulateInput = struct {
     file: []const u8,
     content: []const u8,
     before: ?[]const u8 = null,
-    /// SQL schema for zigttp:sql query validation. Boundary callers that own
+    /// SQL schema for zttp:sql query validation. Boundary callers that own
     /// project context (the expert veto, the edit-simulate CLI) resolve it
-    /// via `discoverProjectSqlSchemaPath`; when null, zigttp:sql edits fail
+    /// via `discoverProjectSqlSchemaPath`; when null, zttp:sql edits fail
     /// analysis with MissingSqlSchema exactly like a schema-less `check`.
     sql_schema_path: ?[]const u8 = null,
 };
@@ -47,7 +47,7 @@ pub const SimulateResult = struct {
     /// analysis pipeline reached the contract phase (no parse or type errors).
     /// `properties.read_only` is the BEHAVIORAL fact (no state mutations).
     properties: ?HandlerProperties = null,
-    /// True when an imported module (zigttp:sql / zigttp:cache) forbids DECLARING
+    /// True when an imported module (zttp:sql / zttp:cache) forbids DECLARING
     /// read_only (ZTS501), even though the handler may be behaviorally read-only.
     /// The agent-facing HUD reports read_only as held only when behavioral AND
     /// not forbidden, so the agent is never told to declare a property the import
@@ -79,7 +79,7 @@ pub fn simulate(
 
     // When the caller passes no explicit schema, discover the project's from cwd
     // exactly as the CLI boundary (`run`) does. Without this, every in-process
-    // tool that simulates a zigttp:sql handler (the repair-apply lane, review
+    // tool that simulates a zttp:sql handler (the repair-apply lane, review
     // patch, ast rewrite, feature apply) throws MissingSqlSchema even though the
     // project has a configured schema. The veto and CLI already pass a non-null
     // path, so discovery only runs for the schema-less in-process callers.
@@ -115,7 +115,7 @@ pub fn simulate(
     var result = SimulateResult{
         .properties = new_check.properties,
         .read_only_forbidden_by_import = if (new_check.contract) |c|
-            zigts.spec_discharge.readOnlyForbiddenByImport(c.modules.items)
+            zts.spec_discharge.readOnlyForbiddenByImport(c.modules.items)
         else
             false,
     };
@@ -231,7 +231,7 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
     if (result.properties) |p| {
         // read_only is reported as DECLARABLE here (behavioral AND not import-
         // forbidden): this HUD is what the agent reads to decide what Spec to
-        // declare, and declaring read_only with a zigttp:sql/cache import is a
+        // declare, and declaring read_only with a zttp:sql/cache import is a
         // ZTS501 error. The behavioral fact stays in `result.properties`.
         const read_only_declarable = p.read_only and !result.read_only_forbidden_by_import;
         try writer.print(",\"properties\":{{\"pure\":{},\"read_only\":{},\"deterministic\":{},\"retry_safe\":{},\"idempotent\":{},\"state_isolated\":{},\"injection_safe\":{},\"fault_covered\":{}}}", .{
@@ -248,7 +248,7 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
     try writer.writeAll("}\n");
 }
 
-/// CLI entry point for `zigts edit-simulate`.
+/// CLI entry point for `zts edit-simulate`.
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -323,7 +323,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     };
 
     // CLI boundary: resolve the project's SQL schema once per invocation so
-    // zigttp:sql edits validate the way `zigttp dev`/`test` validate them.
+    // zttp:sql edits validate the way `zttp dev`/`test` validate them.
     const discovered_schema = discoverProjectSqlSchemaPath(allocator, null);
     defer if (discovered_schema) |p| allocator.free(p);
     input.sql_schema_path = discovered_schema;
@@ -335,11 +335,11 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
 }
 
 /// Resolve the project's SQL schema for analysis: the `sqlite` entry in the
-/// nearest `zigttp.json` walking up from `start_path` (or cwd when null),
-/// resolved against the project root. This is the same source `zigttp dev`,
-/// `zigttp test`, and `zigttp doctor` pass to the analyzer. Returns null when
+/// nearest `zttp.json` walking up from `start_path` (or cwd when null),
+/// resolved against the project root. This is the same source `zttp dev`,
+/// `zttp test`, and `zttp doctor` pass to the analyzer. Returns null when
 /// there is no project, no `sqlite` entry, or the manifest cannot be read:
-/// a broken zigttp.json degrades to schema-less analysis rather than failing
+/// a broken zttp.json degrades to schema-less analysis rather than failing
 /// the edit. Caller frees the returned slice.
 pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -413,7 +413,7 @@ fn writeTempFile(allocator: std.mem.Allocator, original_name: []const u8, conten
     var rand_bytes: [8]u8 = undefined;
     fillRandom(&rand_bytes);
     const rand_int = std.mem.readInt(u64, &rand_bytes, .little);
-    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/zigts-edit-sim-{x:0>16}{s}", .{
+    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/zts-edit-sim-{x:0>16}{s}", .{
         rand_int,
         ext,
     });
@@ -442,17 +442,17 @@ fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
 
 fn printHelp() void {
     const help =
-        \\zigts edit-simulate - simulate an edit and report violations
+        \\zts edit-simulate - simulate an edit and report violations
         \\
         \\Usage:
-        \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
+        \\  zts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
         \\
         \\Options:
         \\  --stdin-json    Read input as JSON from stdin: {"file", "content", "before"?}
         \\  --before FILE   Original file for diff-aware analysis
         \\
-        \\zigttp:sql queries validate against the project's SQL schema, discovered
-        \\from the "sqlite" entry in the nearest zigttp.json.
+        \\zttp:sql queries validate against the project's SQL schema, discovered
+        \\from the "sqlite" entry in the nearest zttp.json.
         \\
         \\Output: JSON with violations array and summary (total, new, preexisting).
         \\
@@ -532,7 +532,7 @@ test "writeResultJson reports read_only as not-declarable under a forbidding imp
     defer buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
 
-    // A behaviorally read-only handler (a SELECT) whose zigttp:sql import forbids
+    // A behaviorally read-only handler (a SELECT) whose zttp:sql import forbids
     // DECLARING read_only: the HUD the agent reads must show read_only:false so it
     // does not declare a property ZTS501 would reject. The other held properties
     // (retry_safe/idempotent) are unaffected.
@@ -609,7 +609,7 @@ test "runWithArgs accepts redundant --json flag" {
     ;
     var uniquifier: u8 = undefined;
     const addr = @intFromPtr(&uniquifier);
-    const path = try std.fmt.allocPrint(allocator, "/tmp/zigts-edit-sim-json-{x}.ts", .{addr});
+    const path = try std.fmt.allocPrint(allocator, "/tmp/zts-edit-sim-json-{x}.ts", .{addr});
     defer allocator.free(path);
     try file_io.writeFile(allocator, path, handler);
     defer deleteTempFile(allocator, path);

@@ -1,0 +1,291 @@
+//! zts - Zig TypeScript compiler
+//!
+//! A performance-oriented JavaScript engine featuring:
+//! - Generational GC with bump allocation
+//! - SIMD-accelerated string operations
+//! - Hidden classes and inline caching
+//! - Lock-free runtime pooling
+//!
+//! ## Quick Start
+//!
+//! ```zig
+//! const zts = @import("zts");
+//!
+//! // Create a runtime pool
+//! var pool = try zts.LockFreePool.init(allocator, .{});
+//! defer pool.deinit();
+//!
+//! // Acquire a runtime
+//! const runtime = try pool.acquire();
+//! defer pool.release(runtime);
+//!
+//! // Execute JavaScript
+//! const result = runtime.ctx.eval("1 + 2");
+//! ```
+//!
+//! ## Stability of this surface
+//!
+//! Two tiers are re-exported below:
+//!
+//! - **Stable public surface** - the convenience type and entry-point
+//!   re-exports near the bottom of this file (`JSValue`, `Context`, `GC`,
+//!   `LockFreePool`, `Runtime`, `Interpreter`, `Parser`, `strip`,
+//!   `createContext`, ...). These are the curated surface for embedding the
+//!   engine and are kept deliberately small and stable.
+//! - **Internal implementation modules** - the `pub const <module> =
+//!   @import("...")` re-exports in the next section. They are exposed only so
+//!   the in-repo runtime, tools, and pi packages can share implementation; they
+//!   are NOT a curated public API and may change between releases without
+//!   notice. Depend on them only from within this repository, and prefer the
+//!   curated types above for anything new. (This is documentation, not a
+//!   compiler-enforced boundary: all consumers live in this monorepo and move
+//!   together under one test suite.)
+
+const std = @import("std");
+const build_options = @import("build_options");
+
+// ============================================================================
+// Internal implementation modules (no cross-release stability guarantee).
+// Exposed for the in-repo runtime/tools/pi packages; prefer the curated public
+// types in the "Stable public surface" section below. See the Stability note
+// at the top of this file.
+// ============================================================================
+pub const value = @import("value.zig");
+pub const heap = @import("heap.zig");
+pub const gc = @import("gc.zig");
+pub const string = @import("string.zig");
+pub const object = @import("object.zig");
+pub const context = @import("context.zig");
+pub const bytecode = @import("bytecode.zig");
+pub const interpreter = @import("interpreter.zig");
+
+// JIT C-ABI helpers are referenced from generated machine code via `extern fn`.
+// Anchor the module here so the linker emits the symbols. The analyzer-only
+// build (wasm/freestanding) never reaches the JIT, so skip the anchor to keep
+// the interpreter/JIT/GC subtree out of the module graph.
+comptime {
+    if (!build_options.analyzer_only) {
+        _ = @import("interpreter/jit_intrinsics.zig");
+    }
+}
+pub const type_feedback = @import("type_feedback.zig");
+pub const builtins = @import("builtins/root.zig");
+// New two-pass parser with proper function compilation
+pub const parser = @import("parser/root.zig");
+// Note: Legacy single-pass parser removed; use parser/root.zig
+pub const pool = @import("pool.zig");
+pub const http = @import("http.zig");
+pub const stripper = @import("stripper.zig");
+pub const comptime_eval = @import("comptime.zig");
+pub const intern_pool = @import("intern_pool.zig");
+pub const bytecode_cache = @import("bytecode_cache.zig");
+pub const bytecode_opt = @import("bytecode_opt.zig");
+pub const arena = @import("arena.zig");
+pub const handler_analyzer = @import("handler_analyzer.zig");
+pub const handler_verifier = @import("handler_verifier.zig");
+pub const handler_contract = @import("handler_contract.zig");
+pub const handler_policy = @import("handler_policy.zig");
+pub const policy = @import("policy.zig");
+pub const bool_checker = @import("bool_checker.zig");
+pub const flow_checker = @import("flow_checker.zig");
+pub const path_generator = @import("path_generator.zig");
+pub const counterexample = @import("counterexample.zig");
+pub const proof_trace = @import("proof_trace.zig");
+pub const witness_corpus = @import("witness_corpus.zig");
+pub const repair_plan = @import("repair_plan.zig");
+pub const json_utils = @import("json_utils.zig");
+pub const behavior_canonical = @import("behavior_canonical.zig");
+pub const fault_coverage = @import("fault_coverage.zig");
+pub const property_diagnostics = @import("property_diagnostics.zig");
+pub const route_match = @import("route_match.zig");
+pub const type_map = @import("type_map.zig");
+pub const type_pool = @import("type_pool.zig");
+pub const type_env = @import("type_env.zig");
+pub const service_types = @import("service_types.zig");
+pub const type_checker = @import("type_checker.zig");
+pub const strict_checker = @import("strict_checker.zig");
+pub const effect_inference = @import("effect_inference.zig");
+pub const pipeline = @import("pipeline.zig");
+pub const bytecode_verifier = @import("bytecode_verifier.zig");
+pub const trace = @import("trace.zig");
+pub const file_io = @import("file_io.zig");
+pub const module_slots = @import("module_slots.zig");
+pub const contract_diff = @import("contract_diff.zig");
+pub const system_linker = @import("system_linker.zig");
+pub const perf_receipt = @import("perf_receipt.zig");
+pub const equivalence_receipt = @import("equivalence_receipt.zig");
+pub const hypermedia_receipt = @import("hypermedia_receipt.zig");
+pub const rule_error = @import("rule_error.zig");
+pub const rule_registry = @import("rule_registry.zig");
+pub const repair_intent = @import("repair_intent.zig");
+pub const ws_consistency = @import("ws_consistency.zig");
+pub const spec_discharge = @import("spec_discharge.zig");
+pub const function_specs = @import("function_specs.zig");
+pub const module_binding = @import("module_binding.zig");
+pub const module_manifest = @import("module_manifest.zig");
+pub const manifest_registry = @import("manifest_registry.zig");
+pub const builtin_modules = @import("builtin_modules.zig");
+pub const security_events = @import("security_events.zig");
+pub const wasm = @import("wasm/root.zig");
+pub const sqlite = @import("sqlite.zig");
+pub const sql_analysis = @import("sql_analysis.zig");
+pub const modules = @import("modules/root.zig");
+pub const compat = @import("compat.zig");
+pub const jit = @import("jit/root.zig");
+pub const semantics = @import("semantics.zig");
+pub const semantics_check = @import("semantics_check.zig");
+pub const semantics_smt = @import("semantics_smt.zig");
+pub const semantics_audit = @import("semantics_audit.zig");
+pub const semantics_corpus = @import("semantics_corpus.zig");
+pub const semantics_render = @import("semantics_render.zig");
+
+// ============================================================================
+// Stable public surface: primary types and entry points for embedding the
+// engine. This is the curated API; keep it small and stable.
+// ============================================================================
+pub const JSValue = value.JSValue;
+pub const Context = context.Context;
+pub const GC = gc.GC;
+pub const GCConfig = gc.GCConfig;
+pub const LockFreePool = pool.LockFreePool;
+pub const Runtime = pool.LockFreePool.Runtime;
+pub const Interpreter = interpreter.Interpreter;
+pub const Opcode = bytecode.Opcode;
+pub const FunctionBytecode = bytecode.FunctionBytecode;
+pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
+pub const Atom = object.Atom;
+pub const HiddenClassIndex = object.HiddenClassIndex;
+pub const HiddenClassPool = object.HiddenClassPool;
+pub const JSObject = object.JSObject;
+pub const NativeFn = object.NativeFn;
+pub const InlineCache = object.InlineCache;
+pub const JSString = string.JSString;
+pub const StringTable = string.StringTable;
+pub const createString = string.createString;
+pub const Parser = parser.Parser;
+pub const StripResult = stripper.StripResult;
+pub const StripOptions = stripper.StripOptions;
+pub const StripDiagnostic = stripper.StripDiagnostic;
+pub const StripDiagnosticKind = stripper.StripDiagnosticKind;
+pub const ComptimeEnv = stripper.ComptimeEnv;
+pub const strip = stripper.strip;
+pub const ComptimeEvaluator = comptime_eval.ComptimeEvaluator;
+pub const ComptimeValue = comptime_eval.ComptimeValue;
+pub const emitLiteral = comptime_eval.emitLiteral;
+pub const InternPool = intern_pool.InternPool;
+pub const InternPoolIndex = intern_pool.Index;
+pub const BytecodeCache = bytecode_cache.BytecodeCache;
+pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
+pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
+pub const OptStats = bytecode_opt.OptStats;
+pub const FeedbackSummary = type_feedback.FeedbackSummary;
+pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
+pub const HandlerVerifier = handler_verifier.HandlerVerifier;
+pub const BoolChecker = bool_checker.BoolChecker;
+pub const FlowChecker = flow_checker.FlowChecker;
+pub const PathGenerator = path_generator.PathGenerator;
+pub const TypeMap = type_map.TypeMap;
+pub const TypeMapEntry = type_map.TypeMapEntry;
+pub const TypeMapKind = type_map.TypeMapKind;
+pub const TypePool = type_pool.TypePool;
+pub const TypePoolError = type_pool.TypePoolError;
+pub const TypeIndex = type_pool.TypeIndex;
+pub const null_type_idx = type_pool.null_type_idx;
+pub const parseTypeExpr = type_pool.parseTypeExpr;
+pub const TypeEnv = type_env.TypeEnv;
+pub const TypeChecker = type_checker.TypeChecker;
+pub const StrictChecker = strict_checker.StrictChecker;
+pub const EffectAnalyzer = effect_inference.Analyzer;
+pub const EffectRow = effect_inference.EffectRow;
+pub const FunctionEffect = effect_inference.FunctionEffect;
+pub const BytecodeVerifier = bytecode_verifier;
+pub const ContractBuilder = handler_contract.ContractBuilder;
+pub const HandlerContract = handler_contract.HandlerContract;
+pub const SpecDiagnostic = handler_contract.SpecDiagnostic;
+pub const writeContractJson = handler_contract.writeContractJson;
+pub const HandlerPolicy = handler_policy.HandlerPolicy;
+pub const RuntimePolicy = handler_policy.RuntimePolicy;
+pub const PolicyAction = policy.Action;
+pub const PolicyActor = policy.Actor;
+pub const PolicyResource = policy.Resource;
+pub const PolicyEnvironment = policy.Environment;
+pub const PolicyInput = policy.PolicyInput;
+pub const PolicyResult = policy.PolicyResult;
+pub const PolicyDenyReason = policy.DenyReason;
+pub const LocalPolicyChecker = policy.LocalPolicyChecker;
+pub const PatternDispatchTable = bytecode.PatternDispatchTable;
+pub const HandlerPattern = bytecode.HandlerPattern;
+pub const HandlerFlags = bytecode.HandlerFlags;
+pub const TraceRecorder = trace.TraceRecorder;
+pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
+
+/// Version information
+pub const version = struct {
+    pub const major = 0;
+    pub const minor = 18;
+    pub const patch = 0;
+    pub const string = "0.18.0";
+};
+
+/// Create a new standalone context (not pooled)
+pub fn createContext(allocator: std.mem.Allocator, gc_config: GCConfig) !*Context {
+    const gc_state = try allocator.create(GC);
+    errdefer allocator.destroy(gc_state);
+
+    gc_state.* = try GC.init(allocator, gc_config);
+    errdefer gc_state.deinit();
+
+    // Initialize heap for size-class allocation and wire up to GC
+    const heap_state = try allocator.create(heap.Heap);
+    errdefer allocator.destroy(heap_state);
+    heap_state.* = heap.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+
+    return try Context.init(allocator, gc_state, .{});
+}
+
+/// Destroy a standalone context
+pub fn destroyContext(ctx: *Context) void {
+    const allocator = ctx.allocator;
+    const gc_state = ctx.gc_state;
+    const heap_state = gc_state.heap_ptr;
+    ctx.deinit();
+    gc_state.deinit();
+    if (heap_state) |h| {
+        h.deinit();
+        allocator.destroy(h);
+    }
+    allocator.destroy(gc_state);
+}
+
+// Run all module tests
+test {
+    std.testing.refAllDecls(@This());
+}
+
+// refAllDecls only recurses pub decls, so anchor the (non-pub) parity gate explicitly.
+test {
+    _ = @import("tests/opcode_parity.zig");
+}
+
+// modules/internal/compiler.zig is only reached via the `modules` re-export
+// above, which container-level laziness never forces the compiler to
+// analyze on its own, so its test blocks go uncollected without this anchor.
+test {
+    _ = @import("modules/internal/compiler.zig");
+}
+
+test "version" {
+    try std.testing.expectEqualStrings("0.18.0", version.string);
+}
+
+test "create and destroy context" {
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+
+    const allocator = test_arena.allocator();
+    const ctx = try createContext(allocator, .{ .nursery_size = 4096 });
+    defer destroyContext(ctx);
+
+    try std.testing.expect(ctx.sp == 0);
+}

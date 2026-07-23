@@ -1,10 +1,10 @@
 //! Runtime-owned adapter for the zts engine surface used by the HTTP server.
 //!
-//! Keep direct `zigts` and `zruntime` imports here so server code depends on
+//! Keep direct `zts` and `zruntime` imports here so server code depends on
 //! handler execution capabilities instead of engine internals.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const zruntime = @import("zruntime.zig");
 const http_types = @import("http_types.zig");
 

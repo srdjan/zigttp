@@ -8,7 +8,7 @@ Planned on: 2026-06-20
 Before editing, verify the in-scope files have not changed since this plan was written:
 
 ```sh
-git diff --name-only f2c637d -- packages/runtime/src/live_reload.zig packages/proof-review/src/review.zig packages/zigts/src/contract_types.zig
+git diff --name-only f2c637d -- packages/runtime/src/live_reload.zig packages/proof-review/src/review.zig packages/zts/src/contract_types.zig
 ```
 
 Expected output for direct execution from the planned commit is empty. If any path appears, re-open the changed file and re-check the field names before editing.
@@ -32,7 +32,7 @@ Evidence:
 
 - `packages/proof-review/src/review.zig` defines `ReviewFacts.intent_assertion_count`, `intent_dynamic`, `behavior_path_count`, and `failure_path_count` at lines 256-260.
 - `ReviewFacts.setIntentSummary` writes those fields at lines 332-347.
-- `packages/zigts/src/contract_types.zig` defines `IntentInfo.assertions` and `IntentInfo.dynamic` at lines 1200-1207.
+- `packages/zts/src/contract_types.zig` defines `IntentInfo.assertions` and `IntentInfo.dynamic` at lines 1200-1207.
 - `HandlerContract.intent` is available at lines 1296-1298.
 - `HandlerContract.behaviors` is available at line 1334.
 - Each `BehaviorPath` carries `is_failure_path` at lines 963-973.

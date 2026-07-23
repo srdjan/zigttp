@@ -1,12 +1,12 @@
-//! Shared helper implementations for the direct `zigts meta`,
-//! `zigts verify-paths`, and `zigts verify-modules` commands.
+//! Shared helper implementations for the direct `zts meta`,
+//! `zts verify-paths`, and `zts verify-modules` commands.
 //!
 //! Exit contract: `help`/`--help`/`-h` in any position returns cleanly (0);
 //! missing args or unknown flags propagate an error (1).
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
 const module_audit = @import("module_audit.zig");
 const expert_meta = @import("expert_meta.zig");
 const verify_paths_core = @import("verify_paths_core.zig");
@@ -273,7 +273,7 @@ const ExtensionStatusEntry = struct {
     path: []const u8,
     invalid: bool,
     /// Non-null when the manifest parsed cleanly.
-    manifest: ?zigts.module_manifest.Manifest,
+    manifest: ?zts.module_manifest.Manifest,
     audit: module_audit.VerifyResult,
 
     pub fn deinit(self: *ExtensionStatusEntry, allocator: std.mem.Allocator) void {
@@ -289,12 +289,12 @@ fn loadExtensionStatusEntry(
     var audit = try module_audit.verifyManifestPath(allocator, path);
     errdefer audit.deinit(allocator);
 
-    var manifest_opt: ?zigts.module_manifest.Manifest = null;
+    var manifest_opt: ?zts.module_manifest.Manifest = null;
     if (!audit.hasErrors()) {
-        const bytes = zigts.file_io.readFile(allocator, path, 256 * 1024) catch null;
+        const bytes = zts.file_io.readFile(allocator, path, 256 * 1024) catch null;
         if (bytes) |content| {
             defer allocator.free(content);
-            if (zigts.module_manifest.parse(allocator, content)) |parsed_manifest| {
+            if (zts.module_manifest.parse(allocator, content)) |parsed_manifest| {
                 manifest_opt = parsed_manifest;
             } else |_| {}
         }
@@ -465,12 +465,12 @@ fn writeExtensionStatusText(
     }
 }
 
-fn writeLabelSetText(w: anytype, labels: zigts.module_binding.LabelSet) !void {
+fn writeLabelSetText(w: anytype, labels: zts.module_binding.LabelSet) !void {
     if (labels.isEmpty()) return;
     try w.writeAll("      return labels:");
     var first = true;
-    inline for (@typeInfo(zigts.module_binding.DataLabel).@"enum".fields) |field| {
-        const label: zigts.module_binding.DataLabel = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.module_binding.DataLabel).@"enum".fields) |field| {
+        const label: zts.module_binding.DataLabel = @enumFromInt(field.value);
         if (labels.has(label)) {
             try w.print("{s}{s}", .{ if (first) " " else ", ", field.name });
             first = false;
@@ -479,7 +479,7 @@ fn writeLabelSetText(w: anytype, labels: zigts.module_binding.LabelSet) !void {
     try w.writeByte('\n');
 }
 
-fn writeContractRuleText(w: anytype, rule: zigts.module_manifest.ContractExtractionRule) !void {
+fn writeContractRuleText(w: anytype, rule: zts.module_manifest.ContractExtractionRule) !void {
     try w.writeAll(@tagName(rule.category));
     if (rule.extension_category) |tag| try w.print("[{s}]", .{tag});
     try w.print(" arg={d}", .{rule.arg_position});
@@ -496,36 +496,36 @@ fn writeExtensionStatusJson(
     for (entries, 0..) |entry, idx| {
         if (idx > 0) try w.writeByte(',');
         try w.writeAll("{\"path\":");
-        try zigts.handler_contract.writeJsonString(w, entry.path);
+        try zts.handler_contract.writeJsonString(w, entry.path);
         try w.print(",\"valid\":{s}", .{if (entry.invalid) "false" else "true"});
         if (entry.manifest) |manifest| {
             try w.writeAll(",\"specifier\":");
-            try zigts.handler_contract.writeJsonString(w, manifest.specifier);
+            try zts.handler_contract.writeJsonString(w, manifest.specifier);
             if (manifest.backend) |backend| {
                 try w.writeAll(",\"backend\":");
-                try zigts.handler_contract.writeJsonString(w, @tagName(backend));
+                try zts.handler_contract.writeJsonString(w, @tagName(backend));
             }
             if (manifest.state_model) |state| {
                 try w.writeAll(",\"stateModel\":");
-                try zigts.handler_contract.writeJsonString(w, @tagName(state));
+                try zts.handler_contract.writeJsonString(w, @tagName(state));
             }
             try w.writeAll(",\"requiredCapabilities\":[");
             for (manifest.required_capabilities.items, 0..) |decl, i| {
                 if (i > 0) try w.writeByte(',');
                 if (decl.partner_name) |name| {
                     try w.writeAll("{\"name\":");
-                    try zigts.handler_contract.writeJsonString(w, name);
+                    try zts.handler_contract.writeJsonString(w, name);
                     try w.writeAll(",\"inherits\":");
-                    try zigts.handler_contract.writeJsonString(w, @tagName(decl.effective));
+                    try zts.handler_contract.writeJsonString(w, @tagName(decl.effective));
                     try w.writeByte('}');
                 } else {
-                    try zigts.handler_contract.writeJsonString(w, @tagName(decl.effective));
+                    try zts.handler_contract.writeJsonString(w, @tagName(decl.effective));
                 }
             }
             try w.writeAll("]");
             if (manifest.contract_section) |section| {
                 try w.writeAll(",\"contractSection\":");
-                try zigts.handler_contract.writeJsonString(w, section);
+                try zts.handler_contract.writeJsonString(w, section);
             }
             try w.writeAll(",\"exports\":[");
             for (manifest.exports.items, 0..) |exp, i| {
@@ -544,23 +544,23 @@ fn writeExtensionStatusJson(
     try w.writeAll("]}\n");
 }
 
-fn writeExportJson(w: anytype, exp: zigts.module_manifest.Export) !void {
+fn writeExportJson(w: anytype, exp: zts.module_manifest.Export) !void {
     try w.writeAll("{\"name\":");
-    try zigts.handler_contract.writeJsonString(w, exp.name);
+    try zts.handler_contract.writeJsonString(w, exp.name);
     try w.writeAll(",\"effect\":");
-    try zigts.handler_contract.writeJsonString(w, @tagName(exp.effect));
+    try zts.handler_contract.writeJsonString(w, @tagName(exp.effect));
     try w.writeAll(",\"returns\":");
-    try zigts.handler_contract.writeJsonString(w, @tagName(exp.returns));
+    try zts.handler_contract.writeJsonString(w, @tagName(exp.returns));
     try w.writeAll(",\"failureSeverity\":");
-    try zigts.handler_contract.writeJsonString(w, @tagName(exp.failure_severity));
+    try zts.handler_contract.writeJsonString(w, @tagName(exp.failure_severity));
     try w.print(",\"traceable\":{s}", .{if (exp.traceable) "true" else "false"});
     try w.writeAll(",\"returnLabels\":[");
     var first = true;
-    inline for (@typeInfo(zigts.module_binding.DataLabel).@"enum".fields) |field| {
-        const label: zigts.module_binding.DataLabel = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.module_binding.DataLabel).@"enum".fields) |field| {
+        const label: zts.module_binding.DataLabel = @enumFromInt(field.value);
         if (exp.return_labels.has(label)) {
             if (!first) try w.writeByte(',');
-            try zigts.handler_contract.writeJsonString(w, field.name);
+            try zts.handler_contract.writeJsonString(w, field.name);
             first = false;
         }
     }
@@ -574,11 +574,11 @@ fn writeExportJson(w: anytype, exp: zigts.module_manifest.Export) !void {
         });
         if (rule.transform) |t| {
             try w.writeAll(",\"transform\":");
-            try zigts.handler_contract.writeJsonString(w, @tagName(t));
+            try zts.handler_contract.writeJsonString(w, @tagName(t));
         }
         if (rule.extension_category) |tag| {
             try w.writeAll(",\"extensionCategory\":");
-            try zigts.handler_contract.writeJsonString(w, tag);
+            try zts.handler_contract.writeJsonString(w, tag);
         }
         try w.writeByte('}');
     }
@@ -587,14 +587,14 @@ fn writeExportJson(w: anytype, exp: zigts.module_manifest.Export) !void {
 
 fn printExtensionStatusHelp() void {
     const help =
-        \\zigts extension-status - report registered partner module manifests
+        \\zts extension-status - report registered partner module manifests
         \\
         \\Usage:
-        \\  zigts extension-status --module-manifest <path> [--module-manifest <path>...] [--json]
-        \\  zigts extension-status <path> [<path>...] [--json]
+        \\  zts extension-status --module-manifest <path> [--module-manifest <path>...] [--json]
+        \\  zts extension-status <path> [<path>...] [--json]
         \\
         \\Loads each manifest, validates it via the same audit pass used by
-        \\`zigts verify-module-manifest`, and prints the parsed specifier,
+        \\`zts verify-module-manifest`, and prints the parsed specifier,
         \\backend, state model, capabilities, exports, effects, return kinds,
         \\failure severity, return labels, and contract extraction rules.
         \\Exit code 1 if any manifest fails validation.
@@ -640,9 +640,9 @@ fn parseVerifyModulesArgs(
 
 fn printMetaHelp() void {
     const help =
-        \\zigts meta - show policy metadata
+        \\zts meta - show policy metadata
         \\
-        \\Usage: zigts meta [--json]
+        \\Usage: zts meta [--json]
         \\
         \\Outputs compiler version, policy version, policy hash, rule count,
         \\and category breakdown.
@@ -653,9 +653,9 @@ fn printMetaHelp() void {
 
 fn printVerifyHelp() void {
     const help =
-        \\zigts verify-paths - verify handler files
+        \\zts verify-paths - verify handler files
         \\
-        \\Usage: zigts verify-paths <file>... [--json]
+        \\Usage: zts verify-paths <file>... [--json]
         \\
         \\Runs the full analysis pipeline on each file and reports violations.
         \\Exit code 1 if any errors found.
@@ -666,15 +666,15 @@ fn printVerifyHelp() void {
 
 fn printVerifyModulesHelp() void {
     const help =
-        \\zigts verify-modules - audit built-in virtual module files
+        \\zts verify-modules - audit built-in virtual module files
         \\
         \\Usage:
-        \\  zigts verify-modules <file>... [--strict] [--json]
-        \\  zigts verify-modules --builtins [--strict] [--json]
+        \\  zts verify-modules <file>... [--strict] [--json]
+        \\  zts verify-modules --builtins [--strict] [--json]
         \\
         \\`--builtins` audits the authoritative public built-in module/spec set.
         \\Positional paths audit individual built-in module/spec files.
-        \\Paths under packages/zigts/src/modules/ that are not public built-ins
+        \\Paths under packages/zts/src/modules/ that are not public built-ins
         \\are ignored so editor hooks stay advisory and low-noise.
         \\
         \\Checks for forbidden direct effect usage, helper/capability drift,
@@ -688,9 +688,9 @@ fn printVerifyModulesHelp() void {
 
 fn printVerifyModuleManifestHelp() void {
     const help =
-        \\zigts verify-module-manifest - validate a proof-carrying virtual module manifest
+        \\zts verify-module-manifest - validate a proof-carrying virtual module manifest
         \\
-        \\Usage: zigts verify-module-manifest <manifest.json> [--json]
+        \\Usage: zts verify-module-manifest <manifest.json> [--json]
         \\
         \\Validates schema version, specifier, backend/state model, capabilities,
         \\exports, effects, return kinds, labels, contract extraction rules, and laws.
@@ -703,13 +703,13 @@ fn printVerifyModuleManifestHelp() void {
 // ---------------------------------------------------------------------------
 // v1 contract tripwire
 //
-// `docs/zigts-expert-contract.md` freezes `zigts meta` output as v1.
+// `docs/zts-expert-contract.md` freezes `zts meta` output as v1.
 // These tests fail loudly if a drive-by edit changes a pinned value. Any real
 // change must also update the contract doc.
 // ---------------------------------------------------------------------------
 
 test "v1 contract: compiler_version pinned" {
-    try std.testing.expectEqualStrings(zigts.version.string, compiler_version);
+    try std.testing.expectEqualStrings(zts.version.string, compiler_version);
 }
 
 test "v1 contract: policy_version pinned" {
@@ -763,6 +763,6 @@ test "extension-status arg parser rejects unknown flags" {
 test "verify-modules arg parser rejects mixing builtins and positional paths" {
     try std.testing.expectError(
         error.InvalidArguments,
-        parseVerifyModulesArgs(std.testing.allocator, &.{ "--builtins", "packages/zigts/src/modules/env.zig" }),
+        parseVerifyModulesArgs(std.testing.allocator, &.{ "--builtins", "packages/zts/src/modules/env.zig" }),
     );
 }

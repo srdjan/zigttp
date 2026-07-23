@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:id",
+  "specifier": "zttp:id",
   "source": "packages/modules/src/platform/id.zig",
   "requiredCapabilities": [
     "clock",

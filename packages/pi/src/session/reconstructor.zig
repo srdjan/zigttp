@@ -16,7 +16,7 @@
 //! Empty file returns a fresh empty `Transcript`.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const transcript = @import("../transcript.zig");
 const events = @import("events.zig");
@@ -34,7 +34,7 @@ pub fn reconstructTranscript(
     events_path: []const u8,
     diag: ?*Diagnostic,
 ) !transcript.Transcript {
-    const raw = try zigts.file_io.readFile(allocator, events_path, 64 * 1024 * 1024);
+    const raw = try zts.file_io.readFile(allocator, events_path, 64 * 1024 * 1024);
     defer allocator.free(raw);
 
     var tr: transcript.Transcript = .{};
@@ -270,7 +270,7 @@ test "reconstructTranscript returns an empty Transcript for an empty file" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try zigts.file_io.writeFile(allocator, path, "");
+    try zts.file_io.writeFile(allocator, path, "");
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -302,12 +302,12 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     try events.appendEvent(allocator, path, .{ .model_text = "hello back" });
     try events.appendEvent(allocator, path, .{ .tool_use = .{
         .id = "toolu_1",
-        .name = "zigts_expert_meta",
+        .name = "zts_expert_meta",
         .args_json = "{\"verbose\":true}",
     } });
     try events.appendEvent(allocator, path, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } });
@@ -330,7 +330,7 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
         .assistant_tool_use => |calls| {
             try testing.expectEqual(@as(usize, 1), calls.len);
             try testing.expectEqualStrings("toolu_1", calls[0].id);
-            try testing.expectEqualStrings("zigts_expert_meta", calls[0].name);
+            try testing.expectEqualStrings("zts_expert_meta", calls[0].name);
             try testing.expectEqualStrings("{\"verbose\":true}", calls[0].args_json);
         },
         else => return error.TestFailed,
@@ -338,7 +338,7 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     switch (tr.at(3).*) {
         .tool_result => |r| {
             try testing.expectEqualStrings("toolu_1", r.tool_use_id);
-            try testing.expectEqualStrings("zigts_expert_meta", r.tool_name);
+            try testing.expectEqualStrings("zts_expert_meta", r.tool_name);
             try testing.expect(r.ok);
             try testing.expectEqualStrings("{\"ok\":true}", r.llm_text);
         },
@@ -467,7 +467,7 @@ test "reconstructTranscript rejects schema versions newer than this binary" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try zigts.file_io.writeFile(allocator, path, "{\"v\":9999,\"k\":\"user_text\",\"d\":\"x\"}\n");
+    try zts.file_io.writeFile(allocator, path, "{\"v\":9999,\"k\":\"user_text\",\"d\":\"x\"}\n");
 
     var diag: Diagnostic = .{};
     const result = reconstructTranscript(allocator, path, &diag);
@@ -482,7 +482,7 @@ test "reconstructTranscript reports line 1 on a truncated first line" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try zigts.file_io.writeFile(allocator, path, "{\"v\":1,\"k\":\"user_text\",\"d\"\n");
+    try zts.file_io.writeFile(allocator, path, "{\"v\":1,\"k\":\"user_text\",\"d\"\n");
 
     var diag: Diagnostic = .{};
     const result = reconstructTranscript(allocator, path, &diag);
@@ -501,7 +501,7 @@ test "reconstructTranscript reports the line number of the first corrupt record"
     try events.appendEvent(allocator, path, .{ .user_text = "one" });
     try events.appendEvent(allocator, path, .{ .user_text = "two" });
     // Append a hand-rolled garbage line so line 3 fails parsing.
-    const fd = try zigts.file_io.openAppend(allocator, path);
+    const fd = try zts.file_io.openAppend(allocator, path);
     defer std.Io.Threaded.closeFd(fd);
     const junk = "not json at all\n";
     _ = std.c.write(fd, junk.ptr, junk.len);

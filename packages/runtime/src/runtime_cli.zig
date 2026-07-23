@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    // Backward-compatible default: treat bare `zigttp <handler>` usage as `serve`.
+    // Backward-compatible default: treat bare `zttp <handler>` usage as `serve`.
     try serveCommandWithEnviron(allocator, user_args, init.environ);
 }
 
@@ -122,20 +122,20 @@ pub fn workflowQueueCommand(allocator: std.mem.Allocator, argv: []const []const 
     };
 }
 
-/// Dispatches `zigttp durable <sub-verb> ...`. Only `dead-runs` exists today;
+/// Dispatches `zttp durable <sub-verb> ...`. Only `dead-runs` exists today;
 /// structured as its own top-level command (rather than folding straight
 /// into `dead-runs` verbs) so other durable-run operator surfaces have a
 /// natural home under `durable` later without a breaking rename.
 pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
         const usage =
-            \\zigttp durable - durable-run operator commands
+            \\zttp durable - durable-run operator commands
             \\
             \\Usage:
-            \\  zigttp durable dead-runs list --durable <DIR>
-            \\  zigttp durable dead-runs show --durable <DIR> <ID>
-            \\  zigttp durable dead-runs replay --durable <DIR> <ID>
-            \\  zigttp durable dead-runs discard --durable <DIR> <ID>
+            \\  zttp durable dead-runs list --durable <DIR>
+            \\  zttp durable dead-runs show --durable <DIR> <ID>
+            \\  zttp durable dead-runs replay --durable <DIR> <ID>
+            \\  zttp durable dead-runs discard --durable <DIR> <ID>
             \\
         ;
         _ = std.c.write(std.c.STDOUT_FILENO, usage.ptr, usage.len);
@@ -148,7 +148,7 @@ pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         };
         return;
     }
-    std.debug.print("zigttp durable: unknown subcommand '{s}'. Run `zigttp durable --help` for usage.\n", .{argv[0]});
+    std.debug.print("zttp durable: unknown subcommand '{s}'. Run `zttp durable --help` for usage.\n", .{argv[0]});
     std.process.exit(1);
 }
 
@@ -161,11 +161,11 @@ pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             // that edge is unavailable; let that win over an arg-parse error.
             error.UnknownOption, error.MissingEdgeConfig => {
                 if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
-                std.log.err("zigttp edge: invalid arguments", .{});
+                std.log.err("zttp edge: invalid arguments", .{});
                 std.process.exit(1);
             },
             else => {
-                std.log.err("zigttp edge: {}", .{err});
+                std.log.err("zttp edge: {}", .{err});
                 std.process.exit(1);
             },
         }
@@ -174,7 +174,7 @@ pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
 
     var config = edge_server.loadConfig(allocator, config_path) catch |err| {
-        std.log.err("zigttp edge: failed to load config '{s}': {}", .{ config_path, err });
+        std.log.err("zttp edge: failed to load config '{s}': {}", .{ config_path, err });
         std.process.exit(1);
     };
     var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {
@@ -213,7 +213,7 @@ fn parseEdgeConfigPath(argv: []const []const u8) ![]const u8 {
         }
         return error.UnknownOption;
     }
-    return path orelse "zigttp.edge.json";
+    return path orelse "zttp.edge.json";
 }
 
 fn attestCommand(allocator: std.mem.Allocator) !void {
@@ -298,7 +298,7 @@ pub fn serveCommandWithEnviron(
     argv: []const []const u8,
     environ: std.process.Environ,
 ) !void {
-    return serveCommandWithDebugPanicPath(allocator, argv, environ.getPosix("ZIGTTP_DEBUG_PANIC_PATH"));
+    return serveCommandWithDebugPanicPath(allocator, argv, environ.getPosix("ZTTP_DEBUG_PANIC_PATH"));
 }
 
 fn applyDebugPanicPathDefault(config: *ServerConfig, debug_panic_path: ?[]const u8) void {
@@ -317,7 +317,7 @@ fn serveCommandWithDebugPanicPath(
     const feature_flags = parseServeFeatureFlags(argv);
     if (feature_flags.studio_enabled) {
         if (!feature_options.enable_studio) {
-            // `zigttp dev/serve --studio` is dispatched through the developer
+            // `zttp dev/serve --studio` is dispatched through the developer
             // CLI, so pointing at "the developer CLI" misdirects. The actionable
             // fix is to rebuild with -Dstudio, matching the dedicated `studio`
             // command's wording.
@@ -325,7 +325,7 @@ fn serveCommandWithDebugPanicPath(
         }
     }
     if (feature_flags.watch_enabled and !feature_options.enable_live_reload) {
-        std.log.err("--watch is not available in zigttp-runtime; use the zigttp developer CLI", .{});
+        std.log.err("--watch is not available in zttp-runtime; use the zttp developer CLI", .{});
         std.process.exit(1);
     }
 
@@ -465,7 +465,7 @@ fn warnDangerousServeFlags(force_swap: bool, skip_env_check: bool) void {
 fn formatAddressInUse(buf: []u8, port: u16) ![]const u8 {
     return std.fmt.bufPrint(
         buf,
-        "Port {d} is already in use. Pass a different port: zigttp dev -p <PORT>\n",
+        "Port {d} is already in use. Pass a different port: zttp dev -p <PORT>\n",
         .{port},
     );
 }
@@ -679,7 +679,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
     }
 
     if (!handler_set) {
-        std.log.err("No handler specified. Use `zigttp init`, `zigttp serve <file>`, or build with -Dhandler=<path>.", .{});
+        std.log.err("No handler specified. Use `zttp init`, `zttp serve <file>`, or build with -Dhandler=<path>.", .{});
         return error.NoHandler;
     }
 
@@ -710,7 +710,7 @@ fn parseLifecycle(str: []const u8) ?contract_runtime.PoolingPolicy {
 /// AOT-embedded path. Without this wiring a deployed handler fell back to the
 /// allow-all stub policy and ran effectively unsandboxed.
 fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
-    // Matches the curl hint printed by `zigttp deploy`; -p PORT still overrides.
+    // Matches the curl hint printed by `zttp deploy`; -p PORT still overrides.
     return .{
         .handler = .{ .appended_payload = .{
             .bytecode = payload.bytecode,
@@ -791,7 +791,7 @@ fn printAppendedHelp() void {
         \\  --system <FILE>       Handler bundle for service and workflow
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
-        \\  --actor-queue         Enable in-memory zigttp:queue actor mailboxes
+        \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -799,18 +799,18 @@ fn printAppendedHelp() void {
 
 fn printHelp() void {
     const help =
-        \\zigttp - serverless runtime
+        \\zttp - serverless runtime
         \\
         \\Usage:
-        \\  zigttp serve [options] [handler.ts]    Run handler
-        \\  zigttp edge [--config FILE]            Run in-process edge runtime
-        \\  zigttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
-        \\  zigttp attest                           Inspect embedded proof artifact
-        \\  zigttp version                          Show version
-        \\  zigttp help                             Show this help
+        \\  zttp serve [options] [handler.ts]    Run handler
+        \\  zttp edge [--config FILE]            Run in-process edge runtime
+        \\  zttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
+        \\  zttp attest                           Inspect embedded proof artifact
+        \\  zttp version                          Show version
+        \\  zttp help                             Show this help
         \\
-        \\For compile, prove, and expert commands, use `zigts`.
-        \\For init, dev, and deploy commands, use `zigttp`.
+        \\For compile, prove, and expert commands, use `zts`.
+        \\For init, dev, and deploy commands, use `zttp`.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -818,12 +818,12 @@ fn printHelp() void {
 
 fn printEdgeHelp() void {
     const help =
-        \\zigttp edge [options]
+        \\zttp edge [options]
         \\
         \\Requires a binary built with: zig build -Dedge
         \\
         \\Options:
-        \\  -c, --config <FILE>  Edge config JSON (default: zigttp.edge.json)
+        \\  -c, --config <FILE>  Edge config JSON (default: zttp.edge.json)
         \\
         \\Config shape:
         \\  {
@@ -838,8 +838,8 @@ fn printEdgeHelp() void {
 
 fn printServeHelp() void {
     const help =
-        \\zigttp serve [options] <handler.js>
-        \\zigttp serve -e "function handler(req) { return Response.json({ok:true}) }"
+        \\zttp serve [options] <handler.js>
+        \\zttp serve -e "function handler(req) { return Response.json({ok:true}) }"
         \\
         \\Options:
         \\  -p, --port <PORT>     Port to listen on
@@ -855,15 +855,15 @@ fn printServeHelp() void {
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
         \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
         \\  --outbound-max-response <SIZE>
-        \\  --sqlite <FILE>       SQLite database path for zigttp:sql
+        \\  --sqlite <FILE>       SQLite database path for zttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
         \\  --incident-log <FILE> Append runtime soundness incidents as JSONL
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
-        \\  --system <FILE>       Handler bundle for zigttp:service/workflow
+        \\  --system <FILE>       Handler bundle for zttp:service/workflow
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
-        \\  --actor-queue         Enable in-memory zigttp:queue actor mailboxes
+        \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
         \\  --no-env-check        Skip startup env var validation
         \\  --security-log <FILE> Append security events to a JSONL file
         \\  --lifecycle <MODE>    Runtime lifecycle mode
@@ -1039,7 +1039,7 @@ test "formatAddressInUse names the port and the remedy" {
     // the bare error.AddressInUse that read like a crash after the proof card.
     try std.testing.expect(std.mem.indexOf(u8, line, "3000") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "already in use") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "zigttp dev -p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "zttp dev -p") != null);
 }
 
 test "replay exit codes distinguish verification failures from invalid fixtures" {

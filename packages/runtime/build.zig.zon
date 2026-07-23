@@ -1,19 +1,19 @@
 .{
-    .name = .zigttp_runtime,
+    .name = .zttp_runtime,
     .version = "0.18.0",
-    .fingerprint = 0xb979b001f3d33260,
+    .fingerprint = 0x309e5ad3f606ff57,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .zigts = .{
-            .path = "../zigts",
+        .zts = .{
+            .path = "../zts",
         },
-        .zigttp_tools = .{
+        .zttp_tools = .{
             .path = "../tools",
         },
-        .zigttp_pi = .{
+        .zttp_pi = .{
             .path = "../pi",
         },
-        .zigttp_proof_review = .{
+        .zttp_proof_review = .{
             .path = "../proof-review",
         },
     },

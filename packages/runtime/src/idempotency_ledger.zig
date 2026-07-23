@@ -4,7 +4,7 @@
 //! re-execute a workflow or duplicate its side effects.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const trace = zq.trace;
 const durable_store = @import("durable_store.zig");
 

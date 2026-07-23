@@ -1,6 +1,6 @@
-//! Project-scoped, cross-session fact store for the zigts expert agent.
+//! Project-scoped, cross-session fact store for the zts expert agent.
 //!
-//! Storage: `<project_root>/.zigttp/memory.jsonl`. One JSONL line per
+//! Storage: `<project_root>/.zttp/memory.jsonl`. One JSONL line per
 //! `pi_remember_fact` call. Appends use POSIX `O_APPEND` so two writers
 //! whose lines fit in the kernel's PIPE_BUF window (4 KiB on Linux/macOS)
 //! cannot tear; longer lines remain safe under a single writer. Mirrors
@@ -21,14 +21,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
-const json_utils = zigts.json_utils;
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const json_utils = zts.json_utils;
+const file_io = zts.file_io;
 
 /// Per-project state directory beneath `project_root`. Kept relative so the
 /// caller's chosen root drives the location; never a global path.
-pub const state_dir_subpath = ".zigttp";
-pub const file_subpath = ".zigttp/memory.jsonl";
+pub const state_dir_subpath = ".zttp";
+pub const file_subpath = ".zttp/memory.jsonl";
 
 /// Cap on how much of `memory.jsonl` we are willing to load into memory.
 /// Mirrors `proof_ledger.zig`. Beyond this the file is malformed for our
@@ -93,7 +93,7 @@ pub const AppendEntry = struct {
     pinned: bool = false,
 };
 
-/// Append a single entry to `<project_root>/.zigttp/memory.jsonl`, creating
+/// Append a single entry to `<project_root>/.zttp/memory.jsonl`, creating
 /// the directory and file if missing. POSIX `O_APPEND` semantics.
 pub fn append(
     allocator: std.mem.Allocator,

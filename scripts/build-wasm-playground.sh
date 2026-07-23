@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the zigts analyzer as a wasm module and publish it to the official
+# Build the zts analyzer as a wasm module and publish it to the official
 # website repo's static dir under a content-hashed, immutable filename. The
 # hash is patched into playground.js so the page always fetches the current
 # build.
@@ -19,14 +19,14 @@ fi
 echo "Building wasm analyzer (ReleaseSmall)..."
 zig build wasm -Doptimize=ReleaseSmall
 
-src="$repo_root/zig-out/wasm/zigts-analyzer.wasm"
+src="$repo_root/zig-out/wasm/zts-analyzer.wasm"
 [ -f "$src" ] || { echo "error: $src not produced" >&2; exit 1; }
 
 hash="$(shasum -a 256 "$src" | cut -c1-12)"
-dest_name="zigts-analyzer.${hash}.wasm"
+dest_name="zts-analyzer.${hash}.wasm"
 
 # Drop any previous builds so the static dir holds exactly one artifact.
-rm -f "$website_static"/zigts-analyzer.*.wasm
+rm -f "$website_static"/zts-analyzer.*.wasm
 cp "$src" "$website_static/$dest_name"
 
 # Patch the WASM_URL constant in playground.js to the new filename. Skip the

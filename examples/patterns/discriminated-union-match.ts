@@ -7,7 +7,7 @@
 // proves the match exhaustive (the reliable form for a parameter discriminant).
 // No `assertNever(x: never)` helper is needed to get that guarantee.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Command = { kind: "echo", text: string } | { kind: "ping", text: string };
 

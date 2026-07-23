@@ -3,14 +3,14 @@
 ## Project Structure & Module Organization
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
 - `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
-- `packages/zigts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
-- `packages/modules/` is the peer package implementing most virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/`.
-- `packages/zigts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
+- `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
+- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/`.
+- `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
 - `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
-- `packages/zigts/src/jit/` contains the tiered JIT compiler (baseline and optimized tiers) for x86-64 and ARM64.
-- `packages/zigts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
-- `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zigts_cli.zig` for the compiler CLI).
-- `packages/zigttp-sdk/` contains the extension SDK.
+- `packages/zts/src/jit/` contains the tiered JIT compiler (baseline and optimized tiers) for x86-64 and ARM64.
+- `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
+- `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zts_cli.zig` for the compiler CLI).
+- `packages/zttp-sdk/` contains the extension SDK.
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `websocket/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
@@ -38,7 +38,7 @@
 - `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` - run with inline handler.
 - `zig build run -- examples/handler/handler.ts -p 3000` - run a file-based handler.
 - `zig build test` - all tests.
-- `zig build test-zigts` - JS engine tests only.
+- `zig build test-zts` - JS engine tests only.
 - `zig build test-zruntime` - runtime tests only.
 - `zig build bench` - Zig-native benchmark suite.
 
@@ -52,7 +52,7 @@
 ## Testing Guidelines
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
-- Add tests near the feature you touched in `packages/runtime/` or `packages/zigts/` and run the relevant `zig build test*` step.
+- Add tests near the feature you touched in `packages/runtime/` or `packages/zts/` and run the relevant `zig build test*` step.
 
 ## Commit & Pull Request Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.

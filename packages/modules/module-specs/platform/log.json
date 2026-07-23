@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:log",
+  "specifier": "zttp:log",
   "source": "packages/modules/src/platform/log.zig",
   "requiredCapabilities": [
     "clock",

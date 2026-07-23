@@ -163,7 +163,7 @@
   <body>
     <div class="wrap">
       <header class="hero">
-        <div class="eyebrow"><span class="dot"></span> Hypermedia &middot; HAL &middot; zigttp resource()</div>
+        <div class="eyebrow"><span class="dot"></span> Hypermedia &middot; HAL &middot; zttp resource()</div>
         <h1>HATEOAS + HAL workflows</h1>
         <p class="lede">
           The server doesn't just return data. It returns the data <em>plus the
@@ -208,7 +208,7 @@
       <div class="card">
         <div class="key-row"><span class="tag links badge">_links</span> <span>Navigation. A map keyed by <em>relation</em> (rel). Every resource has a <code class="inline">self</code> link; others point to related resources you can <code class="inline">GET</code>.</span></div>
         <div class="key-row"><span class="tag links badge">_embedded</span> <span>Nested resources shipped inline to save round-trips (e.g. an order's line items), each itself a HAL document.</span></div>
-        <div class="key-row"><span class="tag tmpl badge">_templates</span> <span>Write actions, from the HAL-FORMS extension: method, title, and input <code class="inline">properties</code>. This is what zigttp emits for non-GET affordances.</span></div>
+        <div class="key-row"><span class="tag tmpl badge">_templates</span> <span>Write actions, from the HAL-FORMS extension: method, title, and input <code class="inline">properties</code>. This is what zttp emits for non-GET affordances.</span></div>
       </div>
       <pre><span class="c">// A HAL representation of order #42 in the "pending" state</span>
 {
@@ -293,14 +293,14 @@
 }
 <span class="c">// now order.status === "paid", and pay is gone from _templates</span></pre>
 
-      <h3>In zigttp this is a first-class primitive</h3>
+      <h3>In zttp this is a first-class primitive</h3>
       <p>
-        zigttp's <code class="inline">follow(resource, rel, init?)</code> from
-        <code class="inline">zigttp:workflow</code> resolves an affordance by its
+        zttp's <code class="inline">follow(resource, rel, init?)</code> from
+        <code class="inline">zttp:workflow</code> resolves an affordance by its
         relation and dispatches to the proven route, so an orchestrator advances
         the workflow by naming relations, never paths:
       </p>
-      <pre><span class="kw">import</span> { follow } <span class="kw">from</span> <span class="s">"zigttp:workflow"</span>;
+      <pre><span class="kw">import</span> { follow } <span class="kw">from</span> <span class="s">"zttp:workflow"</span>;
 
 <span class="kw">function</span> handler(req) {
   <span class="kw">const</span> order = getOrder(<span class="n">42</span>);          <span class="c">// { status: "pending", ... }</span>
@@ -310,9 +310,9 @@
   <span class="kw">return</span> follow(paid, <span class="s">"ship"</span>);          <span class="c">// then the "ship" affordance it now exposes</span>
 }</pre>
 
-      <h2>5. zigttp's twist: one declaration, two renderings, proven</h2>
+      <h2>5. zttp's twist: one declaration, two renderings, proven</h2>
       <p>
-        The example above is the manual JSON. In zigttp you don't hand-write
+        The example above is the manual JSON. In zttp you don't hand-write
         <code class="inline">_links</code>/<code class="inline">_templates</code>.
         You declare the affordance set once with the
         <code class="inline">resource()</code> global, and the runtime renders it
@@ -350,7 +350,7 @@
         </div>
       </div>
       <p>
-        Two more things zigttp adds on top of plain HAL:
+        Two more things zttp adds on top of plain HAL:
       </p>
       <ul class="clean">
         <li><strong>One source of truth.</strong> The same affordance set drives HAL for machines and HTMX controls for humans, so the two can never drift apart.</li>
@@ -360,12 +360,12 @@
       <div class="callout">
         The shape to remember: <strong>data + the next legal moves, every
         time</strong>. HAL is how you write the moves down; HATEOAS is letting
-        them drive the workflow; zigttp's <code class="inline">resource()</code>
+        them drive the workflow; zttp's <code class="inline">resource()</code>
         lets you declare them once and have the compiler prove they connect.
       </div>
 
       <div class="footer">
-        Interactive demo and code are illustrative. zigttp API per
+        Interactive demo and code are illustrative. zttp API per
         <code class="inline">examples/hypermedia/order.ts</code> and the
         Hypermedia Resources / Workflow Orchestration sections of the user guide.
       </div>
@@ -412,7 +412,7 @@
         return m !== "GET" && m !== "HEAD";
       }
 
-      // Derive the HAL document the same way zigttp's resource() does:
+      // Derive the HAL document the same way zttp's resource() does:
       // GET/no-method -> _links ; write methods -> _templates.
       function toHal(stateName) {
         var affs = STATES[stateName];
@@ -464,7 +464,7 @@
 
         chip.textContent = state;
 
-        // data block (the scalar fields, like zigttp's <dl>)
+        // data block (the scalar fields, like zttp's <dl>)
         dataEl.innerHTML =
           '<dt>order</dt><dd>#' + ORDER.id + "</dd>" +
           "<dt>total</dt><dd>" + money(ORDER.total, ORDER.currency) + "</dd>" +

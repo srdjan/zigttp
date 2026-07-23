@@ -3,7 +3,7 @@
 //! Threadlocal-aware natives stay in zruntime.zig.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const ascii = std.ascii;
 
 const http_types = @import("http_types.zig");

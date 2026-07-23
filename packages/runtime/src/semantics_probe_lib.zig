@@ -1,30 +1,30 @@
-//! Semantics-receipt probe: the runtime-backed signer for `zigttp spec-check`.
+//! Semantics-receipt probe: the runtime-backed signer for `zttp spec-check`.
 //!
-//! The keyless `zigts spec-check` proves the registry and prints its hash but
+//! The keyless `zts spec-check` proves the registry and prints its hash but
 //! cannot sign: signing needs the persistent attest identity, which lives in the
 //! runtime layer. The developer CLI registers `recordSemanticsReceipt` via a
 //! function pointer before dispatching analyzer commands (see `dev_cli.zig`),
 //! mirroring the perf / equivalence / workflow probe injections. The standalone
-//! `zigts` binary leaves the probe null and emits no receipt.
+//! `zts` binary leaves the probe null and emits no receipt.
 //!
-//! On a clean `zigttp spec-check` (all five mechanisms pass) this signs the
+//! On a clean `zttp spec-check` (all five mechanisms pass) this signs the
 //! conformance receipt - the semantics/IR/opcode hashes plus the proof and
 //! differential counts - with the persistent keypair and writes a compact
-//! `kind=semantics` JWS to `.zigttp/semantics-receipt.jws`. It self-verifies
+//! `kind=semantics` JWS to `.zttp/semantics-receipt.jws`. It self-verifies
 //! before persisting, so a receipt that cannot be checked is never written.
 //! Best-effort: a missing `$HOME` or unwritable cwd must never abort spec-check.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const identity = @import("attest/identity.zig");
 
 const semantics_check = zq.semantics_check;
 const mkdirIfAbsent = @import("capsule.zig").mkdirIfAbsent;
 const Ed25519 = std.crypto.sign.Ed25519;
 
-const receipt_dir = ".zigttp";
-const receipt_path = ".zigttp/semantics-receipt.jws";
+const receipt_dir = ".zttp";
+const receipt_path = ".zttp/semantics-receipt.jws";
 
 pub const ReceiptOutput = struct {
     dir: []const u8,

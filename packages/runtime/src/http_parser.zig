@@ -420,7 +420,7 @@ pub fn parseContentLength(header_section: []const u8) !?usize {
     return found;
 }
 
-/// Parse request Transfer-Encoding. zigttp supports only a single `chunked`
+/// Parse request Transfer-Encoding. zttp supports only a single `chunked`
 /// coding; every other coding or ambiguous list is rejected so request framing
 /// cannot diverge between frontend and backend parsers.
 pub fn parseTransferEncoding(header_section: []const u8) !TransferEncoding {

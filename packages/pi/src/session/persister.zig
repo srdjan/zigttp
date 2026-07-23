@@ -122,7 +122,7 @@ pub fn appendEntry(
 // ===========================================================================
 
 const testing = std.testing;
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
@@ -131,7 +131,7 @@ fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
 }
 
 fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return try zigts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
+    return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
 }
 
 fn splitLines(allocator: std.mem.Allocator, raw: []const u8) !std.ArrayList([]const u8) {
@@ -198,7 +198,7 @@ test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use 
     defer allocator.free(path);
 
     var calls = [_]transcript.OwnedToolCall{
-        .{ .id = "toolu_a", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_a", .name = "zts_expert_meta", .args_json = "{}" },
         .{ .id = "toolu_b", .name = "workspace_read_file", .args_json = "{\"path\":\"x.ts\"}" },
     };
     const entry: transcript.OwnedEntry = .{ .assistant_tool_use = calls[0..] };
@@ -222,7 +222,7 @@ test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use 
     const d1 = p1.value.object.get("d").?.object;
     const d2 = p2.value.object.get("d").?.object;
     try testing.expectEqualStrings("toolu_a", d1.get("id").?.string);
-    try testing.expectEqualStrings("zigts_expert_meta", d1.get("name").?.string);
+    try testing.expectEqualStrings("zts_expert_meta", d1.get("name").?.string);
     try testing.expectEqualStrings("toolu_b", d2.get("id").?.string);
     try testing.expectEqualStrings("workspace_read_file", d2.get("name").?.string);
 }
@@ -237,7 +237,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
 
     const entry: transcript.OwnedEntry = .{ .tool_result = .{
         .tool_use_id = "toolu_1",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } };
@@ -315,7 +315,7 @@ test "appendEntry with no_persist_tool_output skips tool_result entries" {
     try appendEntry(allocator, path, &entry, .{ .no_persist_tool_output = true });
 
     // File must not have been created by the skipped write.
-    try testing.expect(!zigts.file_io.fileExists(allocator, path));
+    try testing.expect(!zts.file_io.fileExists(allocator, path));
 }
 
 test "appendEntry with no_persist_tool_output still persists user_text" {

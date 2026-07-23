@@ -1,4 +1,4 @@
-import { env } from "zigttp:env";
+import { env } from "zttp:env";
 
 export const load = (id: string): Response => Response.text(id);
 

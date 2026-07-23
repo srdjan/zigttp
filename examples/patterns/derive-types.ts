@@ -1,10 +1,10 @@
 // Derive related shapes from one source type with the utility-type family:
-// Pick, Omit, Partial, Required. zigts resolves these structurally - a named
+// Pick, Omit, Partial, Required. zts resolves these structurally - a named
 // source type is looked up and transformed - so each field stays declared in
 // exactly one place instead of being copied into hand-written aliases that can
 // drift.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "deterministic"

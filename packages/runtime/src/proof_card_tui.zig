@@ -16,7 +16,7 @@
 //!     +----------------------------+-------------------+----------------+
 
 const std = @import("std");
-const review = @import("zigttp_proof_review").review;
+const review = @import("zttp_proof_review").review;
 const audit_ring = @import("proof_audit_ring.zig");
 
 /// Which view the left pane of the proof card renders. Only the left
@@ -51,10 +51,10 @@ pub const Lens = enum {
 /// Per-build attestation snapshot the `.caller_view` lens renders.
 /// Caller-owned strings; the render does not free them. Slice 2 item D.
 pub const CallerView = struct {
-    /// Value of the `Zigttp-Proofs` header, or empty/null when no chip is
+    /// Value of the `Zttp-Proofs` header, or empty/null when no chip is
     /// proven (the runtime omits the header line in that case).
     proofs_header_value: []const u8,
-    /// Value of the `Zigttp-Attest` header (compact JWS).
+    /// Value of the `Zttp-Attest` header (compact JWS).
     attest_header_value: []const u8,
     /// SHA-256 fingerprint of the public key, lowercase hex, 64 chars.
     key_fingerprint_hex: []const u8,
@@ -105,7 +105,7 @@ pub const StudioFooterOptions = struct {
     host: []const u8,
     port: u16,
     /// When true, render the footer with an extra emphasis attribute so the
-    /// first render after `zigttp dev` boot stands out, then settles into
+    /// first render after `zttp dev` boot stands out, then settles into
     /// neutral on subsequent renders.
     first_time: bool = false,
     /// When true, emit OSC 8 hyperlink escape sequences. Callers pass the
@@ -125,7 +125,7 @@ pub fn writeStudioFooter(
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(
         &url_buf,
-        "http://{s}:{d}/_zigttp/studio",
+        "http://{s}:{d}/_zttp/studio",
         .{ opts.host, opts.port },
     );
 
@@ -608,7 +608,7 @@ fn buildHandoverPane(
         "AI handover",
         "",
         "Substrate",
-        "  zigttp - deterministic",
+        "  zttp - deterministic",
         "  TypeScript subset.",
         "  no exceptions, no shared",
         "  mutable state, no",
@@ -671,7 +671,7 @@ pub fn buildProofCertificate(
 
     try w.writeAll("AI handover\n\n");
     try w.writeAll("Substrate\n");
-    try w.writeAll("  zigttp - deterministic TypeScript subset.\n");
+    try w.writeAll("  zttp - deterministic TypeScript subset.\n");
     try w.writeAll("  no exceptions, no shared mutable state, no nondeterminism,\n");
     try w.writeAll("  no eval, no implicit coercion. compiler proves on every save.\n\n");
 
@@ -714,8 +714,8 @@ pub fn buildProofCertificate(
 
 /// Caller view: what an external HTTP consumer of this attested build sees.
 /// Slice 2 item D. Renders four blocks in the left pane: live response-header
-/// preview, the `/.well-known/zigttp-attest` URL, a copy-pasteable
-/// `zigttp verify` command, and the public-key fingerprint plus pinning hint.
+/// preview, the `/.well-known/zttp-attest` URL, a copy-pasteable
+/// `zttp verify` command, and the public-key fingerprint plus pinning hint.
 /// Long strings (the JWS, the proofs chip list, the fingerprint) are
 /// truncated for the narrow left pane; the full values live in the well-known
 /// doc and the response headers the caller actually consumes.
@@ -729,23 +729,23 @@ fn buildCallerViewPane(
     const view = caller_view orelse {
         try lines.append(allocator, try allocator.dupe(u8, "(not attested)"));
         try lines.append(allocator, try allocator.dupe(u8, ""));
-        try lines.append(allocator, try allocator.dupe(u8, "This build emits no Zigttp-Proofs"));
-        try lines.append(allocator, try allocator.dupe(u8, "or Zigttp-Attest headers. Rebuild"));
+        try lines.append(allocator, try allocator.dupe(u8, "This build emits no Zttp-Proofs"));
+        try lines.append(allocator, try allocator.dupe(u8, "or Zttp-Attest headers. Rebuild"));
         try lines.append(allocator, try allocator.dupe(u8, "without --no-attest to opt back in."));
         return lines;
     };
 
     try lines.append(allocator, try allocator.dupe(u8, "Response headers"));
     if (view.proofs_header_value.len > 0) {
-        try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zigttp-Proofs: ", view.proofs_header_value));
+        try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zttp-Proofs: ", view.proofs_header_value));
     }
-    try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zigttp-Attest: ", view.attest_header_value));
+    try lines.append(allocator, try truncatedHeaderLine(allocator, "  Zttp-Attest: ", view.attest_header_value));
     try lines.append(allocator, try allocator.dupe(u8, ""));
 
     try lines.append(allocator, try allocator.dupe(u8, "Well-known doc"));
     try lines.append(allocator, try std.fmt.allocPrint(
         allocator,
-        "  http://{s}:{d}/.well-known/zigttp-attest",
+        "  http://{s}:{d}/.well-known/zttp-attest",
         .{ view.host, view.port },
     ));
     try lines.append(allocator, try allocator.dupe(u8, ""));
@@ -753,7 +753,7 @@ fn buildCallerViewPane(
     try lines.append(allocator, try allocator.dupe(u8, "Verify from anywhere"));
     try lines.append(allocator, try std.fmt.allocPrint(
         allocator,
-        "  zigttp verify http://{s}:{d}/",
+        "  zttp verify http://{s}:{d}/",
         .{ view.host, view.port },
     ));
     try lines.append(allocator, try allocator.dupe(u8, ""));
@@ -765,7 +765,7 @@ fn buildCallerViewPane(
         "  {s}...",
         .{view.key_fingerprint_hex[0..fp_short_len]},
     ));
-    try lines.append(allocator, try allocator.dupe(u8, "  pin: zigttp verify <url>"));
+    try lines.append(allocator, try allocator.dupe(u8, "  pin: zttp verify <url>"));
     try lines.append(allocator, try allocator.dupe(u8, "       --trust-key <full-hex>"));
 
     return lines;
@@ -773,7 +773,7 @@ fn buildCallerViewPane(
 
 /// Format `<prefix><value>` truncated so the formatted line fits the widest
 /// left pane the frame produces. The frame caps `total_width` at 200, which
-/// gives a 58-char left pane; with the 17-char prefix `"  Zigttp-Attest: "`
+/// gives a 58-char left pane; with the 17-char prefix `"  Zttp-Attest: "`
 /// and the 3-char `...` suffix, 30 chars of value keeps the trailing dots
 /// visible at the right edge of the pane. The well-known doc and the actual
 /// response headers carry the full strings; this is the in-HUD preview.
@@ -1377,7 +1377,7 @@ test "writeStudioFooter: plain URL on non-TTY" {
     defer aw.deinit();
     try writeStudioFooter(&aw.writer, .{ .host = "127.0.0.1", .port = 3000, .tty = false });
     const out = aw.writer.buffered();
-    try std.testing.expectEqualStrings("  Studio mirror: http://127.0.0.1:3000/_zigttp/studio\n", out);
+    try std.testing.expectEqualStrings("  Studio mirror: http://127.0.0.1:3000/_zttp/studio\n", out);
 }
 
 test "writeStudioFooter: TTY emits OSC 8 hyperlink with URL as both target and visible text" {
@@ -1387,11 +1387,11 @@ test "writeStudioFooter: TTY emits OSC 8 hyperlink with URL as both target and v
     try writeStudioFooter(&aw.writer, .{ .host = "localhost", .port = 8787, .tty = true });
     const out = aw.writer.buffered();
     // Hyperlink open escape with target URL.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://localhost:8787/_zigttp/studio\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;http://localhost:8787/_zttp/studio\x1b\\") != null);
     // Hyperlink close.
     try std.testing.expect(std.mem.indexOf(u8, out, "\x1b]8;;\x1b\\") != null);
     // Same URL appears as the visible link text.
-    try std.testing.expect(std.mem.indexOf(u8, out, "http://localhost:8787/_zigttp/studio") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "http://localhost:8787/_zttp/studio") != null);
 }
 
 test "writeStudioFooter: first_time uses bold emphasis instead of dim" {
@@ -1416,7 +1416,7 @@ test "writeProofCardFrame: Counterexample block includes failing request and rep
         .column = 12,
         .snippet = ".length",
         .handler_path = "src/handler.ts",
-        .suggestion = "guard with `?.` or validate the input shape with zigttp:validate.",
+        .suggestion = "guard with `?.` or validate the input shape with zttp:validate.",
         .failing_request = .{ .method = "POST", .url = "/api/users", .body = "{\"name\":null}" },
         .previous_response = .{ .status = 201, .body = "{\"id\":\"u_abc\"}" },
         .current_response = .{ .status = 500, .body = "", .error_text = "cannot read length of undefined" },
@@ -1617,19 +1617,19 @@ test "caller_view lens with attestation context renders the four blocks" {
     audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    // Wider frame so the left pane fits the long Zigttp-Attest line and the
+    // Wider frame so the left pane fits the long Zttp-Attest line and the
     // well-known URL without `writePadded` clipping the substring assertions.
     try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 200, .lens = .caller_view, .caller_view = view });
     const out = aw.writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Caller view") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Response headers") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Proofs: pure, read_only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: eyJh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zttp-Proofs: pure, read_only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zttp-Attest: eyJh") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Well-known doc") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "http://127.0.0.1:3000/.well-known/zigttp-attest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "http://127.0.0.1:3000/.well-known/zttp-attest") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Verify from anywhere") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "zigttp verify http://127.0.0.1:3000/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "zttp verify http://127.0.0.1:3000/") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Key fingerprint") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "abcdef0123456789...") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "--trust-key") != null);
@@ -1668,6 +1668,6 @@ test "caller_view truncates long header values for the narrow left pane" {
     const out = aw.writer.buffered();
 
     // Truncated form ends in "..."; original full string must not appear.
-    try std.testing.expect(std.mem.indexOf(u8, out, "Zigttp-Attest: " ++ ("X" ** 30) ++ "...") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Zttp-Attest: " ++ ("X" ** 30) ++ "...") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "X" ** 40) == null);
 }

@@ -7,7 +7,7 @@
 
 # Security-sensitive surfaces
 /SECURITY.md                    @srdjan
-/packages/zigts/src/module_binding.zig  @srdjan
+/packages/zts/src/module_binding.zig  @srdjan
 /packages/runtime/src/deploy/   @srdjan
 /.github/workflows/             @srdjan
 /policy-hash.txt                @srdjan

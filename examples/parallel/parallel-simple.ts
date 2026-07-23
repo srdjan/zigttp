@@ -1,5 +1,5 @@
-import { parallel } from "zigttp:io";
-import { fetch } from "zigttp:fetch";
+import { parallel } from "zttp:io";
+import { fetch } from "zttp:fetch";
 
 function fetchUser(): unknown {
   return fetch("https://users.internal/api/v1/123", {});

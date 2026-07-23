@@ -1,16 +1,16 @@
-# TypeScript Patterns In The zigts Subset
+# TypeScript Patterns In The zts Subset
 
 The community list ["TypeScript Tips Everyone Should
 Know"](https://github.com/AllThingsSmitty/typescript-tips-everyone-should-know)
 is good advice for plain TypeScript. This document maps that canon onto the
-zigts subset and shows what changes when the advice meets a compiler that
+zts subset and shows what changes when the advice meets a compiler that
 enforces it.
 
 The lens is simple. The subset turns several tips from advice into compiler
 guarantees: `any` and `enum` are hard errors, `null` is gone (the single
 absent-value sentinel is `undefined`), and `match` does exhaustiveness checking
 natively. It adapts a few tips because the underlying construct works
-differently here: zigts rejects both `as` and `satisfies`, so a conformance
+differently here: zts rejects both `as` and `satisfies`, so a conformance
 check lives on the declaration instead. And it leaves one construct out by
 design: `typeof`-type extraction would derive a type from a value, the inverse
 of the contract-first direction the rest of this runtime depends on.
@@ -23,7 +23,7 @@ document assumes the type-system mechanics covered in
 
 ## Mapping Table
 
-| # | Canon tip | Verdict | zigts idiom |
+| # | Canon tip | Verdict | zts idiom |
 |---|-----------|---------|-------------|
 | 1 | Prefer `unknown` over `any` | Enforced | `any` is a hard error; `unknown` plus a type guard is the only path -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
 | 2 | Let type inference do the work | Direct fit | annotate boundaries, infer internals -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
@@ -34,7 +34,7 @@ document assumes the type-system mechanics covered in
 | 7 | `as const` for config and constants | Adapted | `const` bindings preserve literals automatically; no `as const` -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 8 | Type predicates for reusable narrowing | Direct fit | `x is T` guards; pairs with `assert` -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
 | 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Direct fit | `Pick`/`Omit`/`Partial`/`Required` derive shapes from a source type, joining `Readonly<T>` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
-| 10 | Validate external data at runtime | Direct fit (built-in) | `zigttp:validate` plus `zigttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
+| 10 | Validate external data at runtime | Direct fit (built-in) | `zttp:validate` plus `zttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
 | 11 | Avoid `enum` | Enforced | `enum` is a hard error; literal unions only -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 12 | Generics that infer automatically | Direct fit | generics plus inference (up to 8 params) -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
 | 13 | Strict compiler options | Adapted | no tsconfig; sound mode plus the canonical profile plus the analyzer are strict by construction ([sound-mode.md](sound-mode.md), [canonical-profile.md](canonical-profile.md)) |
@@ -43,7 +43,7 @@ document assumes the type-system mechanics covered in
 
 A note on the examples. Every tip with a code companion links to a handler under
 `examples/patterns/`, and all seven are on disk and compile: each passes
-`zigttp check --types`, and three (`validate-external`,
+`zttp check --types`, and three (`validate-external`,
 `discriminated-union-match`, and `derive-types`) also run as behavioral
 suites under `scripts/test-examples.sh`. A few snippets
 below are shortened excerpts of those files, or of the matching sections in
@@ -52,7 +52,7 @@ same constructs. Every snippet in this document compiles in the subset.
 
 ## Enforced
 
-These tips are not advice in zigts. The compiler rejects the alternative.
+These tips are not advice in zts. The compiler rejects the alternative.
 
 ### 1. Prefer `unknown` over `any`
 
@@ -81,7 +81,7 @@ See [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) and the
 
 Idiom: `enum` is a hard error; model the finite set as a string literal union.
 
-The canon lists "avoid enum" as a discipline. zigts makes it a parse error: a
+The canon lists "avoid enum" as a discipline. zts makes it a parse error: a
 finite set of values is a union of string literals joined with `|`, which the
 compiler can check for exhaustiveness in a `match`.
 
@@ -105,7 +105,7 @@ describes.
 Idiom: annotate the boundaries (parameters and return), let inference handle the
 internals.
 
-zigts requires explicit parameter and return annotations on named functions
+zts requires explicit parameter and return annotations on named functions
 (strict ZigTS), which is exactly the canon's "annotate the boundary" advice made
 mandatory. Inside the body, locals infer from their initializers, so redundant
 local annotations are unnecessary.
@@ -156,11 +156,11 @@ The same predicate drives tip 1. See the "Type Guards and Assert" section of
 ### 10. Validate external data at runtime
 
 Idiom: there is no Zod step. Compile a schema by name at the top level with
-`zigttp:validate`, then gate the handler on the `.ok` of the result before
+`zttp:validate`, then gate the handler on the `.ok` of the result before
 touching `.value`.
 
 ```typescript
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("todo", '{"type":"object","required":["title"]}');
 
@@ -176,12 +176,12 @@ function handler(req: Request): Response {
 The verifier enforces the `.ok`-before-`.value` discipline at build time:
 `validateJson` is a Result-producing call, so accessing `.value` on an
 unchecked result is a compile error (see [Verification](verification.md)). The
-built-in modules `zigttp:validate` and `zigttp:decode` cover the runtime
+built-in modules `zttp:validate` and `zttp:decode` cover the runtime
 validation the canon reaches for a library to do. Excerpted from the "JSON And
 Validation" section of [User Guide](user-guide.md); the companion example is
 [validate-external.ts](../examples/patterns/validate-external.ts).
 
-Testing note: `zigttp:validate` and `zigttp:decode` are pure (their result is a
+Testing note: `zttp:validate` and `zttp:decode` are pure (their result is a
 function of their arguments and the compiled schema), so a handler test under
 `serve --test` runs them for real without an `io` mock. The
 `validate-external.test.jsonl` suite posts a body and asserts the 201/400 path
@@ -194,7 +194,7 @@ Idiom: write one generic helper and reuse it across element types by naming the
 type argument at the call site.
 
 A helper such as `first<T>(xs: T[]): T | undefined` is reused as
-`first<string>(items)`, and the result type flows into the handler. zigts
+`first<string>(items)`, and the result type flows into the handler. zts
 supports generic function declarations and generic arrow functions, with up to 8
 type parameters per alias (see "Generic Type Aliases" in
 [TypeScript](typescript.md)). The companion example is
@@ -245,12 +245,12 @@ mechanism is absent or replaced.
 
 ### 3. Prefer `satisfies` over `as`
 
-Idiom: zigts rejects both `as` and `satisfies`, so the conformance check moves
+Idiom: zts rejects both `as` and `satisfies`, so the conformance check moves
 onto the declaration. An explicit annotation on a `const` binding is the
 assertion-free `satisfies`.
 
 The canon recommends `satisfies` because it checks conformance without widening
-the type. zigts removes the question by rejecting both assertion forms. The
+the type. zts removes the question by rejecting both assertion forms. The
 replacement is to annotate the binding directly: `const config: Config = {...}`
 checks the literal against `Config` and keeps its narrow type, which is what
 `satisfies` was for.
@@ -286,7 +286,7 @@ trick is unnecessary.
 
 In plain TypeScript the standard exhaustiveness guard is a `default` branch that
 assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
-which stops compiling when a new variant is added. zigts checks `match`
+which stops compiling when a new variant is added. zts checks `match`
 exhaustiveness directly, and the canonical profile requires every `match` to
 carry a `default` / `when _:` catch-all arm so the unexpected case is always
 handled. Full variant coverage satisfies the type-level exhaustiveness check but
@@ -316,7 +316,7 @@ Excerpted from
 
 ### 13. Strict compiler options
 
-This is a philosophy tip, so there is no snippet. zigts has no `tsconfig.json`
+This is a philosophy tip, so there is no snippet. zts has no `tsconfig.json`
 and no opt-in strictness dial. Strict ZigTS is the default profile: `any` is
 rejected, named functions must carry parameter and return annotations,
 capability access must use literal keys, and an avoidable `let` is an error.
@@ -330,8 +330,8 @@ option" reduces to "the strict options are the only options."
 
 The closing tip of the canon is the thesis of this whole runtime, so it gets
 prose rather than a snippet. A passing type check proves shape, not behavior at
-the boundary. zigts answers that on two fronts. At the boundary, runtime
-validation through `zigttp:validate` and `zigttp:decode` (tip 10) checks the
+the boundary. zts answers that on two fronts. At the boundary, runtime
+validation through `zttp:validate` and `zttp:decode` (tip 10) checks the
 data that types alone cannot. Above the type system, the
 restrictions-to-proofs story turns each language cut into a discharged property
 (exhaustive returns, state isolation, no secret leakage, and the rest), and

@@ -1,13 +1,13 @@
 # Feature Detection Matrix
 
-This document catalogs all unsupported JavaScript and TypeScript features detected by zigttp's fail-fast validation system, organized by detection layer.
+This document catalogs all unsupported JavaScript and TypeScript features detected by zttp's fail-fast validation system, organized by detection layer.
 
 ## Detection Architecture
 
-zigttp uses a two-layer validation system:
+zttp uses a two-layer validation system:
 
-1. **TypeScript Stripper** (`packages/zigts/src/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
-2. **Parser** (`packages/zigts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
+1. **TypeScript Stripper** (`packages/zts/src/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
+2. **Parser** (`packages/zts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
 
 **Principle**: Each feature should be detected at exactly one layer to avoid duplicate error reporting and ensure consistent error messages regardless of file type.
 
@@ -24,23 +24,23 @@ These features exist only in TypeScript type annotation positions that are strip
 ## Supported Module Syntax
 
 The parser supports ES6 `import`/`export` syntax for built-in virtual modules
-(`zigttp:*`) and registered extension modules (`zigttp-ext:*`). The
-`zigttp:types` specifier is type-only and stripped before runtime.
+(`zttp:*`) and registered extension modules (`zttp-ext:*`). The
+`zttp:types` specifier is type-only and stripped before runtime.
 
 ### Supported Import Forms
 
 | Syntax | Description |
 |--------|-------------|
-| `import { x } from "zigttp:env"` | Named import (single) |
-| `import { x, y, z } from "zigttp:crypto"` | Named import (multiple) |
-| `import { x as alias } from "zigttp:env"` | Named import with alias |
-| `import { parseBearer, jwtVerify } from "zigttp:auth"` | Auth module imports |
-| `import { schemaCompile, validateJson } from "zigttp:validate"` | Validation module imports |
-| `import { decodeJson, decodeForm } from "zigttp:decode"` | Typed ingress module imports |
-| `import { cacheGet, cacheSet } from "zigttp:cache"` | Cache module imports |
-| `import { run, step } from "zigttp:durable"` | Durable execution imports |
-| `import { charge } from "zigttp-ext:stripe"` | Registered extension imports |
-| `import type { Spec, Proof, Effects } from "zigttp:types"` | Type-only imports for the built-in `Spec<...>` obligation alias and the `Proof<...>` / `Effects<...>` capsule aliases (stripped at load time) |
+| `import { x } from "zttp:env"` | Named import (single) |
+| `import { x, y, z } from "zttp:crypto"` | Named import (multiple) |
+| `import { x as alias } from "zttp:env"` | Named import with alias |
+| `import { parseBearer, jwtVerify } from "zttp:auth"` | Auth module imports |
+| `import { schemaCompile, validateJson } from "zttp:validate"` | Validation module imports |
+| `import { decodeJson, decodeForm } from "zttp:decode"` | Typed ingress module imports |
+| `import { cacheGet, cacheSet } from "zttp:cache"` | Cache module imports |
+| `import { run, step } from "zttp:durable"` | Durable execution imports |
+| `import { charge } from "zttp-ext:stripe"` | Registered extension imports |
+| `import type { Spec, Proof, Effects } from "zttp:types"` | Type-only imports for the built-in `Spec<...>` obligation alias and the `Proof<...>` / `Effects<...>` capsule aliases (stripped at load time) |
 
 ### Supported Export Forms
 
@@ -65,7 +65,7 @@ These produce helpful error messages directing users to named imports/exports:
 
 ## Parser Features (54 total)
 
-These are JavaScript and TypeScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
+These are JavaScript and TypeScript language features that are syntactically valid but unsupported in zttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
 
 ### TypeScript Features (detected by parser)
 
@@ -206,7 +206,7 @@ Logical compound assignments require short-circuit semantics and are not support
 
 ## Canonical Profile (Strict Checker)
 
-A third layer of detection runs alongside the parser: the strict checker enforces the **canonical ZigTS profile** on every `zigttp check` and `zigttp verify-paths` run. These rules tighten the language further, removing redundant idioms that compete with an already-canonical form. The goal is one canonical spelling per operation.
+A third layer of detection runs alongside the parser: the strict checker enforces the **canonical ZigTS profile** on every `zttp check` and `zttp verify-paths` run. These rules tighten the language further, removing redundant idioms that compete with an already-canonical form. The goal is one canonical spelling per operation.
 
 | Code | Rule | Canonical replacement |
 |------|------|----------------------|
@@ -259,8 +259,8 @@ When adding detection for a new unsupported feature:
    - Preserve source location for accurate error reporting
 
 3. **Add Tests**:
-   - Stripper: Add test in `packages/zigts/src/stripper.zig` test section
-   - Parser: Add test in `packages/zigts/src/parser/parse.zig` test section
+   - Stripper: Add test in `packages/zts/src/stripper.zig` test section
+   - Parser: Add test in `packages/zts/src/parser/parse.zig` test section
    - Verify error message content, not just error type
 
 4. **Update This Document**:

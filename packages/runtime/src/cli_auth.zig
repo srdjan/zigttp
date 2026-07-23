@@ -1,8 +1,8 @@
-//! `zigttp auth` — store provider API keys so `zigttp expert` (and any
+//! `zttp auth` — store provider API keys so `zttp expert` (and any
 //! handler that declares the env var in its contract) can find them without
 //! the user exporting shell variables or sourcing a `.env`.
 //!
-//! Storage: `~/.zigttp/providers.json`, 0600. Sibling to `~/.zigttp/credentials`
+//! Storage: `~/.zttp/providers.json`, 0600. Sibling to `~/.zttp/credentials`
 //! used by the hosted-cloud deploy path; keeping the two files orthogonal
 //! avoids accidentally coupling provider auth to deferred-cloud-auth state.
 //!
@@ -16,8 +16,8 @@ const builtin = @import("builtin");
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-const rel_dir: []const u8 = ".zigttp";
-const rel_file: []const u8 = ".zigttp/providers.json";
+const rel_dir: []const u8 = ".zttp";
+const rel_file: []const u8 = ".zttp/providers.json";
 
 /// Providers we know how to store and inject. Add new entries here when a
 /// new provider lands in `packages/pi/src/providers/`.
@@ -64,7 +64,7 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
     if (std.mem.eql(u8, sub, "revoke")) {
         if (argv.len < 2) {
-            std.debug.print("zigttp auth revoke requires a provider label, e.g. `zigttp auth revoke claude`.\n", .{});
+            std.debug.print("zttp auth revoke requires a provider label, e.g. `zttp auth revoke claude`.\n", .{});
             return error.InvalidArgument;
         }
         const provider = providerByLabel(argv[1]) orelse {
@@ -82,22 +82,22 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
 pub fn printAuthHelp() void {
     const help =
-        \\zigttp auth - store provider API keys for expert and handlers
+        \\zttp auth - store provider API keys for expert and handlers
         \\
         \\Usage:
-        \\  zigttp auth claude              Prompt for an Anthropic API key and store it
-        \\  zigttp auth openai              Prompt for an OpenAI API key (experimental) and store it
-        \\  zigttp auth status              Show which providers are configured
-        \\  zigttp auth revoke <provider>   Remove a stored key (claude | openai)
+        \\  zttp auth claude              Prompt for an Anthropic API key and store it
+        \\  zttp auth openai              Prompt for an OpenAI API key (experimental) and store it
+        \\  zttp auth status              Show which providers are configured
+        \\  zttp auth revoke <provider>   Remove a stored key (claude | openai)
         \\
         \\Anthropic is the measured, supported expert backend. The OpenAI backend
         \\is experimental (gpt-4o-mini fallback) and not covered by the codegen
         \\quality ratchet.
         \\
-        \\Storage: ~/.zigttp/providers.json (mode 0600).
+        \\Storage: ~/.zttp/providers.json (mode 0600).
         \\
         \\The runtime injects stored keys into ANTHROPIC_API_KEY / OPENAI_API_KEY
-        \\at the start of `zigttp dev`, `zigttp serve`, and `zigttp expert`.
+        \\at the start of `zttp dev`, `zttp serve`, and `zttp expert`.
         \\Shell-set variables always win; the stored value only fills gaps.
         \\
     ;
@@ -112,7 +112,7 @@ fn authProviderSet(
     _ = argv;
     if (!stdinIsTty()) {
         std.debug.print(
-            "zigttp auth {s} needs an interactive terminal to prompt for the key.\n" ++
+            "zttp auth {s} needs an interactive terminal to prompt for the key.\n" ++
                 "Run it from a real shell, or set {s} directly in your environment.\n",
             .{ provider.label, provider.env_var },
         );
@@ -138,7 +138,7 @@ fn authProviderSet(
     if (!looksLikeApiKey(provider, key)) {
         std.debug.print(
             "That does not look like a {s} key (expected at least 20 characters{s}).\n" ++
-                "Nothing saved. Re-run `zigttp auth {s}` and try again.\n",
+                "Nothing saved. Re-run `zttp auth {s}` and try again.\n",
             .{
                 provider.label,
                 if (std.mem.eql(u8, provider.name, "anthropic"))
@@ -159,7 +159,7 @@ fn authProviderSet(
 
     std.debug.print(
         "Saved {s} key for {s}.\n" ++
-            "Run `zigttp expert` to start (the key is checked on the first request).\n",
+            "Run `zttp expert` to start (the key is checked on the first request).\n",
         .{ provider.label, provider.name },
     );
 }
@@ -190,12 +190,12 @@ fn authStatus(allocator: std.mem.Allocator) !void {
             );
         } else {
             std.debug.print(
-                "  {s:<8} {s:<6} (run `zigttp auth {s}`)\n",
+                "  {s:<8} {s:<6} (run `zttp auth {s}`)\n",
                 .{ p.label, source, p.label },
             );
         }
     }
-    std.debug.print("\nFile: ~/.zigttp/providers.json\n", .{});
+    std.debug.print("\nFile: ~/.zttp/providers.json\n", .{});
 }
 
 fn authRevoke(allocator: std.mem.Allocator, provider: Provider) !void {
@@ -211,7 +211,7 @@ fn authRevoke(allocator: std.mem.Allocator, provider: Provider) !void {
     std.debug.print("Removed stored {s} key.\n", .{provider.label});
 }
 
-/// Read `~/.zigttp/providers.json` and set the env var for each known
+/// Read `~/.zttp/providers.json` and set the env var for each known
 /// provider, but only when the shell has not already exported a non-blank
 /// value for it. Silently no-ops when the file is missing or unreadable;
 /// the existing expert fail-fast path will produce a clear setup message
@@ -232,7 +232,7 @@ pub fn injectStoredProvidersIntoEnv(allocator: std.mem.Allocator) void {
 }
 
 // ---------------------------------------------------------------------------
-// Storage: ~/.zigttp/providers.json
+// Storage: ~/.zttp/providers.json
 // ---------------------------------------------------------------------------
 //
 // In-memory shape is a flat list of (provider_name, api_key) pairs. The
@@ -256,7 +256,7 @@ const Store = struct {
         const bytes = readProvidersFile(allocator) catch |err| switch (err) {
             error.FileNotFound, error.HomeDirMissing => return store,
             error.ProvidersPermissionsTooOpen => {
-                std.log.warn("ignoring ~/.zigttp/providers.json: permissions are too open (must be 0600); run `zigttp auth` to rewrite it", .{});
+                std.log.warn("ignoring ~/.zttp/providers.json: permissions are too open (must be 0600); run `zttp auth` to rewrite it", .{});
                 return store;
             },
             else => return err,
@@ -264,7 +264,7 @@ const Store = struct {
         defer allocator.free(bytes);
 
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
-            // A corrupt file should not poison `zigttp dev`. Treat it as empty
+            // A corrupt file should not poison `zttp dev`. Treat it as empty
             // so injection silently no-ops; the user can re-run `auth claude`
             // to rewrite it.
             return store;
@@ -646,6 +646,6 @@ test "writeProvidersFile re-tightens a pre-existing loose 0644 file to 0600" {
     try writeProvidersFile(allocator, "{}");
 
     // The rewrite must land back at 0600 despite the pre-existing 0644.
-    const stat = try tmp.dir.statFile(std.testing.io, ".zigttp/providers.json", .{});
+    const stat = try tmp.dir.statFile(std.testing.io, ".zttp/providers.json", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
 }

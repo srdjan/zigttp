@@ -1,7 +1,7 @@
-//! zigttp-modules — built-in virtual modules, depending only on
-//! zigttp-sdk. Zigts imports this package to register bindings.
+//! zttp-modules — built-in virtual modules, depending only on
+//! zttp-sdk. Zigts imports this package to register bindings.
 
-pub const sdk = @import("zigttp-sdk");
+pub const sdk = @import("zttp-sdk");
 
 pub const internal = struct {
     pub const util = @import("internal/util.zig");

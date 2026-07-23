@@ -1,12 +1,12 @@
 # Module Capabilities
 
-Virtual modules exposed through `zigttp:*` imports run inside the handler's JavaScript context but often need to touch external resources (clock, RNG, filesystem, network). Capabilities record exactly which resources each module's Zig implementation is allowed to reach; an implementation that reaches outside its declaration panics at build time rather than silently misbehaving.
+Virtual modules exposed through `zttp:*` imports run inside the handler's JavaScript context but often need to touch external resources (clock, RNG, filesystem, network). Capabilities record exactly which resources each module's Zig implementation is allowed to reach; an implementation that reaches outside its declaration panics at build time rather than silently misbehaving.
 
 Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 
-`ModuleCapability` is declared in [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig). Eleven variants exist today:
+`ModuleCapability` is declared in [`packages/zts/src/module_binding.zig`](../../packages/zts/src/module_binding.zig). Eleven variants exist today:
 
 | Capability | Gates |
 |---|---|
@@ -29,14 +29,14 @@ These are governance metadata for the module internals. They do not affect handl
 Every module declares a `ModuleBinding` with three relevant fields:
 
 ```zig
-.specifier = "zigttp:foo",
+.specifier = "zttp:foo",
 .effect = .read,
 .required_capabilities = &.{ .clock, .policy_check },
 ```
 
 Two cooperating helpers in `module_binding.zig` turn the declaration into an enforcement contract:
 
-1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zigts/src/modules/internal/resolver.zig`](../../packages/zigts/src/modules/internal/resolver.zig)) applies automatically to every exported function of a module whose `required_capabilities` list is non-empty. The wrapper pushes an `ActiveModuleContext` onto a thread-local slot before calling the user function and pops it on exit. Modules with an empty capability list skip the wrapper entirely at compile time, so there is zero runtime overhead for capability-free modules (`zigttp:text`, `zigttp:compose`, etc.).
+1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zts/src/modules/internal/resolver.zig`](../../packages/zts/src/modules/internal/resolver.zig)) applies automatically to every exported function of a module whose `required_capabilities` list is non-empty. The wrapper pushes an `ActiveModuleContext` onto a thread-local slot before calling the user function and pops it on exit. Modules with an empty capability list skip the wrapper entirely at compile time, so there is zero runtime overhead for capability-free modules (`zttp:text`, `zttp:compose`, etc.).
 
 2. **`requireCapability(handle, capability)`** is the call-site check. Inside a module implementation, any operation that touches the guarded resource calls `requireCapability(handle, .clock)` (or the read-only sibling `hasCapability`). The check inspects the thread-local `active_module_context` and returns `error.MissingModuleCapability` if the capability is not present. Because the wrapper is applied by the resolver, an implementation that calls a guarded helper without the declaration in its binding will panic in the build-time `test-capability-audit` pass before reaching runtime.
 
@@ -57,41 +57,41 @@ This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache
 
 | Specifier | Capabilities | Notes |
 |---|---|---|
-| `zigttp:auth` | `crypto`, `clock` | JWT sign/verify, bearer parsing, timing-safe equality, HMAC webhook verification. |
-| `zigttp:cache` | `clock`, `policy_check` | TTL expiry requires clock; `policy_check` consults the handler's cache-namespace policy. |
-| `zigttp:crypto` | `crypto` | SHA256, HMAC, base64. |
-| `zigttp:durable` | `runtime_callback` | Replay and live execution dispatch back into the runtime for oplog replay and signal wake-ups. |
-| `zigttp:env` | `env`, `policy_check` | Reads `getenv` and then checks the key against the handler's env allowlist. |
-| `zigttp:fetch` | `network`, `runtime_callback` | Dispatches outbound HTTP through the runtime callback path after host-policy checks. |
-| `zigttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
-| `zigttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
-| `zigttp:log` | `clock`, `stderr` | Timestamped log emission. |
-| `zigttp:ratelimit` | `clock` | Token bucket expiry. |
-| `zigttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
-| `zigttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
-| `zigttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
-| `zigttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
+| `zttp:auth` | `crypto`, `clock` | JWT sign/verify, bearer parsing, timing-safe equality, HMAC webhook verification. |
+| `zttp:cache` | `clock`, `policy_check` | TTL expiry requires clock; `policy_check` consults the handler's cache-namespace policy. |
+| `zttp:crypto` | `crypto` | SHA256, HMAC, base64. |
+| `zttp:durable` | `runtime_callback` | Replay and live execution dispatch back into the runtime for oplog replay and signal wake-ups. |
+| `zttp:env` | `env`, `policy_check` | Reads `getenv` and then checks the key against the handler's env allowlist. |
+| `zttp:fetch` | `network`, `runtime_callback` | Dispatches outbound HTTP through the runtime callback path after host-policy checks. |
+| `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
+| `zttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
+| `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
+| `zttp:ratelimit` | `clock` | Token bucket expiry. |
+| `zttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
+| `zttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
+| `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
+| `zttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
 
 ### Modules that declare no capabilities
 
 These modules are pure compute - string manipulation, parsing, URL encoding, structural routing, type-directed decoding - and run without a wrapper. They appear in `modules/` with a `ModuleBinding` whose `required_capabilities = &.{}` or that omits the field.
 
-- `zigttp:compose`
-- `zigttp:decode`
-- `zigttp:http`
-- `zigttp:router`
-- `zigttp:text`
-- `zigttp:time`
-- `zigttp:url`
-- `zigttp:validate`
+- `zttp:compose`
+- `zttp:decode`
+- `zttp:http`
+- `zttp:router`
+- `zttp:text`
+- `zttp:time`
+- `zttp:url`
+- `zttp:validate`
 
 The absence of a capability does not make these modules "trusted": they still go through the resolver and still respect the handler's effect classification. It means only that their implementation does not touch any resource on the guarded list.
 
 ## The build-time audit
 
-`zig build test-capability-audit` grep-walks `packages/modules/src/` and `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
+`zig build test-capability-audit` grep-walks `packages/modules/src/` and `packages/zts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
 
-`zig build test-module-governance` is the public built-in governance gate. It runs `zigts verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zigts/src/builtin_modules.zig` and fails on:
+`zig build test-module-governance` is the public built-in governance gate. It runs `zts verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zts/src/builtin_modules.zig` and fails on:
 
 - direct forbidden effect usage
 - undeclared helper-capability use
@@ -116,7 +116,7 @@ Follow these steps, in order:
 2. **Wire the exports** into `modules/root.zig` so the resolver picks them up.
 3. **Call guarded helpers only through `module_binding` wrappers.** If you need a direct call inside a helper function, push and pop the active context manually (see the patterns referenced above).
 4. **Run the audits**: `zig build test-capability-audit test-module-governance` must pass.
-5. **Run the full test matrix**: `zig build test test-zigts test-zruntime`.
+5. **Run the full test matrix**: `zig build test test-zts test-zruntime`.
 6. **Add a fixture** under `tests/validate/` and, if the module has a handler-visible surface, an example under `examples/` with a `.test.jsonl` wired into `scripts/test-examples.sh`.
 7. **Update this document** with the new row in the capability table.
 
@@ -124,7 +124,7 @@ If the module needs a capability not yet in the enum, you are extending the gove
 
 ## Cross references
 
-- [`packages/zigts/src/module_binding.zig`](../../packages/zigts/src/module_binding.zig) - enum, wrappers, thread-local context, `requireCapability`.
-- [`packages/zigts/src/modules/internal/resolver.zig`](../../packages/zigts/src/modules/internal/resolver.zig) - where `wrapNativeFnWithCapabilities` is applied per exported function.
+- [`packages/zts/src/module_binding.zig`](../../packages/zts/src/module_binding.zig) - enum, wrappers, thread-local context, `requireCapability`.
+- [`packages/zts/src/modules/internal/resolver.zig`](../../packages/zts/src/modules/internal/resolver.zig) - where `wrapNativeFnWithCapabilities` is applied per exported function.
 - [`SECURITY.md`](../../SECURITY.md) - reporting and scope.
 - [`docs/verification.md`](../verification.md) - the handler-level verification pass that lives alongside capability enforcement.

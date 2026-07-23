@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:fetch",
+  "specifier": "zttp:fetch",
   "source": "packages/modules/src/net/fetch.zig",
   "requiredCapabilities": [
     "network",

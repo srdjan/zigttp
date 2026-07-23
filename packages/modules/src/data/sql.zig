@@ -1,4 +1,4 @@
-//! zigttp:sql - registered SQL queries backed by SQLite.
+//! zttp:sql - registered SQL queries backed by SQLite.
 //!
 //! Exports:
 //!   sql(name, statement) -> boolean
@@ -12,13 +12,13 @@
 //!     Executes a write statement.
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 
 pub const MODULE_STATE_SLOT: usize = 2; // module_slots.Slot.sql
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:sql",
+    .specifier = "zttp:sql",
     .name = "sql",
     .required_capabilities = &.{ .sqlite, .policy_check },
     .stateful = true,

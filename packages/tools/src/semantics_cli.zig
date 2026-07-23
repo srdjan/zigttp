@@ -1,10 +1,10 @@
 const std = @import("std");
 const smt_solver = @import("smt_solver.zig");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-const zigts_file_io = zigts.file_io;
+const zts_file_io = zts.file_io;
 
-pub const ReceiptProbe = *const fn (std.mem.Allocator, zigts.semantics_check.Receipt) void;
+pub const ReceiptProbe = *const fn (std.mem.Allocator, zts.semantics_check.Receipt) void;
 
 pub const RunContext = struct {
     receipt_probe: ?ReceiptProbe = null,
@@ -29,7 +29,7 @@ pub fn runSpecHashCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
             return error.InvalidArgument;
         }
     }
-    const hash = zigts.semantics.semanticsHash();
+    const hash = zts.semantics.semanticsHash();
     if (json_mode) {
         const allocator = std.heap.smp_allocator;
         const line = try std.fmt.allocPrint(allocator, "{{\"semanticsHash\":\"{s}\"}}\n", .{hash});
@@ -61,19 +61,19 @@ pub fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !voi
     }
 
     const allocator = std.heap.smp_allocator;
-    const rendered = try zigts.semantics_render.renderSpecTs(allocator);
+    const rendered = try zts.semantics_render.renderSpecTs(allocator);
     defer allocator.free(rendered);
 
     if (check_path) |path| {
         // Drift gate: the committed artifact must match the current registry.
-        const existing = zigts_file_io.readFile(allocator, path, 1 << 20) catch {
+        const existing = zts_file_io.readFile(allocator, path, 1 << 20) catch {
             const msg = "spec-render --check: cannot read the spec artifact\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
             std.process.exit(2);
         };
         defer allocator.free(existing);
         if (!std.mem.eql(u8, existing, rendered)) {
-            const msg = "spec-render --check: the committed spec is stale; run `zigts spec-render --out <path>`\n";
+            const msg = "spec-render --check: the committed spec is stale; run `zts spec-render --out <path>`\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
             std.process.exit(1);
         }
@@ -83,7 +83,7 @@ pub fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !voi
     }
 
     if (out_path) |path| {
-        try zigts_file_io.writeFile(allocator, path, rendered);
+        try zts_file_io.writeFile(allocator, path, rendered);
         return;
     }
 
@@ -106,10 +106,10 @@ fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []
 }
 
 const SpecCheckReport = struct {
-    check: *const zigts.semantics_check.CheckResult,
-    corpus: *const zigts.semantics_corpus.CorpusResult,
-    smt: *const zigts.semantics_check.SmtResult,
-    audit: *const zigts.semantics_check.AuditResult,
+    check: *const zts.semantics_check.CheckResult,
+    corpus: *const zts.semantics_corpus.CorpusResult,
+    smt: *const zts.semantics_check.SmtResult,
+    audit: *const zts.semantics_check.AuditResult,
     /// Whether --audit was passed (so "not run" is distinguished from "z3 absent").
     audit_requested: bool = false,
 
@@ -148,7 +148,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     }
 
     const allocator = std.heap.smp_allocator;
-    var result = zigts.semantics_check.runCheck(allocator) catch {
+    var result = zts.semantics_check.runCheck(allocator) catch {
         const msg = "spec-check: internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
         std.process.exit(2);
@@ -157,7 +157,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
 
     // Mechanism 4: the differential corpus runs the registry's denotations
     // against the real compiler's output.
-    var corpus = zigts.semantics_corpus.runCorpus(allocator) catch {
+    var corpus = zts.semantics_corpus.runCorpus(allocator) catch {
         const msg = "spec-check: corpus internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
         std.process.exit(2);
@@ -168,7 +168,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     // when present, so spec-check still passes on its structural mechanisms where
     // no solver is installed (CI without z3, the wasm build).
     const z3_present = smt_solver.available(allocator);
-    var smt = zigts.semantics_check.runSmt(allocator, if (z3_present) smt_solver.solve else null) catch {
+    var smt = zts.semantics_check.runSmt(allocator, if (z3_present) smt_solver.solve else null) catch {
         const msg = "spec-check: smt internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
         std.process.exit(2);
@@ -178,7 +178,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     // Exclusion audit: faithful-model refutation of the declared excluded laws
     // (the dual of mechanism 5). Opt-in (--audit) because the f64-associativity
     // refutation is slow; reuses the same injected solver when requested.
-    var audit = zigts.semantics_check.runAudit(allocator, if (want_audit and z3_present) smt_solver.solve else null) catch {
+    var audit = zts.semantics_check.runAudit(allocator, if (want_audit and z3_present) smt_solver.solve else null) catch {
         const msg = "spec-check: audit internal error\n";
         _ = std.c.write(std.c.STDERR_FILENO, msg, msg.len);
         std.process.exit(2);
@@ -204,7 +204,7 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     // attested.
     if (all_ok) {
         if (context.receipt_probe) |probe| {
-            const receipt = zigts.semantics_check.buildReceiptFromInput(&result, .{
+            const receipt = zts.semantics_check.buildReceiptFromInput(&result, .{
                 .differential = .{ .passed = @intCast(corpus.cases_passed), .total = @intCast(corpus.cases_total) },
                 .smt = .{ .available = smt.available, .proved = @intCast(smt.proved), .total = @intCast(smt.total) },
                 .audit = .{ .available = audit.available, .refuted = @intCast(audit.refuted), .total = @intCast(audit.total) },
@@ -218,12 +218,12 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
 }
 
 fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
-    const cov = zigts.semantics.coverage();
-    const sh = zigts.semantics.semanticsHash();
+    const cov = zts.semantics.coverage();
+    const sh = zts.semantics.semanticsHash();
     const r = report.check;
     const corpus = report.corpus;
     const smt = report.smt;
-    try appendFmt(allocator, buf, "zigts semantics spec-check\n", .{});
+    try appendFmt(allocator, buf, "zts semantics spec-check\n", .{});
     try appendFmt(allocator, buf, "  semantics hash:    {s}\n", .{sh});
     try appendFmt(allocator, buf, "  nodes specified:   {d}/{d}\n", .{ cov.nodes_specified, cov.nodes_total });
     try appendFmt(allocator, buf, "  opcodes specified: {d}/{d}\n", .{ cov.opcodes_specified, cov.opcodes_total });
@@ -266,7 +266,7 @@ fn appendSpecCheckFailuresText(allocator: std.mem.Allocator, buf: *std.ArrayList
         try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
     }
     for (report.corpus.failures.items) |f| {
-        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message });
+        try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ zts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message });
     }
     for (report.smt.failures.items) |f| {
         try appendFmt(allocator, buf, "    {s} {s}: {s}\n", .{ f.code.code(), f.where, f.message });
@@ -277,10 +277,10 @@ fn appendSpecCheckFailuresText(allocator: std.mem.Allocator, buf: *std.ArrayList
 }
 
 fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), report: SpecCheckReport) !void {
-    const cov = zigts.semantics.coverage();
-    const sh = zigts.semantics.semanticsHash();
-    const ir_h = zigts.semantics.irTableHash();
-    const op_h = zigts.semantics.opcodeTableHash();
+    const cov = zts.semantics.coverage();
+    const sh = zts.semantics.semanticsHash();
+    const ir_h = zts.semantics.irTableHash();
+    const op_h = zts.semantics.opcodeTableHash();
     const r = report.check;
     const corpus = report.corpus;
     const smt = report.smt;
@@ -317,7 +317,7 @@ fn appendSpecCheckFailuresJson(allocator: std.mem.Allocator, buf: *std.ArrayList
         try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
     }
     for (report.corpus.failures.items) |f| {
-        try appendJsonFailure(allocator, buf, &first, zigts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message);
+        try appendJsonFailure(allocator, buf, &first, zts.semantics.SpecCode.lowering_divergence.code(), f.where, f.message);
     }
     for (report.smt.failures.items) |f| {
         try appendJsonFailure(allocator, buf, &first, f.code.code(), f.where, f.message);
@@ -330,7 +330,7 @@ fn appendSpecCheckFailuresJson(allocator: std.mem.Allocator, buf: *std.ArrayList
 test "spec-check renderers aggregate structural corpus and smt failures" {
     const allocator = std.testing.allocator;
 
-    var check = zigts.semantics_check.CheckResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    var check = zts.semantics_check.CheckResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
     defer check.deinit();
     try check.failures.append(check.arena.allocator(), .{
         .code = .lowering_divergence,
@@ -338,7 +338,7 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
         .message = "lowering mismatch",
     });
 
-    var corpus = zigts.semantics_corpus.CorpusResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    var corpus = zts.semantics_corpus.CorpusResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
     defer corpus.deinit();
     corpus.cases_total = 2;
     corpus.cases_passed = 1;
@@ -347,7 +347,7 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
         .message = "real codegen mismatch",
     });
 
-    var smt = zigts.semantics_check.SmtResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    var smt = zts.semantics_check.SmtResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
     defer smt.deinit();
     smt.available = true;
     smt.proved = 1;
@@ -359,7 +359,7 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
         .message = "counterexample",
     });
 
-    var audit = zigts.semantics_check.AuditResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    var audit = zts.semantics_check.AuditResult{ .arena = std.heap.ArenaAllocator.init(allocator) };
     defer audit.deinit();
     audit.available = true;
     audit.refuted = 2;

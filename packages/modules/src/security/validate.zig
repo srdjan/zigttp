@@ -1,14 +1,14 @@
-//! zigttp:validate - JSON Schema validation
+//! zttp:validate - JSON Schema validation
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 // Single source of truth for the leap-aware days-in-month rule; do not copy it.
 const time = @import("../platform/time.zig");
 
 pub const MODULE_STATE_SLOT: usize = 4;
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:validate",
+    .specifier = "zttp:validate",
     .name = "validate",
     .stateful = true,
     .exports = &.{

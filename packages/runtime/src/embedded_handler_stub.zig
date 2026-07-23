@@ -1,7 +1,7 @@
 //! Stub embedded handler - used when building without -Dhandler
 //! This allows tests and development builds to compile without a precompiled handler.
 
-const zq = @import("zigts");
+const zq = @import("zts");
 
 pub const has_aot = false;
 pub const bytecode: []const u8 = &.{};

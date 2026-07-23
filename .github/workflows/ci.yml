@@ -91,16 +91,16 @@ jobs:
         run: |
           if [ ! -f policy-hash.txt ]; then
             echo "::error::policy-hash.txt is missing - the policy hash baseline must be committed"
-            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
             exit 1
           fi
           EXPECTED=$(cat policy-hash.txt)
-          ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
+          ACTUAL=$(./zig-out/bin/zts describe-rule --hash)
           if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
             echo "Expected: $EXPECTED"
             echo "Actual:   $ACTUAL"
-            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt"
             exit 1
           fi
 
@@ -109,6 +109,6 @@ jobs:
 
       - name: Verify expert subsystem
         run: |
-          META=$(./zig-out/bin/zigts meta --json)
+          META=$(./zig-out/bin/zts meta --json)
           echo "$META" | jq -e '.rule_count >= 25'
           echo "$META" | jq -e '.policy_hash | length == 64'

@@ -3,7 +3,7 @@
 // non-deterministic. The build emits ZTS500 ("spec_not_discharged")
 // with the per-property suggestion attached to the failure.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"idempotent" | "deterministic">;
 

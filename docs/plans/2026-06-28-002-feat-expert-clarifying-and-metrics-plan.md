@@ -11,7 +11,7 @@ last_updated: 2026-06-28
 
 ## Context
 
-zigttp v0.1.0-beta is expert-first for solo developers (`STRATEGY.md`): the AI writes
+zttp v0.1.0-beta is expert-first for solo developers (`STRATEGY.md`): the AI writes
 the handler, the compiler proves it. The launch-critical moment is "English in ->
 certified-safe handler out." Grounding the current expert flow surfaced exactly one
 unsolved, user-facing friction on that path: ambiguous or complex asks do not reliably
@@ -102,11 +102,11 @@ dev's next line answers the question with full context. **No turn-machine change
   `runOneTurn` (`packages/pi/src/agent.zig:586-635`), tracking `round_trips_to_first_green`
   until the first `verified_patch`.
 - **Proven-path ratio.** Reuse the contract data the check already produces:
-  `HandlerContract.behaviors` / `behaviors_exhaustive` (`packages/zigts/src/contract_types.zig:1369`,
+  `HandlerContract.behaviors` / `behaviors_exhaustive` (`packages/zts/src/contract_types.zig:1369`,
   `BehaviorPath` at `:965`). Capture the latest ratio at the post-apply check
   (`packages/pi/src/loop.zig` ~`:413`, where `verified_patch` is emitted). **Verify during
   implementation** how per-path "proven vs unproven" is exposed in the check JSON
-  (`packages/zigts/src/contract_json_writer.zig:682`) - if only `behaviors.len` +
+  (`packages/zts/src/contract_json_writer.zig:682`) - if only `behaviors.len` +
   `behaviors_exhaustive` are available, define the ratio against those and note the
   approximation.
 - **Write at session close.** Append the `session_summary` once at session teardown -
@@ -132,15 +132,15 @@ dev's next line answers the question with full context. **No turn-machine change
     `round_trips_to_first_green` reflecting both turns - confirming text turns are counted
     but not mistaken for edits.
   - `proven_path_ratio` computed from a fixed contract with known `behaviors`.
-- **Manual end-to-end** (needs `ANTHROPIC_API_KEY` or `zigttp auth claude`):
-  1. `zigttp init demo --expert`
+- **Manual end-to-end** (needs `ANTHROPIC_API_KEY` or `zttp auth claude`):
+  1. `zttp init demo --expert`
   2. Ambiguous ask: `add auth` -> expect one clarifying question, no edit. Answer it ->
      expect convergence to a proven edit.
   3. Clear ask in a fresh project: `add a GET /health route to src/handler.ts` -> expect a
      direct edit, no question (fast path preserved).
-  4. `quit`, then inspect `.zigttp/.../events.jsonl` for the `session_summary` row and run
+  4. `quit`, then inspect `.zttp/.../events.jsonl` for the `session_summary` row and run
      `/ledger` to see the metrics.
-- **Gate:** run `zig build test-zigts` and `zig build test-cli`; then `bash scripts/verify.sh`
+- **Gate:** run `zig build test-zts` and `zig build test-cli`; then `bash scripts/verify.sh`
   for the full local gate (run `zig fmt --check` separately per repo convention).
 
 ## Notes for execution

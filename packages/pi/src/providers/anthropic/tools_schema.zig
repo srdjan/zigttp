@@ -142,7 +142,7 @@ test "writeToolsArray: registered tool appears alongside apply_edit, found by na
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
     try reg.register(testing.allocator, .{
-        .name = "zigts_expert_meta",
+        .name = "zts_expert_meta",
         .label = "meta",
         .effect = .analyze,
         .description = "Emit policy metadata.",
@@ -160,7 +160,7 @@ test "writeToolsArray: registered tool appears alongside apply_edit, found by na
     try testing.expect(parsed.value == .array);
     try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
 
-    const meta = findTool(parsed.value, "zigts_expert_meta") orelse return error.TestFailed;
+    const meta = findTool(parsed.value, "zts_expert_meta") orelse return error.TestFailed;
     try testing.expectEqualStrings("Emit policy metadata.", meta.object.get("description").?.string);
 
     // apply_edit is still present alongside registered tools.

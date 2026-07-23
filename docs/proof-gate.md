@@ -1,6 +1,6 @@
 # Proof Gate
 
-`zigttp proofs gate` carries the proof to where review happens: the pull
+`zttp proofs gate` carries the proof to where review happens: the pull
 request. The [compile-time proof flow](user-guide.md#compile-time-proofs)
 shows the proof story for one scripted edit; the gate runs the same analysis
 across every handler a real branch changed and turns the result into a
@@ -9,7 +9,7 @@ merge-decision signal.
 ## The verdict is the answer to "is this safe to merge?"
 
 For each changed handler the gate compiles the base and head versions and runs
-the same `contract_diff` the expert loop and `zigttp prove-behavior` use, then
+the same `contract_diff` the expert loop and `zttp prove-behavior` use, then
 aggregates one repo-level verdict:
 
 | Verdict | Meaning | Merge signal |
@@ -26,15 +26,15 @@ whole pull request `breaking`.
 
 ```bash
 # Compare the working tree against the default base (origin/main, then main).
-zigttp proofs gate
+zttp proofs gate
 
 # Pick the range explicitly, and emit the machine verdict for scripting.
-zigttp proofs gate --base origin/main --head HEAD --format json
+zttp proofs gate --base origin/main --head HEAD --format json
 ```
 
 Exit code: `0` safe (equivalent / additive), `1` breaking, `2` usage or git
 error. The Markdown form is a ready-to-paste PR comment; the JSON form
-(`zigttp.proof-gate.v1`) carries the per-handler verdict, behavior delta,
+(`zttp.proof-gate.v1`) carries the per-handler verdict, behavior delta,
 surface delta, and counterexamples.
 
 Flags:
@@ -44,7 +44,7 @@ Flags:
 - `--format md|json` default `md`.
 - `--out <path>` write the report to a file instead of stdout.
 - `--no-sign` skip the signed `kind=equivalence` ledger rows. Run locally with
-  signing on (the default) to append a signed receipt to `.zigttp/proofs.jsonl`;
+  signing on (the default) to append a signed receipt to `.zttp/proofs.jsonl`;
   CI passes `--no-sign` because runners hold no persistent attest identity.
 
 Files that are not handlers (a changed `.ts`/`.js` with no routes and no
@@ -64,7 +64,7 @@ permissions:
   contents: read
   pull-requests: write
 # checkout with fetch-depth: 0 so `git show <base>:<path>` can read the
-# before side, build zigttp, run scripts/proof-gate.sh, post the comment,
+# before side, build zttp, run scripts/proof-gate.sh, post the comment,
 # then exit 1 when the verdict is `breaking`.
 ```
 
@@ -73,9 +73,9 @@ pull request; the gate still posts the comment but does not fail the check.
 
 ## Relationship to other proof surfaces
 
-- `zigttp dev --prove` and the terminal HUD show the verdict to the author on
+- `zttp dev --prove` and the terminal HUD show the verdict to the author on
   save. The gate shows it to a reviewer at merge time.
-- `zigttp proofs show` / `diff` re-render a single ledger entry. The gate
+- `zttp proofs show` / `diff` re-render a single ledger entry. The gate
   aggregates across a git range.
-- `zigttp prove-behavior <before.ts> <after.ts>` is the one-shot, two-file form
+- `zttp prove-behavior <before.ts> <after.ts>` is the one-shot, two-file form
   of the same per-handler verdict the gate computes for each changed file.

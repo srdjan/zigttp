@@ -1,4 +1,4 @@
-//! `zigttp demo` — build a self-contained Proof Theater workspace and either
+//! `zttp demo` — build a self-contained Proof Theater workspace and either
 //! launch Studio interactively or run the scripted baseline -> witness ->
 //! repair -> deploy flow and exit. Split out of dev_cli.zig; the dispatch and
 //! error-to-exit-code translation stay in dev_cli.main.
@@ -78,22 +78,22 @@ pub fn demoCommand(allocator: std.mem.Allocator, program_path: []const u8, argv:
 
     const url = try std.fmt.allocPrint(
         allocator,
-        "http://127.0.0.1:{d}/_zigttp/studio",
+        "http://127.0.0.1:{d}/_zttp/studio",
         .{parsed.port},
     );
     defer allocator.free(url);
     const verify_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{parsed.port});
     defer allocator.free(verify_url);
-    const well_known_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/.well-known/zigttp-attest", .{parsed.port});
+    const well_known_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/.well-known/zttp-attest", .{parsed.port});
     defer allocator.free(well_known_url);
 
     std.debug.print(
         \\
-        \\zigttp proof theater
+        \\zttp proof theater
         \\Workspace: {s}
         \\Studio:    {s}
         \\Expert:    {s}
-        \\Verify:    zigttp verify {s}
+        \\Verify:    zttp verify {s}
         \\Well-known:{s}
         \\
         \\Flow: baseline -> unsafe edit -> witness -> repair -> local deploy receipt
@@ -181,8 +181,8 @@ fn openBrowser(allocator: std.mem.Allocator, url: []const u8) void {
 
 pub fn printDemoHelp() void {
     const help =
-        \\zigttp demo [--no-open] [--port N] [--out DIR]
-        \\zigttp demo --scripted --out DIR [--export DIR]
+        \\zttp demo [--no-open] [--port N] [--out DIR]
+        \\zttp demo --scripted --out DIR [--export DIR]
         \\
         \\Create a self-contained Proof Theater workspace and launch Studio.
         \\The demo runs fully local: no cloud credentials, API keys, or

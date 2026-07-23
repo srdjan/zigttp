@@ -1,0 +1,2388 @@
+//! Virtual Module Binding Specification
+//!
+//! A single comptime struct that captures every fact about a virtual module
+//! needed by all consumers: resolver, type checker, verifier, bool checker,
+//! contract builder, state manager, and trace/replay system.
+//!
+//! Built-in modules declare `pub const binding: ModuleBinding` alongside
+//! their existing `exports` array. Third-party modules depend on zttp-sdk
+//! and write functions using ModuleFn (opaque handle) instead of NativeFn.
+//!
+//! The ModuleHandle opaque type provides a capability-based sandbox:
+//! third-party modules cannot dereference the handle or access Context
+//! internals. All interaction goes through free functions in this file.
+
+const std = @import("std");
+const build_options = @import("build_options");
+const object = @import("object.zig");
+const value = @import("value.zig");
+const context = @import("context.zig");
+const cost_meter = context.cost_meter;
+const compat = @import("compat.zig");
+const file_io = @import("file_io.zig");
+const sqlite_runtime = @import("sqlite.zig");
+const resolver = @import("modules/internal/resolver.zig");
+const security_events = @import("security_events.zig");
+const gc = @import("gc.zig");
+const handler_policy = @import("handler_policy.zig");
+const module_slots = @import("module_slots.zig");
+
+// Re-export EffectClass from resolver for backward compatibility
+pub const EffectClass = resolver.EffectClass;
+
+// -------------------------------------------------------------------------
+// Opaque handle for third-party module sandbox
+// -------------------------------------------------------------------------
+
+/// Opaque handle passed to third-party module functions.
+/// Cannot be dereferenced - modules interact with the runtime exclusively
+/// through the free functions below. Internally this is a *Context, but
+/// that fact is hidden from module authors.
+pub const ModuleHandle = opaque {};
+
+/// Function signature for third-party (sandboxed) module functions.
+/// Receives an opaque handle instead of raw *anyopaque.
+pub const ModuleFn = *const fn (
+    handle: *ModuleHandle,
+    this: value.JSValue,
+    args: []const value.JSValue,
+) anyerror!value.JSValue;
+
+const ActiveModuleContext = struct {
+    specifier: []const u8,
+    required_capabilities: []const ModuleCapability,
+};
+
+pub const ActiveModuleToken = struct {
+    previous: ?ActiveModuleContext,
+};
+
+threadlocal var active_module_context: ?ActiveModuleContext = null;
+threadlocal var sdk_prng: ?std.Random.DefaultPrng = null;
+threadlocal var sdk_csprng: ?std.Random.DefaultCsprng = null;
+
+/// Generate a NativeFn wrapper around a ModuleFn.
+/// The wrapper casts *anyopaque to *ModuleHandle (a no-op pointer cast)
+/// so the module receives the opaque handle it expects.
+pub fn wrapModuleFn(comptime user_fn: ModuleFn) object.NativeFn {
+    return wrapModuleFnWithCapabilities(user_fn, "<sandboxed>", &.{});
+}
+
+pub fn wrapNativeFnWithCapabilities(
+    comptime user_fn: object.NativeFn,
+    comptime specifier: []const u8,
+    comptime required_capabilities: []const ModuleCapability,
+) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const token = pushActiveModuleContext(specifier, required_capabilities);
+            defer popActiveModuleContext(token);
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
+            return user_fn(ctx_ptr, this, args);
+        }
+    }.call;
+}
+
+pub fn wrapModuleFnWithCapabilities(
+    comptime user_fn: ModuleFn,
+    comptime specifier: []const u8,
+    comptime required_capabilities: []const ModuleCapability,
+) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const token = pushActiveModuleContext(specifier, required_capabilities);
+            defer popActiveModuleContext(token);
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
+            return user_fn(contextToHandle(ctx), this, args);
+        }
+    }.call;
+}
+
+// -------------------------------------------------------------------------
+// ModuleHandle free functions (the sandbox API)
+// -------------------------------------------------------------------------
+
+/// Cast a ModuleHandle to the underlying Context. Internal use only -
+/// this function is called by the SDK free functions below, never by
+/// module authors directly.
+pub fn handleToContext(handle: *ModuleHandle) *context.Context {
+    return @ptrCast(@alignCast(handle));
+}
+
+pub fn contextToHandle(ctx: *context.Context) *ModuleHandle {
+    return @ptrCast(ctx);
+}
+
+fn activeContextHasCapability(capability: ModuleCapability) bool {
+    const active = active_module_context orelse return false;
+    for (active.required_capabilities) |candidate| {
+        if (candidate == capability) return true;
+    }
+    return false;
+}
+
+pub fn activeModuleOwnsStateSlot(slot: usize) bool {
+    const active = active_module_context orelse return false;
+    return module_slots.isOwnedBySpecifier(slot, active.specifier);
+}
+
+pub fn hasCapability(handle: *ModuleHandle, capability: ModuleCapability) bool {
+    _ = handle;
+    return activeContextHasCapability(capability);
+}
+
+pub const ModuleCapabilityError = error{MissingModuleCapability};
+
+pub fn requireCapability(_: *ModuleHandle, capability: ModuleCapability) ModuleCapabilityError!void {
+    if (activeContextHasCapability(capability)) return;
+    return error.MissingModuleCapability;
+}
+
+pub fn pushActiveModuleContext(
+    specifier: []const u8,
+    required_capabilities: []const ModuleCapability,
+) ActiveModuleToken {
+    const prev = active_module_context;
+    active_module_context = .{
+        .specifier = specifier,
+        .required_capabilities = required_capabilities,
+    };
+    return .{ .previous = prev };
+}
+
+pub fn popActiveModuleContext(token: ActiveModuleToken) void {
+    active_module_context = token.previous;
+}
+
+/// Create a new JS string value. Ownership transfers to the GC.
+pub fn createString(handle: *ModuleHandle, data: []const u8) !value.JSValue {
+    const ctx = handleToContext(handle);
+    return ctx.createString(data);
+}
+
+/// Extract a borrowed string slice from a JSValue.
+/// The returned slice is valid only during the current function call.
+pub fn extractString(val: value.JSValue) ?[]const u8 {
+    const str = val.toStringStruct() orelse return null;
+    return str.asSlice();
+}
+
+pub fn extractInt(val: value.JSValue) ?i32 {
+    return val.toInt();
+}
+
+pub fn extractFloat(val: value.JSValue) ?f64 {
+    return val.toFloat();
+}
+
+/// Create a Result object: { ok: true, value: payload }
+pub fn resultOk(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
+    const ctx = handleToContext(handle);
+    const util = @import("modules/internal/util.zig");
+    return util.createPlainResultOk(ctx, payload);
+}
+
+/// Create a Result object: { ok: false, error: message }
+pub fn resultErr(handle: *ModuleHandle, message: []const u8) !value.JSValue {
+    const ctx = handleToContext(handle);
+    const util = @import("modules/internal/util.zig");
+    return util.createPlainResultErr(ctx, message);
+}
+
+/// Create a Result object: { ok: false, error: payload }
+pub fn resultErrValue(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
+    const ctx = handleToContext(handle);
+    const util = @import("modules/internal/util.zig");
+    return util.createPlainResultErrValue(ctx, payload);
+}
+
+/// Create a Result object: { ok: false, errors: payload }
+pub fn resultErrs(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
+    const ctx = handleToContext(handle);
+    const util = @import("modules/internal/util.zig");
+    return util.createPlainResultErrs(ctx, payload);
+}
+
+/// Throw a JS error. Sets ctx.exception and returns exception_val.
+pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) value.JSValue {
+    const ctx = handleToContext(handle);
+    const util = @import("modules/internal/util.zig");
+    return util.throwError(ctx, name, message);
+}
+
+/// Get typed module state from a slot. Returns null if not initialized.
+pub fn getState(handle: *ModuleHandle, comptime T: type, slot: usize) ?*T {
+    const ctx = handleToContext(handle);
+    return ctx.getModuleState(T, slot);
+}
+
+/// Set module state in a slot with a cleanup callback.
+pub fn setState(
+    handle: *ModuleHandle,
+    slot: usize,
+    ptr: *anyopaque,
+    deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void,
+) void {
+    const ctx = handleToContext(handle);
+    ctx.setModuleState(slot, ptr, deinit_fn);
+}
+
+/// Get the runtime allocator for persistent allocations.
+pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
+    const ctx = handleToContext(handle);
+    return ctx.allocator;
+}
+
+pub const ActiveCapabilityError = ModuleCapabilityError || error{
+    ClockUnavailable,
+    StderrWriteFailed,
+    EntropyUnavailable,
+};
+
+fn currentActiveModuleSpecifier() []const u8 {
+    return if (active_module_context) |active| active.specifier else "<no-active-module>";
+}
+
+fn requireActiveCapability(capability: ModuleCapability) ActiveCapabilityError!void {
+    if (activeContextHasCapability(capability)) return;
+    return error.MissingModuleCapability;
+}
+
+fn panicCapabilityError(err: ActiveCapabilityError, capability: ModuleCapability) error{CapabilityViolation} {
+    const spec = currentActiveModuleSpecifier();
+    switch (err) {
+        error.MissingModuleCapability => std.log.err(
+            "module '{s}' used undeclared capability '{s}'",
+            .{ spec, @tagName(capability) },
+        ),
+        error.ClockUnavailable => std.log.err(
+            "module '{s}' failed to access clock capability",
+            .{spec},
+        ),
+        error.StderrWriteFailed => std.log.err(
+            "module '{s}' failed to write to stderr capability",
+            .{spec},
+        ),
+        error.EntropyUnavailable => std.log.err(
+            "module '{s}' could not read OS entropy (/dev/urandom)",
+            .{spec},
+        ),
+    }
+    return error.CapabilityViolation;
+}
+
+pub fn nowMsForActiveModule() ActiveCapabilityError!i64 {
+    try requireActiveCapability(.clock);
+    return compat.realtimeNowMs() catch error.ClockUnavailable;
+}
+
+pub fn nowNsForActiveModule() ActiveCapabilityError!u64 {
+    try requireActiveCapability(.clock);
+    return compat.realtimeNowNs() catch error.ClockUnavailable;
+}
+
+pub fn clockNowMsChecked() error{CapabilityViolation}!i64 {
+    return nowMsForActiveModule() catch |err| return panicCapabilityError(err, .clock);
+}
+
+pub fn clockNowNsChecked() error{CapabilityViolation}!u64 {
+    return nowNsForActiveModule() catch |err| return panicCapabilityError(err, .clock);
+}
+
+pub fn clockNowSecsChecked() error{CapabilityViolation}!i64 {
+    return @divTrunc(try clockNowMsChecked(), 1000);
+}
+
+pub fn fillRandomForActiveModule(buf: []u8) ActiveCapabilityError!void {
+    try requireActiveCapability(.random);
+    if (buf.len == 0) return;
+
+    if (comptime build_options.analyzer_only) {
+        // The wasm/freestanding analyzer never executes handler code and has no
+        // OS CSPRNG; a deterministic PRNG keeps that build linking. IDs minted
+        // on this path are never security-bearing.
+        if (sdk_prng == null) {
+            const seed = std.hash.Wyhash.hash(0, currentActiveModuleSpecifier()) ^
+                @as(u64, @bitCast(nowNsForActiveModule() catch 0));
+            sdk_prng = std.Random.DefaultPrng.init(seed);
+        }
+        sdk_prng.?.random().bytes(buf);
+        return;
+    }
+
+    // Hosted runtime: a forward-ratcheting ChaCha CSPRNG seeded once per thread
+    // from the OS entropy pool. This backs zttp:id (uuid/ulid/nanoid), which
+    // are routinely used as session tokens, reset tokens, and idempotency keys -
+    // the previous Xoshiro256, seeded once from the wall clock, was both
+    // low-entropy and state-recoverable from a single observed id.
+    if (sdk_csprng == null) {
+        var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = undefined;
+        // Fail closed but cleanly: a blocked /dev/urandom (e.g. a hardened
+        // container) surfaces as a typed error the SDK bridge turns into a
+        // caller-visible failure, instead of a process panic. Never fall back
+        // to a weaker source - an unseeded CSPRNG must not mint tokens.
+        fillOsEntropy(&seed) catch return error.EntropyUnavailable;
+        sdk_csprng = std.Random.DefaultCsprng.init(seed);
+    }
+    sdk_csprng.?.random().bytes(buf);
+}
+
+/// Fill `buf` from the OS entropy pool (/dev/urandom). Mirrors the attestation
+/// keypair's seeding; only ever referenced from the hosted (libc-linked) path.
+fn fillOsEntropy(buf: []u8) !void {
+    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.UrandomOpenFailed;
+    defer _ = std.c.close(fd);
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
+        if (n <= 0) return error.UrandomReadFailed;
+        filled += @intCast(n);
+    }
+}
+
+pub fn fillRandomChecked(buf: []u8) error{CapabilityViolation}!void {
+    fillRandomForActiveModule(buf) catch |err| return panicCapabilityError(err, .random);
+}
+
+pub fn writeStderrForActiveModule(buf: []const u8) ActiveCapabilityError!void {
+    try requireActiveCapability(.stderr);
+    if (buf.len == 0) return;
+
+    const written = std.c.write(std.c.STDERR_FILENO, buf.ptr, buf.len);
+    if (written != @as(isize, @intCast(buf.len))) return error.StderrWriteFailed;
+}
+
+pub fn writeStderrChecked(buf: []const u8) error{CapabilityViolation}!void {
+    writeStderrForActiveModule(buf) catch |err| return panicCapabilityError(err, .stderr);
+}
+
+pub fn runtimeCallbackCapabilityChecked() error{CapabilityViolation}!void {
+    requireActiveCapability(.runtime_callback) catch |err| return panicCapabilityError(err, .runtime_callback);
+}
+
+pub fn getRuntimeCallbackStateChecked(
+    ctx: *context.Context,
+    comptime T: type,
+    slot: usize,
+) error{CapabilityViolation}!?*T {
+    try runtimeCallbackCapabilityChecked();
+    return ctx.getModuleState(T, slot);
+}
+
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (path.len == 0) return error.InvalidPath;
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    var resolved_buf: [std.c.PATH_MAX + 1]u8 = undefined;
+    const resolved = std.c.realpath(path_z, &resolved_buf) orelse return error.PathNotCanonical;
+    const len = std.mem.len(resolved);
+    return try allocator.dupe(u8, resolved[0..len]);
+}
+
+fn canonicalizeExistingPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return realPathAlloc(allocator, path);
+}
+
+fn canonicalizeCreatablePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (realPathAlloc(allocator, path)) |resolved| return resolved else |err| switch (err) {
+        error.PathNotCanonical => {},
+        else => return err,
+    }
+
+    const dirname = std.fs.path.dirname(path) orelse ".";
+    const basename = std.fs.path.basename(path);
+    if (basename.len == 0 or std.mem.eql(u8, basename, ".") or std.mem.eql(u8, basename, "..")) {
+        return error.InvalidPath;
+    }
+
+    const parent = try realPathAlloc(allocator, dirname);
+    defer allocator.free(parent);
+    return std.fs.path.join(allocator, &.{ parent, basename });
+}
+
+pub fn allowSdkFilePath(ctx: *context.Context, path: []const u8) !void {
+    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    try ctx.allowSdkFilePathCanonical(canonical);
+}
+
+pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
+    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    try ctx.allowSdkSqlitePathCanonical(canonical);
+}
+
+pub fn readFileChecked(
+    ctx: *context.Context,
+    path: []const u8,
+    max_size: usize,
+) ![]u8 {
+    requireActiveCapability(.filesystem) catch |err| return panicCapabilityError(err, .filesystem);
+    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    if (!ctx.allowsSdkFilePathCanonical(canonical)) return error.FilePathNotAllowed;
+    return file_io.readFile(ctx.allocator, path, max_size);
+}
+
+pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
+    try requireActiveCapability(.env);
+    // Enforce the env allowlist on the read itself, not only in the optional
+    // sdk.allowsEnv pre-check. The built-in zttp:env module calls allowsEnv
+    // first, but a third-party SDK module that declares .env and never calls it
+    // would otherwise read any process env var (env values are flow-labeled
+    // .secret), bypassing the policy the contract advertises. Mirrors
+    // readFileChecked / openSqliteDbChecked, which gate internally. `allows`
+    // returns true when no allowlist is configured, so this matches the
+    // built-in module's behavior exactly and only closes the bypass.
+    if (!ctx.capability_policy.allowsEnv(name_z)) {
+        emitPolicyDenial(.policy_denied_env, name_z);
+        return null;
+    }
+    const result = std.c.getenv(name_z) orelse return null;
+    return std.mem.sliceTo(result, 0);
+}
+
+pub fn readEnvChecked(ctx: *context.Context, name_z: [:0]const u8) error{CapabilityViolation}!?[]const u8 {
+    return readEnvForActiveModule(ctx, name_z) catch |err| return panicCapabilityError(err, .env);
+}
+
+pub fn sqliteCapabilityChecked() error{CapabilityViolation}!void {
+    requireActiveCapability(.sqlite) catch |err| return panicCapabilityError(err, .sqlite);
+}
+
+pub fn getSqliteStateChecked(
+    ctx: *context.Context,
+    comptime T: type,
+    slot: usize,
+) error{CapabilityViolation}!?*T {
+    try sqliteCapabilityChecked();
+    return ctx.getModuleState(T, slot);
+}
+
+pub fn openSqliteDbChecked(
+    ctx: *context.Context,
+    path: []const u8,
+) !sqlite_runtime.Db {
+    try sqliteCapabilityChecked();
+    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
+    defer ctx.allocator.free(canonical);
+    if (!ctx.allowsSdkSqlitePathCanonical(canonical)) return error.SqlitePathNotAllowed;
+    return sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, path);
+}
+
+pub fn hmacSha256ForActiveModule(
+    out: *[std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8,
+    data: []const u8,
+    key: []const u8,
+) ActiveCapabilityError!void {
+    try requireActiveCapability(.crypto);
+    std.crypto.auth.hmac.sha2.HmacSha256.create(out, data, key);
+}
+
+pub fn sha256ForActiveModule(
+    out: *[std.crypto.hash.sha2.Sha256.digest_length]u8,
+    data: []const u8,
+) ActiveCapabilityError!void {
+    try requireActiveCapability(.crypto);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data);
+    out.* = hasher.finalResult();
+}
+
+pub fn sha256Checked(
+    out: *[std.crypto.hash.sha2.Sha256.digest_length]u8,
+    data: []const u8,
+) error{CapabilityViolation}!void {
+    sha256ForActiveModule(out, data) catch |err| return panicCapabilityError(err, .crypto);
+}
+
+pub fn hmacSha256Checked(
+    out: *[std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8,
+    data: []const u8,
+    key: []const u8,
+) error{CapabilityViolation}!void {
+    hmacSha256ForActiveModule(out, data, key) catch |err| return panicCapabilityError(err, .crypto);
+}
+
+fn emitPolicyDenial(kind: security_events.SecurityEventKind, name: []const u8) void {
+    security_events.emitGlobal(security_events.SecurityEvent.init(
+        kind,
+        currentActiveModuleSpecifier(),
+        name,
+    ));
+}
+
+pub fn allowsCacheNamespaceForActiveModule(
+    ctx: *context.Context,
+    ns: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    const allowed = ctx.capability_policy.allowsCacheNamespace(ns);
+    if (!allowed) emitPolicyDenial(.policy_denied_cache, ns);
+    return allowed;
+}
+
+pub fn allowsCacheNamespaceChecked(ctx: *context.Context, ns: []const u8) error{CapabilityViolation}!bool {
+    return allowsCacheNamespaceForActiveModule(ctx, ns) catch |err| return panicCapabilityError(err, .policy_check);
+}
+
+pub fn allowsEnvForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    const allowed = ctx.capability_policy.allowsEnv(name);
+    if (!allowed) emitPolicyDenial(.policy_denied_env, name);
+    return allowed;
+}
+
+pub fn allowsEnvChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsEnvForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
+}
+
+pub fn allowsSqlQueryForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    const allowed = ctx.capability_policy.allowsSqlQuery(name);
+    if (!allowed) emitPolicyDenial(.policy_denied_sql, name);
+    return allowed;
+}
+
+pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsSqlQueryForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
+}
+
+pub fn allowsSqlWriteForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    const allowed = ctx.capability_policy.allowsSqlWrite(name);
+    if (!allowed) {
+        // Phase 1 dual-emit: legacy per-module event for existing JSONL
+        // consumers, generic policy_denied for spec section 12 shape.
+        // Phase 4 deprecates the legacy kinds once consumers migrate.
+        emitPolicyDenial(.policy_denied_sql, name);
+        const policy = @import("policy.zig");
+        policy.emitDenied(.{
+            .action = .db_write,
+            .resource = .{ .kind = policy.resource_kind_sql_query, .id = name },
+        }, .not_in_allowlist);
+    }
+    return allowed;
+}
+
+pub fn allowsSqlWriteChecked(ctx: *context.Context, name: []const u8) error{CapabilityViolation}!bool {
+    return allowsSqlWriteForActiveModule(ctx, name) catch |err| return panicCapabilityError(err, .policy_check);
+}
+
+/// SDK C-ABI bridge. These `export` functions are the runtime half of the
+/// zttp-sdk FFI boundary. Wrapping them in a struct that is referenced
+/// only from the comptime gate below lets `analyzer_only` builds (wasm) drop
+/// the whole family - and with it the interpreter value layer, SQLite, and
+/// libc - from the module graph. Native builds reference `sdk_bridge` and
+/// emit every symbol exactly as before.
+pub const sdk_bridge = struct {
+    pub export fn zttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
+        if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
+        const capability: ModuleCapability = @enumFromInt(capability_tag);
+        return hasCapability(handle, capability);
+    }
+
+    pub export fn zttpSdkNowMs(handle: *ModuleHandle, out_ms: *i64) bool {
+        _ = handle;
+        out_ms.* = nowMsForActiveModule() catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) bool {
+        _ = handle;
+        if (len == 0) return true;
+        // The callers (zttp:id) pass `undefined`-initialized stack buffers and
+        // emit them as security tokens. If the fill fails (missing capability or
+        // OS entropy unavailable), zero the buffer so no uninitialized stack
+        // memory leaks as a "random" value, AND return false so the caller
+        // surfaces a clean error rather than emitting an all-zero, predictable
+        // token. Fails closed without a process panic.
+        fillRandomForActiveModule(buf_ptr[0..len]) catch {
+            @memset(buf_ptr[0..len], 0);
+            return false;
+        };
+        return true;
+    }
+
+    pub export fn zttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool {
+        _ = handle;
+        if (len == 0) return true;
+        writeStderrForActiveModule(buf_ptr[0..len]) catch return false;
+        return true;
+    }
+
+    // SDK bridge: handle-bound runtime operations. JSValue crosses the ABI
+    // directly because zts's value.JSValue and sdk.JSValue are packed
+    // struct(u64) with layout equivalence verified in module_binding_adapter.
+
+    const util_mod = @import("modules/internal/util.zig");
+
+    pub export fn zttpSdkExtractString(val: value.JSValue, out_ptr: *[*]const u8, out_len: *usize) bool {
+        const slice = util_mod.extractString(val) orelse return false;
+        out_ptr.* = slice.ptr;
+        out_len.* = slice.len;
+        return true;
+    }
+
+    pub export fn zttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        out.* = ctx.createString(ptr[0..len]) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkCreateObject(handle: *ModuleHandle, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        const obj = ctx.createObject(ctx.object_prototype) catch return false;
+        out.* = obj.toValue();
+        return true;
+    }
+
+    pub export fn zttpSdkObjectSet(
+        handle: *ModuleHandle,
+        obj_val: value.JSValue,
+        key_ptr: [*]const u8,
+        key_len: usize,
+        val: value.JSValue,
+    ) bool {
+        const ctx = handleToContext(handle);
+        if (!obj_val.isObject()) return false;
+        const obj = obj_val.toPtr(object.JSObject);
+        const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+        ctx.setPropertyChecked(obj, atom, val) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkObjectGet(
+        handle: *ModuleHandle,
+        obj_val: value.JSValue,
+        key_ptr: [*]const u8,
+        key_len: usize,
+        out: *value.JSValue,
+    ) bool {
+        const ctx = handleToContext(handle);
+        if (!obj_val.isObject()) return false;
+        const obj = obj_val.toPtr(object.JSObject);
+        const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+        const pool = ctx.hidden_class_pool orelse return false;
+        out.* = obj.getProperty(pool, atom) orelse return false;
+        return true;
+    }
+
+    pub export fn zttpSdkThrowError(
+        handle: *ModuleHandle,
+        name_ptr: [*]const u8,
+        name_len: usize,
+        msg_ptr: [*]const u8,
+        msg_len: usize,
+    ) value.JSValue {
+        const ctx = handleToContext(handle);
+        return util_mod.throwError(ctx, name_ptr[0..name_len], msg_ptr[0..msg_len]);
+    }
+
+    pub export fn zttpSdkResultOk(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        out.* = util_mod.createPlainResultOk(ctx, payload) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkResultErr(
+        handle: *ModuleHandle,
+        msg_ptr: [*]const u8,
+        msg_len: usize,
+        out: *value.JSValue,
+    ) bool {
+        const ctx = handleToContext(handle);
+        out.* = util_mod.createPlainResultErr(ctx, msg_ptr[0..msg_len]) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkResultErrValue(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        out.* = util_mod.createPlainResultErrValue(ctx, payload);
+        return true;
+    }
+
+    pub export fn zttpSdkResultErrs(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        out.* = util_mod.createPlainResultErrs(ctx, payload) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator {
+        const ctx = handleToContext(handle);
+        return &ctx.allocator;
+    }
+
+    pub export fn zttpSdkSha256(
+        data_ptr: [*]const u8,
+        data_len: usize,
+        out: [*]u8,
+    ) bool {
+        sha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len]) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkHmacSha256(
+        data_ptr: [*]const u8,
+        data_len: usize,
+        key_ptr: [*]const u8,
+        key_len: usize,
+        out: [*]u8,
+    ) bool {
+        hmacSha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len], key_ptr[0..key_len]) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkParseJson(
+        handle: *ModuleHandle,
+        json_ptr: [*]const u8,
+        json_len: usize,
+        out: *value.JSValue,
+    ) bool {
+        const ctx = handleToContext(handle);
+        const json = @import("builtins/json.zig");
+        out.* = json.parseJsonValue(ctx, json_ptr[0..json_len]) catch return false;
+        return true;
+    }
+
+    // SDK module-state envelope. The C-ABI deinit callback SDK modules provide
+    // takes only the state pointer (std.mem.Allocator is not C-ABI stable).
+    // Zigts wraps the envelope so the Context's internal deinit_fn signature
+    // stays unchanged; modules store their own allocator inside their state.
+    const SdkStateEnvelope = struct {
+        user_ptr: *anyopaque,
+        sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+        allocator: std.mem.Allocator,
+
+        fn envelopeDeinit(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const env: *SdkStateEnvelope = @ptrCast(@alignCast(ptr));
+            env.sdk_deinit(env.user_ptr);
+            env.allocator.destroy(env);
+        }
+    };
+
+    pub export fn zttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
+        if (!activeModuleOwnsStateSlot(slot)) return null;
+        const ctx = handleToContext(handle);
+        return getSdkModuleStatePtr(ctx, slot);
+    }
+
+    pub export fn zttpSdkSetModuleState(
+        handle: *ModuleHandle,
+        slot: usize,
+        user_ptr: *anyopaque,
+        sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+    ) bool {
+        if (!activeModuleOwnsStateSlot(slot)) return false;
+        const ctx = handleToContext(handle);
+        installSdkModuleState(ctx, slot, user_ptr, sdk_deinit) catch return false;
+        return true;
+    }
+
+    /// Read an SDK-installed module state pointer from a slot. Returns the
+    /// user pointer stashed inside the envelope, or null if the slot is empty.
+    /// Use this from zts-internal bootstrap code (e.g. `installStore`) that
+    /// needs to reach modules living in peer packages through the SDK boundary.
+    pub fn getSdkModuleStatePtr(ctx: *context.Context, slot: usize) ?*anyopaque {
+        const env = ctx.getModuleState(SdkStateEnvelope, slot) orelse return null;
+        return env.user_ptr;
+    }
+
+    /// Install an SDK-layout module state envelope from the zts side of the
+    /// peer-package boundary. Required whenever the runtime pre-installs state
+    /// for a module that reads via the SDK's `getModuleState` (which unwraps an
+    /// `SdkStateEnvelope`); writing a bare pointer would leave the module
+    /// reading the envelope bytes as user state.
+    pub fn installSdkModuleState(
+        ctx: *context.Context,
+        slot: usize,
+        user_ptr: *anyopaque,
+        sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+    ) !void {
+        const env = try ctx.allocator.create(SdkStateEnvelope);
+        env.* = .{ .user_ptr = user_ptr, .sdk_deinit = sdk_deinit, .allocator = ctx.allocator };
+        ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
+    }
+
+    pub export fn zttpSdkIsCallable(val: value.JSValue) bool {
+        return val.isCallable();
+    }
+
+    pub export fn zttpSdkReadFile(
+        handle: *ModuleHandle,
+        path_ptr: [*]const u8,
+        path_len: usize,
+        max_size: usize,
+        out_ptr: *[*]u8,
+        out_len: *usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        const buf = readFileChecked(ctx, path_ptr[0..path_len], max_size) catch return false;
+        out_ptr.* = buf.ptr;
+        out_len.* = buf.len;
+        return true;
+    }
+
+    pub export fn zttpSdkIsString(val: value.JSValue) bool {
+        return val.isStringOrRope();
+    }
+
+    pub export fn zttpSdkIsObject(val: value.JSValue) bool {
+        return val.isObject();
+    }
+
+    pub export fn zttpSdkIsArray(val: value.JSValue) bool {
+        return val.isArray();
+    }
+
+    pub export fn zttpSdkArrayLength(val: value.JSValue, out: *u32) bool {
+        if (!val.isArray()) return false;
+        const arr = val.toPtr(object.JSObject);
+        out.* = arr.getArrayLength();
+        return true;
+    }
+
+    pub export fn zttpSdkArrayGet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, out: *value.JSValue) bool {
+        _ = handle;
+        if (!arr_val.isArray()) return false;
+        const arr = arr_val.toPtr(object.JSObject);
+        out.* = arr.getIndex(index) orelse return false;
+        return true;
+    }
+
+    pub export fn zttpSdkArraySet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, val: value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        if (!arr_val.isArray()) return false;
+        const arr = arr_val.toPtr(object.JSObject);
+        ctx.setIndexChecked(arr, index, val) catch return false;
+        return true;
+    }
+
+    pub export fn zttpSdkCreateArray(handle: *ModuleHandle, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        const arr = ctx.createArray() catch return false;
+        out.* = arr.toValue();
+        return true;
+    }
+
+    pub export fn zttpSdkStringify(handle: *ModuleHandle, val: value.JSValue, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        const http_mod = @import("http.zig");
+        const js_str = http_mod.valueToJsonString(ctx, val) catch return false;
+        out.* = value.JSValue.fromPtr(js_str);
+        return true;
+    }
+
+    pub export fn zttpSdkObjectKeys(handle: *ModuleHandle, obj_val: value.JSValue, out: *value.JSValue) bool {
+        const ctx = handleToContext(handle);
+        if (!obj_val.isObject()) return false;
+        const obj = obj_val.toPtr(object.JSObject);
+        const pool = ctx.hidden_class_pool orelse return false;
+
+        const atoms = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return false;
+        defer ctx.allocator.free(atoms);
+
+        const arr = ctx.createArray() catch return false;
+        for (atoms, 0..) |atom, i| {
+            const name = util_mod.atomToString(atom, &ctx.atoms) orelse continue;
+            const name_val = ctx.createString(name) catch return false;
+            ctx.setIndexChecked(arr, @intCast(i), name_val) catch return false;
+        }
+        out.* = arr.toValue();
+        return true;
+    }
+
+    pub export fn zttpSdkReadEnv(
+        handle: *ModuleHandle,
+        name_ptr: [*]const u8,
+        name_len: usize,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        if (name_len >= 256) return false;
+        var buf: [256]u8 = undefined;
+        @memcpy(buf[0..name_len], name_ptr[0..name_len]);
+        buf[name_len] = 0;
+        const result = (readEnvChecked(ctx, buf[0..name_len :0]) catch return false) orelse return false;
+        out_ptr.* = result.ptr;
+        out_len.* = result.len;
+        return true;
+    }
+
+    pub export fn zttpSdkAllowsEnv(
+        handle: *ModuleHandle,
+        name_ptr: [*]const u8,
+        name_len: usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        return allowsEnvChecked(ctx, name_ptr[0..name_len]) catch return false;
+    }
+
+    pub export fn zttpSdkAllowsCacheNamespace(
+        handle: *ModuleHandle,
+        ns_ptr: [*]const u8,
+        ns_len: usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]) catch return false;
+    }
+
+    pub export fn zttpSdkAllowsSqlQuery(
+        handle: *ModuleHandle,
+        name_ptr: [*]const u8,
+        name_len: usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]) catch return false;
+    }
+
+    pub export fn zttpSdkAllowsSqlWrite(
+        handle: *ModuleHandle,
+        name_ptr: [*]const u8,
+        name_len: usize,
+    ) bool {
+        const ctx = handleToContext(handle);
+        return allowsSqlWriteChecked(ctx, name_ptr[0..name_len]) catch return false;
+    }
+
+    pub export fn zttpSdkArrayPush(
+        handle: *ModuleHandle,
+        arr_val: value.JSValue,
+        val: value.JSValue,
+    ) bool {
+        const ctx = handleToContext(handle);
+        if (!arr_val.isArray()) return false;
+        const arr = arr_val.toPtr(object.JSObject);
+        arr.arrayPush(ctx.allocator, val) catch return false;
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // SQLite bridge. Opaque handles are the raw sqlite3 / sqlite3_stmt
+    // pointers; the runtime owns their lifetime until close/finalize.
+    // -------------------------------------------------------------------------
+
+    const SdkSqliteDb = opaque {};
+    const SdkSqliteStmt = opaque {};
+
+    pub export fn zttpSdkSqliteOpen(
+        handle: *ModuleHandle,
+        path_ptr: [*]const u8,
+        path_len: usize,
+        out: **SdkSqliteDb,
+    ) bool {
+        const ctx = handleToContext(handle);
+        const db = openSqliteDbChecked(ctx, path_ptr[0..path_len]) catch return false;
+        out.* = @ptrCast(db.handle);
+        return true;
+    }
+
+    pub export fn zttpSdkSqliteClose(opaque_db: *SdkSqliteDb) void {
+        const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+        _ = sqlite_runtime.c.sqlite3_close(raw);
+    }
+
+    pub export fn zttpSdkSqliteChanges(opaque_db: *SdkSqliteDb) i32 {
+        const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+        return sqlite_runtime.c.sqlite3_changes(raw);
+    }
+
+    pub export fn zttpSdkSqliteLastInsertRowId(opaque_db: *SdkSqliteDb) i64 {
+        const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+        return sqlite_runtime.c.sqlite3_last_insert_rowid(raw);
+    }
+
+    pub export fn zttpSdkSqliteErrmsg(
+        opaque_db: *SdkSqliteDb,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) void {
+        const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+        const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(raw));
+        out_ptr.* = msg.ptr;
+        out_len.* = msg.len;
+    }
+
+    pub export fn zttpSdkSqlitePrepare(
+        opaque_db: *SdkSqliteDb,
+        sql_ptr: [*]const u8,
+        sql_len: usize,
+        out: **SdkSqliteStmt,
+    ) bool {
+        const raw_db: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+        var stmt: ?*sqlite_runtime.c.sqlite3_stmt = null;
+        var tail: [*c]const u8 = null;
+        const rc = sqlite_runtime.c.sqlite3_prepare_v2(raw_db, sql_ptr, @intCast(sql_len), &stmt, &tail);
+        if (rc != sqlite_runtime.c.SQLITE_OK or stmt == null) return false;
+        // prepare_v2 compiles only the FIRST statement and leaves `tail` pointing
+        // past it. A registered query with a second `;`-separated statement would
+        // otherwise run only the first and silently drop the rest while still
+        // reporting success. Fail closed instead (matches the positional-parameter
+        // rejection one layer up), leaving the DB un-mutated for that call.
+        if (tail != null) {
+            const consumed: usize = @intFromPtr(tail) - @intFromPtr(sql_ptr);
+            if (consumed < sql_len) {
+                for (sql_ptr[consumed..sql_len]) |c| {
+                    if (c != ' ' and c != '\t' and c != '\n' and c != '\r' and c != ';') {
+                        _ = sqlite_runtime.c.sqlite3_finalize(stmt.?);
+                        return false;
+                    }
+                }
+            }
+        }
+        out.* = @ptrCast(stmt.?);
+        return true;
+    }
+
+    pub export fn zttpSdkSqliteFinalize(opaque_stmt: *SdkSqliteStmt) void {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        _ = sqlite_runtime.c.sqlite3_finalize(raw);
+    }
+
+    pub export fn zttpSdkSqliteStep(opaque_stmt: *SdkSqliteStmt) i32 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_step(raw);
+    }
+
+    pub export fn zttpSdkSqliteReadonly(opaque_stmt: *SdkSqliteStmt) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_stmt_readonly(raw) != 0;
+    }
+
+    pub export fn zttpSdkSqliteStmtErrmsg(
+        opaque_stmt: *SdkSqliteStmt,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) void {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        const db = sqlite_runtime.c.sqlite3_db_handle(raw);
+        const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(db));
+        out_ptr.* = msg.ptr;
+        out_len.* = msg.len;
+    }
+
+    pub export fn zttpSdkSqliteParamCount(opaque_stmt: *SdkSqliteStmt) u32 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return @intCast(sqlite_runtime.c.sqlite3_bind_parameter_count(raw));
+    }
+
+    pub export fn zttpSdkSqliteParamName(
+        opaque_stmt: *SdkSqliteStmt,
+        index: u32,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        const c_name = sqlite_runtime.c.sqlite3_bind_parameter_name(raw, @intCast(index));
+        const normalized = sqlite_runtime.normalizeParamName(c_name) orelse return false;
+        out_ptr.* = normalized.ptr;
+        out_len.* = normalized.len;
+        return true;
+    }
+
+    pub export fn zttpSdkSqliteBindNull(opaque_stmt: *SdkSqliteStmt, index: u32) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_bind_null(raw, @intCast(index)) == sqlite_runtime.c.SQLITE_OK;
+    }
+
+    pub export fn zttpSdkSqliteBindInt64(opaque_stmt: *SdkSqliteStmt, index: u32, v: i64) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_bind_int64(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+    }
+
+    pub export fn zttpSdkSqliteBindDouble(opaque_stmt: *SdkSqliteStmt, index: u32, v: f64) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_bind_double(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+    }
+
+    pub export fn zttpSdkSqliteBindText(
+        opaque_stmt: *SdkSqliteStmt,
+        index: u32,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_bind_text(raw, @intCast(index), ptr, @intCast(len), null) == sqlite_runtime.c.SQLITE_OK;
+    }
+
+    pub export fn zttpSdkSqliteColumnCount(opaque_stmt: *SdkSqliteStmt) u32 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return @intCast(sqlite_runtime.c.sqlite3_column_count(raw));
+    }
+
+    pub export fn zttpSdkSqliteColumnName(
+        opaque_stmt: *SdkSqliteStmt,
+        index: u32,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) void {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        const c_name = sqlite_runtime.c.sqlite3_column_name(raw, @intCast(index));
+        const name = if (c_name) |p| std.mem.span(p) else "";
+        out_ptr.* = name.ptr;
+        out_len.* = name.len;
+    }
+
+    pub export fn zttpSdkSqliteColumnType(opaque_stmt: *SdkSqliteStmt, index: u32) i32 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_column_type(raw, @intCast(index));
+    }
+
+    pub export fn zttpSdkSqliteColumnInt64(opaque_stmt: *SdkSqliteStmt, index: u32) i64 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_column_int64(raw, @intCast(index));
+    }
+
+    pub export fn zttpSdkSqliteColumnDouble(opaque_stmt: *SdkSqliteStmt, index: u32) f64 {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        return sqlite_runtime.c.sqlite3_column_double(raw, @intCast(index));
+    }
+
+    pub export fn zttpSdkSqliteColumnText(
+        opaque_stmt: *SdkSqliteStmt,
+        index: u32,
+        out_ptr: *[*]const u8,
+        out_len: *usize,
+    ) void {
+        const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+        const text = sqlite_runtime.c.sqlite3_column_text(raw, @intCast(index));
+        if (text == null) {
+            out_ptr.* = "".ptr;
+            out_len.* = 0;
+            return;
+        }
+        const len: usize = @intCast(sqlite_runtime.c.sqlite3_column_bytes(raw, @intCast(index)));
+        out_ptr.* = text;
+        out_len.* = len;
+    }
+};
+
+// The SDK bridge is part of the binary ABI on native builds only.
+comptime {
+    if (!build_options.analyzer_only) _ = sdk_bridge;
+}
+
+// -------------------------------------------------------------------------
+// Return type classification
+// -------------------------------------------------------------------------
+
+/// Unified return type for verification, type checking, and bool checking.
+/// Each consumer maps this to its own internal representation.
+pub const ReturnKind = enum {
+    /// Plain value types - no caller-side check required
+    boolean,
+    number,
+    string,
+    object,
+    undefined,
+    unknown,
+
+    /// Optional types - verifier requires narrowing before use
+    optional_string,
+    optional_object,
+
+    /// Result type ({ok, value, error}) - verifier requires .ok check
+    result,
+
+    /// Lowercase JS-facing type name for signature advertisement (e.g. in
+    /// `zts modules --json`). Maps the verifier-oriented tags onto the
+    /// shapes a handler author actually sees at the call site.
+    pub fn jsTypeName(self: ReturnKind) []const u8 {
+        return switch (self) {
+            .boolean => "boolean",
+            .number => "number",
+            .string => "string",
+            .object => "object",
+            .undefined => "undefined",
+            .unknown => "unknown",
+            .optional_string => "string?",
+            .optional_object => "object?",
+            .result => "Result",
+        };
+    }
+};
+
+// -------------------------------------------------------------------------
+// Failure severity classification
+// -------------------------------------------------------------------------
+
+/// How the fault coverage checker treats a 2xx response on this function's
+/// failure path. Derived from the function's domain semantics:
+///   - critical: security/validation boundary - 2xx on failure is suspicious
+///   - expected: cache miss or missing config - 2xx is normal (graceful degradation)
+///   - upstream: external service failure - 2xx may be intentional (fallback)
+///   - none: function cannot fail (returns plain value)
+pub const FailureSeverity = enum {
+    /// Auth or validation failure - 2xx on failure path is a warning.
+    critical,
+    /// Cache miss, missing env, route not matched - 2xx is fine.
+    expected,
+    /// External service failure (fetchSync) - 2xx is informational.
+    upstream,
+    /// Function always succeeds (returns plain value, not Result/optional).
+    none,
+};
+
+// -------------------------------------------------------------------------
+// Module implementation capability declarations
+// -------------------------------------------------------------------------
+
+/// Capabilities consumed by a virtual module's Zig implementation.
+/// These are governance metadata for the module internals; they do not affect
+/// handler-level effect classification or RuntimePolicy derivation.
+pub const ModuleCapability = enum {
+    env,
+    clock,
+    random,
+    crypto,
+    stderr,
+    runtime_callback,
+    sqlite,
+    filesystem,
+    network,
+    policy_check,
+    websocket,
+};
+
+pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".fields.len;
+
+/// SHA-256 over a canonical capability list. Tag names are hashed in the
+/// order given, newline-separated, so equal sets produce equal digests.
+pub fn capabilityHash(caps: []const ModuleCapability) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (caps) |c| {
+        hasher.update(@tagName(c));
+        hasher.update("\n");
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+// -------------------------------------------------------------------------
+// Data provenance labels
+// -------------------------------------------------------------------------
+
+/// Classification of data sensitivity for compile-time information flow analysis.
+/// The flow checker tracks these labels through the handler's data flow graph,
+/// proving that sensitive data never reaches unauthorized sinks.
+pub const DataLabel = enum(u3) {
+    secret, // env vars with sensitive names (PASSWORD, KEY, TOKEN, SECRET, PRIVATE)
+    credential, // auth tokens, JWT payloads, bearer tokens
+    user_input, // request body, headers, query params, path params
+    config, // non-secret env configuration
+    internal, // cache values, internal state
+    external, // data from fetchSync responses
+    validated, // data that passed through validation
+};
+
+/// Bitset of data provenance labels. Propagates through operations via merge (OR).
+/// Compact enough (1 byte) to store per-node in the flow checker's label map.
+pub const LabelSet = packed struct(u8) {
+    secret: bool = false,
+    credential: bool = false,
+    user_input: bool = false,
+    config: bool = false,
+    internal: bool = false,
+    external: bool = false,
+    validated: bool = false,
+    _pad: u1 = 0,
+
+    pub const empty: LabelSet = .{};
+
+    /// Bitwise OR: union of two label sets.
+    pub fn merge(a: LabelSet, b: LabelSet) LabelSet {
+        const ai: u8 = @bitCast(a);
+        const bi: u8 = @bitCast(b);
+        return @bitCast(ai | bi);
+    }
+
+    /// Merge for conditional branches (ternary/if-else): taint labels use OR
+    /// (either branch can taint), but `validated` uses AND (a value is only
+    /// considered validated when ALL branches that produce it are validated;
+    /// otherwise one unvalidated path launders the flag for the entire ternary).
+    pub fn mergeConditional(a: LabelSet, b: LabelSet) LabelSet {
+        const ai: u8 = @bitCast(a);
+        const bi: u8 = @bitCast(b);
+        const validated_mask: u8 = 1 << @intFromEnum(DataLabel.validated);
+        return @bitCast(((ai | bi) & ~validated_mask) | ((ai & bi) & validated_mask));
+    }
+
+    /// Check if a specific label is present.
+    pub fn has(self: LabelSet, label: DataLabel) bool {
+        const bit: u3 = @intFromEnum(label);
+        const mask: u8 = @as(u8, 1) << bit;
+        const raw: u8 = @bitCast(self);
+        return (raw & mask) != 0;
+    }
+
+    /// Check if any label in the mask is present.
+    pub fn hasAny(self: LabelSet, mask: LabelSet) bool {
+        const si: u8 = @bitCast(self);
+        const mi: u8 = @bitCast(mask);
+        return (si & mi) != 0;
+    }
+
+    /// True if no labels are set.
+    pub fn isEmpty(self: LabelSet) bool {
+        const raw: u8 = @bitCast(self);
+        return (raw & 0x7F) == 0; // ignore pad bit
+    }
+
+    /// Create a LabelSet from a single label.
+    pub fn fromLabel(label: DataLabel) LabelSet {
+        const bit: u3 = @intFromEnum(label);
+        const mask: u8 = @as(u8, 1) << bit;
+        return @bitCast(mask);
+    }
+};
+
+// -------------------------------------------------------------------------
+// Contract extraction rules
+// -------------------------------------------------------------------------
+
+/// Category for extracted literals in the contract JSON.
+pub const ContractCategory = enum {
+    env,
+    cache_namespace,
+    sql_registration,
+    scope_name,
+    durable_key,
+    durable_step,
+    durable_signal,
+    durable_producer_key,
+    schema_compile,
+    request_schema,
+    route_pattern,
+    cookie_name,
+    cors_origin,
+    rate_limit_key,
+    service_call,
+    fetch_host,
+    /// A `zttp:workflow` `call`/`saga`/`fanout` target: a named co-located
+    /// sub-handler dispatched in-process. See `WorkflowCallInfo`.
+    workflow_call,
+    /// Partner-declared category. The actual tag string lives on
+    /// `ContractExtraction.extension_category` and is emitted under
+    /// `contract.json` at `extensions.<specifier>.categories`.
+    extension_specific,
+};
+
+/// Transform applied to extracted literal before storing.
+pub const ContractTransform = enum {
+    /// Extract hostname from URL string.
+    extract_host,
+    /// No transform, use raw literal.
+    identity,
+};
+
+/// Declarative rule for extracting a literal from a function argument.
+pub const ContractExtraction = struct {
+    /// Which argument position holds the literal (0-indexed).
+    arg_position: u8 = 0,
+    /// What category this literal belongs to in the contract.
+    category: ContractCategory,
+    /// Optional transform applied to the raw string.
+    transform: ?ContractTransform = null,
+    /// When true, the call sets a boolean flag rather than extracting a literal.
+    flag_only: bool = false,
+    /// Partner-declared category tag. Only meaningful when
+    /// `category == .extension_specific`. Borrowed reference for
+    /// comptime built-in declarations; owned for manifest-derived rules
+    /// (the owning store frees it).
+    extension_category: ?[]const u8 = null,
+};
+
+/// Boolean flags set on the contract when a function is imported or called.
+pub const ContractFlags = struct {
+    sets_scope_used: bool = false,
+    sets_durable_used: bool = false,
+    sets_durable_timers: bool = false,
+    sets_bearer_auth: bool = false,
+    sets_jwt_auth: bool = false,
+};
+
+// -------------------------------------------------------------------------
+// Algebraic laws
+// -------------------------------------------------------------------------
+
+/// Tag identifying which algebraic law applies to a function.
+/// Laws are the mechanism behind proven-equivalent deploys: the canonicalizer
+/// walks `BehaviorPath.io_sequence` and applies rewrites justified by these
+/// equations. Every variant here must be *unconditionally sound*, i.e. the
+/// rewrite is valid regardless of surrounding context. Conditional laws
+/// (commutation, reordering) are explicitly deferred until side-condition
+/// machinery exists.
+pub const LawKind = enum {
+    pure,
+    idempotent_call,
+    inverse_of,
+    absorbing,
+};
+
+/// An algebraic equation attached to a `FunctionBinding`.
+///
+/// - `.pure`: `f(args)` is a function of its arguments only. Two adjacent
+///   calls with structurally-equal arguments collapse to one.
+/// - `.idempotent_call`: `f(args); f(args)` has the same observable effect
+///   as `f(args)`. The only law allowed on write-effect functions.
+/// - `.inverse_of`: `g(f(x)) == x` where `g` is the named function.
+///   The name is resolved against the full registry in `validateBindings`;
+///   a dangling reference is a compile error.
+/// - `.absorbing`: when an argument matches `AbsorbingPattern.argument_shape`,
+///   the call is known to produce the fixed `residue` and can be folded.
+pub const Law = union(LawKind) {
+    pure: void,
+    idempotent_call: void,
+    inverse_of: []const u8,
+    absorbing: AbsorbingPattern,
+};
+
+/// Describes a recognizable argument shape and the residue the function
+/// produces when that shape appears. Used for dead-branch pruning during
+/// path canonicalization (e.g. `jwtVerify("")` is always `.err`).
+pub const AbsorbingPattern = struct {
+    /// Which argument position the pattern matches on (0-indexed).
+    arg_position: u8 = 0,
+    /// The shape the argument must have for the residue to apply.
+    argument_shape: ArgumentShape,
+    /// The fixed residue produced when the shape matches.
+    residue: Residue,
+
+    pub const ArgumentShape = enum {
+        empty_string_literal,
+        undefined_literal,
+    };
+
+    pub const Residue = enum {
+        result_err,
+        returns_undefined,
+        returns_false,
+    };
+};
+
+// -------------------------------------------------------------------------
+// Function binding
+// -------------------------------------------------------------------------
+
+/// Complete metadata for a single exported function.
+pub const FunctionBinding = struct {
+    /// Function name as visible from JS import.
+    name: []const u8,
+
+    /// Native implementation (for built-in modules using raw Context access).
+    /// Exactly one of func or module_func must be set.
+    func: ?object.NativeFn = null,
+
+    /// Sandboxed implementation (for third-party modules using ModuleHandle).
+    /// The registration system wraps this into a NativeFn automatically.
+    module_func: ?ModuleFn = null,
+
+    /// Argument count (for JS runtime).
+    arg_count: u8,
+
+    /// Required argument count for static checking. When null, every typed
+    /// parameter is required.
+    required_arg_count: ?u8 = null,
+
+    /// Effect classification for handler property derivation.
+    effect: EffectClass = .read,
+
+    /// Return type classification. Drives verifier, bool checker, and type checker.
+    returns: ReturnKind = .unknown,
+
+    /// Type signature for parameter types (mapped to TypeIndex during type init).
+    param_types: []const ReturnKind = &.{},
+
+    /// Whether trace/replay/durable should wrap this function.
+    /// false for setup-only functions (schemaCompile, schemaDrop, sql register).
+    traceable: bool = true,
+
+    /// Whether this function is safe to execute live during replay/`serve --test`
+    /// when no recorded I/O entry matches: its result must depend only on its
+    /// arguments and in-process setup (e.g. a compiled schema), with no read of
+    /// host/external or non-deterministic state. This is a stronger property
+    /// than `Law.pure` (which is algebraic - `env()` is `.pure` yet reads the
+    /// host environment), so it is an explicit, audited opt-in rather than
+    /// inferred. Default false: a replay-stubbed function returns the recorded
+    /// result or `undefined`.
+    replay_pure: bool = false,
+
+    /// Contract extraction rules for this function's arguments.
+    contract_extractions: []const ContractExtraction = &.{},
+
+    /// Flags set on the contract when this function is called.
+    contract_flags: ContractFlags = .{},
+
+    /// Data provenance labels for this function's return value.
+    /// Used by the flow checker to track sensitive data through the handler.
+    return_labels: LabelSet = .{},
+
+    /// Failure severity classification for fault coverage analysis.
+    /// Determines how the fault coverage checker treats a 2xx response
+    /// on this function's failure path.
+    failure_severity: FailureSeverity = .none,
+
+    /// Algebraic laws this function satisfies. Consumed by the behavior-path
+    /// canonicalizer (see `behavior_canonical.zig`) to justify rewrites for
+    /// proven-equivalent deploys. Every law must be unconditionally sound;
+    /// `validateBindings` rejects laws that contradict the declared effect.
+    laws: []const Law = &.{},
+
+    /// Get the NativeFn for this binding, wrapping ModuleFn if needed.
+    pub fn getNativeFn(comptime self: FunctionBinding) object.NativeFn {
+        if (self.func) |f| return f;
+        if (self.module_func) |mf| return wrapModuleFn(mf);
+        @compileError("FunctionBinding must set either func or module_func");
+    }
+
+    /// Convert to a legacy ModuleExport for backward compatibility.
+    pub fn toModuleExport(comptime self: FunctionBinding) resolver.ModuleExport {
+        return .{
+            .name = self.name,
+            .func = self.getNativeFn(),
+            .arg_count = self.arg_count,
+            .effect = self.effect,
+        };
+    }
+};
+
+// -------------------------------------------------------------------------
+// Module binding
+// -------------------------------------------------------------------------
+
+/// Complete declaration for a virtual module.
+/// One per module - the single source of truth for all consumers.
+pub const ModuleBinding = struct {
+    /// Module specifier as used in JS imports: "zttp:crypto", "zttp:redis".
+    specifier: []const u8,
+
+    /// Short name for trace/replay JSON keys and enum references.
+    name: []const u8,
+
+    /// All exported functions with full metadata.
+    exports: []const FunctionBinding,
+
+    /// Runtime capabilities consumed by the module's Zig implementation.
+    required_capabilities: []const ModuleCapability = &.{},
+
+    /// Whether this module needs per-runtime state.
+    stateful: bool = false,
+
+    /// State initialization callback (called during runtime init).
+    state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
+
+    /// State cleanup callback (called during context deinit).
+    state_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
+
+    /// Contract section name for contract.json output.
+    /// When non-null, the module gets its own top-level section.
+    contract_section: ?[]const u8 = null,
+
+    /// Whether the contract should feed into RuntimePolicy sandboxing.
+    sandboxable: bool = false,
+
+    /// Whether this module is compile-time only (skip trace/replay/durable).
+    comptime_only: bool = false,
+
+    /// Whether this module manages its own I/O wrapping (skip trace/replay/durable).
+    /// Used by modules like durable that implement their own write-ahead logging.
+    self_managed_io: bool = false,
+
+    /// Generate a legacy exports array from this binding.
+    pub fn toModuleExports(comptime self: ModuleBinding) [self.exports.len]resolver.ModuleExport {
+        var result: [self.exports.len]resolver.ModuleExport = undefined;
+        for (self.exports, 0..) |exp, i| {
+            result[i] = exp.toModuleExport();
+        }
+        return result;
+    }
+};
+
+// -------------------------------------------------------------------------
+// Registry validation
+// -------------------------------------------------------------------------
+
+/// Validate a set of module bindings at compile time.
+/// Produces clear compile errors for:
+///   - duplicate specifiers
+///   - duplicate function names within a module
+///   - state lifecycle inconsistency (stateful without init/deinit)
+///   - specifier format (must start with "zttp:" or "zttp-ext:")
+///   - function bindings missing both func and module_func
+pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
+    @setEvalBranchQuota(10000);
+    // Check specifier format and state consistency per module
+    for (bindings) |b| {
+        const builtin_prefix = std.mem.startsWith(u8, b.specifier, "zttp:");
+        const extension_prefix = std.mem.startsWith(u8, b.specifier, "zttp-ext:");
+        if (!builtin_prefix and !extension_prefix) {
+            @compileError("module specifier must start with 'zttp:' or 'zttp-ext:': " ++ b.specifier);
+        }
+        // state_init and state_deinit must be set together or not at all
+        if (b.state_init != null and b.state_deinit == null) {
+            @compileError("module has state_init but missing state_deinit: " ++ b.specifier);
+        }
+        if (b.state_init == null and b.state_deinit != null) {
+            @compileError("module has state_deinit but missing state_init: " ++ b.specifier);
+        }
+        if (findDuplicateRequiredCapability(b.required_capabilities)) |capability| {
+            @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ b.specifier);
+        }
+        for (b.exports) |f| {
+            if (f.func == null and f.module_func == null) {
+                @compileError("function binding missing both func and module_func: " ++ f.name);
+            }
+            if (f.laws.len > 0) {
+                if (b.comptime_only) {
+                    @compileError("laws are not allowed on comptime_only module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
+                }
+                if (b.self_managed_io) {
+                    @compileError("laws are not allowed on self_managed_io module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
+                }
+                if (findDuplicateLawKind(f.laws)) |kind| {
+                    @compileError("duplicate law '" ++ @tagName(kind) ++ "' on " ++ b.specifier ++ "." ++ f.name);
+                }
+                for (f.laws) |law| {
+                    if (f.effect == .write and law != .idempotent_call) {
+                        @compileError("only '.idempotent_call' may be declared on write-effect function " ++ b.specifier ++ "." ++ f.name ++ " (got '." ++ @tagName(std.meta.activeTag(law)) ++ "')");
+                    }
+                }
+            }
+            // replay_pure is a stronger claim than Law.pure ("depends only on
+            // args, no ambient state"; env() is .pure yet reads the host env).
+            // The flag is SDK-exposed, so enforce the invariant the resolver
+            // relies on at the binding boundary - otherwise the zttp:env leak
+            // class (a secret-labeled function running for real under serve
+            // --test) recurs one mis-declared flag away.
+            if (f.replay_pure) {
+                if (f.effect == .write) {
+                    @compileError("replay_pure is invalid on the write-effect function " ++ b.specifier ++ "." ++ f.name);
+                }
+                if (f.return_labels.secret or f.return_labels.credential) {
+                    @compileError("replay_pure is invalid on " ++ b.specifier ++ "." ++ f.name ++ ": a secret/credential return would leak host state into replayed/test responses");
+                }
+            }
+        }
+    }
+    // Check unique specifiers
+    for (bindings, 0..) |a, i| {
+        for (bindings[i + 1 ..]) |b| {
+            if (std.mem.eql(u8, a.specifier, b.specifier)) {
+                @compileError("duplicate module specifier: " ++ a.specifier);
+            }
+        }
+    }
+    // Check unique function names within each module. Different modules may
+    // export the same name because all proof metadata lookups must be keyed by
+    // (specifier, export_name).
+    for (bindings) |a| {
+        for (a.exports, 0..) |af, afi| {
+            for (a.exports[afi + 1 ..]) |af2| {
+                if (std.mem.eql(u8, af.name, af2.name)) {
+                    @compileError("duplicate function name within " ++ a.specifier ++ ": " ++ af.name);
+                }
+            }
+        }
+    }
+    // Resolve .inverse_of references. The target name must refer to an
+    // existing function somewhere in the registry, and the target must
+    // declare the symmetric inverse so `g(f(x)) = x` and `f(g(x)) = x`
+    // are both justified by paired declarations.
+    for (bindings) |b| {
+        for (b.exports) |f| {
+            for (f.laws) |law| {
+                switch (law) {
+                    .inverse_of => |target_name| {
+                        const target = findFunctionInRegistry(bindings, target_name) orelse {
+                            @compileError("inverse_of target '" ++ target_name ++ "' not found for " ++ b.specifier ++ "." ++ f.name);
+                        };
+                        if (!hasInverseLawPointingTo(target.laws, f.name)) {
+                            @compileError("inverse_of must be declared symmetrically: " ++
+                                b.specifier ++ "." ++ f.name ++ " declares inverse_of=" ++
+                                target_name ++ " but " ++ target_name ++ " does not declare inverse_of=" ++ f.name);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+}
+
+fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapability) ?ModuleCapability {
+    for (capabilities, 0..) |capability, i| {
+        for (capabilities[i + 1 ..]) |other| {
+            if (capability == other) return capability;
+        }
+    }
+    return null;
+}
+
+/// Return the first duplicated law *kind* within a single function's laws
+/// list. Duplicates are always a spec error: laws are unconditionally sound
+/// and idempotent, so declaring `[pure, pure]` or `[inverse_of "a", inverse_of "b"]`
+/// signals confusion, not intent.
+pub fn findDuplicateLawKind(comptime laws: []const Law) ?LawKind {
+    for (laws, 0..) |law, i| {
+        const kind = std.meta.activeTag(law);
+        for (laws[i + 1 ..]) |other| {
+            if (std.meta.activeTag(other) == kind) return kind;
+        }
+    }
+    return null;
+}
+
+/// Find a function binding by name across an entire registry. Used to
+/// resolve `.inverse_of` targets at comptime.
+pub fn findFunctionInRegistry(
+    comptime bindings: []const ModuleBinding,
+    comptime name: []const u8,
+) ?FunctionBinding {
+    for (bindings) |b| {
+        for (b.exports) |f| {
+            if (std.mem.eql(u8, f.name, name)) return f;
+        }
+    }
+    return null;
+}
+
+/// Check whether a laws list contains an `.inverse_of` pointing at `name`.
+pub fn hasInverseLawPointingTo(
+    comptime laws: []const Law,
+    comptime name: []const u8,
+) bool {
+    for (laws) |law| {
+        switch (law) {
+            .inverse_of => |target| {
+                if (std.mem.eql(u8, target, name)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------------
+// Tests
+// -------------------------------------------------------------------------
+
+test "FunctionBinding toModuleExport preserves fields" {
+    const fb = FunctionBinding{
+        .name = "testFn",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 2,
+        .effect = .write,
+        .returns = .boolean,
+    };
+
+    const me = comptime fb.toModuleExport();
+    try std.testing.expectEqualStrings("testFn", me.name);
+    try std.testing.expectEqual(@as(u8, 2), me.arg_count);
+    try std.testing.expectEqual(EffectClass.write, me.effect);
+}
+
+test "ModuleBinding toModuleExports generates correct array" {
+    const binding = ModuleBinding{
+        .specifier = "zttp:test",
+        .name = "test",
+        .exports = &.{
+            .{ .name = "fn1", .func = struct {
+                fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                    return value.JSValue.undefined_val;
+                }
+            }.f, .arg_count = 1 },
+            .{ .name = "fn2", .func = struct {
+                fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                    return value.JSValue.false_val;
+                }
+            }.f, .arg_count = 0, .effect = .write },
+        },
+    };
+
+    const exports = comptime binding.toModuleExports();
+    try std.testing.expectEqual(@as(usize, 2), exports.len);
+    try std.testing.expectEqualStrings("fn1", exports[0].name);
+    try std.testing.expectEqualStrings("fn2", exports[1].name);
+    try std.testing.expectEqual(EffectClass.read, exports[0].effect);
+    try std.testing.expectEqual(EffectClass.write, exports[1].effect);
+}
+
+test "wrapModuleFn generates valid NativeFn" {
+    const module_fn: ModuleFn = struct {
+        fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const native_fn = comptime wrapModuleFn(module_fn);
+    // Verify the wrapper compiles and has the right type
+    const ptr_info = @typeInfo(@TypeOf(native_fn));
+    try std.testing.expect(ptr_info == .pointer);
+}
+
+test "FunctionBinding with module_func wraps correctly" {
+    const fb = FunctionBinding{
+        .name = "sandboxedFn",
+        .module_func = struct {
+            fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.true_val;
+            }
+        }.f,
+        .arg_count = 1,
+    };
+
+    const me = comptime fb.toModuleExport();
+    try std.testing.expectEqualStrings("sandboxedFn", me.name);
+    try std.testing.expectEqual(@typeInfo(object.NativeFn), @typeInfo(@TypeOf(me.func)));
+}
+
+test "LabelSet merge combines labels" {
+    const a = LabelSet{ .secret = true };
+    const b = LabelSet{ .credential = true };
+    const merged = LabelSet.merge(a, b);
+    try std.testing.expect(merged.secret);
+    try std.testing.expect(merged.credential);
+    try std.testing.expect(!merged.user_input);
+}
+
+test "LabelSet has checks specific label" {
+    const labels = LabelSet{ .secret = true, .user_input = true };
+    try std.testing.expect(labels.has(.secret));
+    try std.testing.expect(labels.has(.user_input));
+    try std.testing.expect(!labels.has(.credential));
+    try std.testing.expect(!labels.has(.config));
+}
+
+test "LabelSet hasAny checks mask intersection" {
+    const labels = LabelSet{ .config = true, .internal = true };
+    const sensitive = LabelSet{ .secret = true, .credential = true };
+    const config_mask = LabelSet{ .config = true };
+    try std.testing.expect(!labels.hasAny(sensitive));
+    try std.testing.expect(labels.hasAny(config_mask));
+}
+
+test "LabelSet isEmpty" {
+    try std.testing.expect(LabelSet.empty.isEmpty());
+    try std.testing.expect(!(LabelSet{ .secret = true }).isEmpty());
+}
+
+test "LabelSet fromLabel" {
+    const label = LabelSet.fromLabel(.credential);
+    try std.testing.expect(label.credential);
+    try std.testing.expect(!label.secret);
+}
+
+test "FunctionBinding return_labels defaults to empty" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expect(fb.return_labels.isEmpty());
+}
+
+test "FunctionBinding failure_severity defaults to none" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expectEqual(FailureSeverity.none, fb.failure_severity);
+}
+
+test "ModuleBinding required_capabilities defaults to empty" {
+    const binding = ModuleBinding{
+        .specifier = "zttp:test",
+        .name = "test",
+        .exports = &.{},
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), binding.required_capabilities.len);
+}
+
+test "findDuplicateRequiredCapability returns duplicate capability" {
+    const duplicate = comptime findDuplicateRequiredCapability(&.{ .clock, .crypto, .clock });
+    try std.testing.expectEqual(ModuleCapability.clock, duplicate.?);
+}
+
+test "findDuplicateRequiredCapability ignores unique capabilities" {
+    const duplicate = comptime findDuplicateRequiredCapability(&.{ .clock, .crypto, .policy_check });
+    try std.testing.expect(duplicate == null);
+}
+
+test "requireCapability respects active module context" {
+    const handle: *ModuleHandle = @ptrFromInt(0x1);
+
+    const token = pushActiveModuleContext("zttp-ext:test", &.{ .clock, .stderr });
+    defer popActiveModuleContext(token);
+
+    try requireCapability(handle, .clock);
+    try std.testing.expect(hasCapability(handle, .stderr));
+    try std.testing.expectError(ModuleCapabilityError.MissingModuleCapability, requireCapability(handle, .random));
+}
+
+test "active module helpers enforce declared capabilities" {
+    const token = pushActiveModuleContext("zttp:test", &.{ .clock, .random, .stderr, .crypto });
+    defer popActiveModuleContext(token);
+
+    const now_ms = try nowMsForActiveModule();
+    try std.testing.expect(now_ms >= 0);
+
+    var random_bytes: [8]u8 = undefined;
+    try fillRandomForActiveModule(&random_bytes);
+
+    try writeStderrForActiveModule("");
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    try sha256ForActiveModule(&digest, "data");
+
+    var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
+    try hmacSha256ForActiveModule(&mac, "data", "key");
+}
+
+test "active module helpers reject missing capabilities" {
+    const token = pushActiveModuleContext("zttp:test", &.{.clock});
+    defer popActiveModuleContext(token);
+
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectError(ModuleCapabilityError.MissingModuleCapability, fillRandomForActiveModule(&bytes));
+}
+
+test "FunctionBinding laws defaults to empty" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expectEqual(@as(usize, 0), fb.laws.len);
+}
+
+test "findDuplicateLawKind detects repeats" {
+    const laws_dup = [_]Law{ .pure, .pure };
+    try std.testing.expectEqual(LawKind.pure, findDuplicateLawKind(&laws_dup).?);
+
+    const laws_ok = [_]Law{ .pure, .idempotent_call };
+    try std.testing.expect(findDuplicateLawKind(&laws_ok) == null);
+
+    const laws_mixed = [_]Law{
+        .{ .inverse_of = "decode" },
+        .{ .inverse_of = "other" },
+    };
+    try std.testing.expectEqual(LawKind.inverse_of, findDuplicateLawKind(&laws_mixed).?);
+}
+
+test "findDuplicateLawKind returns null for empty list" {
+    const laws = [_]Law{};
+    try std.testing.expect(findDuplicateLawKind(&laws) == null);
+}
+
+test "hasInverseLawPointingTo matches by target name" {
+    const laws = [_]Law{
+        .pure,
+        .{ .inverse_of = "base64Decode" },
+    };
+    try std.testing.expect(hasInverseLawPointingTo(&laws, "base64Decode"));
+    try std.testing.expect(!hasInverseLawPointingTo(&laws, "base64Encode"));
+    try std.testing.expect(!hasInverseLawPointingTo(&laws, ""));
+}
+
+test "findFunctionInRegistry locates binding across modules" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    const bindings = [_]ModuleBinding{
+        .{
+            .specifier = "zttp:a",
+            .name = "a",
+            .exports = &.{.{ .name = "alpha", .func = dummy, .arg_count = 0 }},
+        },
+        .{
+            .specifier = "zttp:b",
+            .name = "b",
+            .exports = &.{.{ .name = "beta", .func = dummy, .arg_count = 0 }},
+        },
+    };
+
+    try std.testing.expect(findFunctionInRegistry(&bindings, "alpha") != null);
+    try std.testing.expect(findFunctionInRegistry(&bindings, "beta") != null);
+    try std.testing.expect(findFunctionInRegistry(&bindings, "gamma") == null);
+}
+
+test "AbsorbingPattern fields set correctly" {
+    const pat = AbsorbingPattern{
+        .arg_position = 1,
+        .argument_shape = .empty_string_literal,
+        .residue = .result_err,
+    };
+    try std.testing.expectEqual(@as(u8, 1), pat.arg_position);
+    try std.testing.expectEqual(AbsorbingPattern.ArgumentShape.empty_string_literal, pat.argument_shape);
+    try std.testing.expectEqual(AbsorbingPattern.Residue.result_err, pat.residue);
+}
+
+test "Law union carries inverse_of payload" {
+    const law: Law = .{ .inverse_of = "decode" };
+    switch (law) {
+        .inverse_of => |target| try std.testing.expectEqualStrings("decode", target),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "validateBindings accepts paired inverse_of laws" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    comptime {
+        const bindings = [_]ModuleBinding{.{
+            .specifier = "zttp:codec",
+            .name = "codec",
+            .exports = &.{
+                .{
+                    .name = "encode",
+                    .func = dummy,
+                    .arg_count = 1,
+                    .effect = .none,
+                    .laws = &.{ .pure, .{ .inverse_of = "decode" } },
+                },
+                .{
+                    .name = "decode",
+                    .func = dummy,
+                    .arg_count = 1,
+                    .effect = .none,
+                    .laws = &.{ .pure, .{ .inverse_of = "encode" } },
+                },
+            },
+        }};
+        validateBindings(&bindings);
+    }
+}
+
+test "validateBindings accepts idempotent_call on write-effect function" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    comptime {
+        const bindings = [_]ModuleBinding{.{
+            .specifier = "zttp:kv",
+            .name = "kv",
+            .exports = &.{
+                .{
+                    .name = "kvSet",
+                    .func = dummy,
+                    .arg_count = 2,
+                    .effect = .write,
+                    .laws = &.{.idempotent_call},
+                },
+            },
+        }};
+        validateBindings(&bindings);
+    }
+}
+
+test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const wrapped = comptime wrapNativeFnWithCapabilities(
+        struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                _ = clockNowMsChecked() catch 0;
+                return value.JSValue.true_val;
+            }
+        }.f,
+        "zttp:test",
+        &.{.clock},
+    );
+
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
+}
+
+// Sandbox invariant: when a NativeFn produced by wrapModuleFnWithCapabilities
+// is invoked through its function pointer (the same path used by both the
+// interpreter's doCall .none branch and the JIT slow-path jitCall), the
+// wrapper's threadlocal active-module-context push must fire before the inner
+// user_fn observes the capability set. The interpreter's hot-builtin bypass
+// in interpreter/call.zig only fires for pure-function BuiltinIds (Math.*,
+// JSON.*, string slice/indexOf, parseInt/parseFloat), none of which consult
+// capabilities. If a future change broke that chain - by inlining a
+// capability-requiring builtin into the bypass switch, or by routing past
+// the wrapped pointer - this test would fail because the inner function would
+// observe an empty active context.
+test "wrapModuleFnWithCapabilities invocation activates threadlocal context" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const Observed = struct {
+        var saw_clock: bool = false;
+        var saw_random: bool = false;
+        var specifier_seen: []const u8 = "";
+    };
+    Observed.saw_clock = false;
+    Observed.saw_random = false;
+    Observed.specifier_seen = "";
+
+    const module_fn: ModuleFn = struct {
+        fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            Observed.saw_clock = activeContextHasCapability(.clock);
+            Observed.saw_random = activeContextHasCapability(.random);
+            if (active_module_context) |active_ctx| {
+                Observed.specifier_seen = active_ctx.specifier;
+            }
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zttp:invariant-test",
+        &.{.clock},
+    );
+
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+    try std.testing.expect(Observed.saw_clock);
+    try std.testing.expect(!Observed.saw_random);
+    try std.testing.expectEqualStrings("zttp:invariant-test", Observed.specifier_seen);
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
+
+    // Threadlocal must be torn down after the wrapped call returns so that
+    // a subsequent call from outside any module context does not inherit
+    // residual capabilities.
+    try std.testing.expect(active_module_context == null);
+}
+
+test "module call bumps the context cost meter" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const module_fn: ModuleFn = struct {
+        fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.f;
+
+    const wrapped = comptime wrapModuleFnWithCapabilities(
+        module_fn,
+        "zttp:sql",
+        &.{},
+    );
+
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    _ = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.count(.sql));
+    try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.total());
+}
+
+// Policy gating: the four `allows*ForActiveModule` helpers are the only
+// path SDK consumers reach to ask the runtime policy whether a given
+// name/host is admitted. The thread-local active context must declare
+// `.policy_check` (rule: a module that consults policy must say so in
+// its binding), and the underlying `ctx.capability_policy` decides
+// allow vs deny per category. These tests pin both halves so a future
+// refactor that drops either gate fails closed.
+test "allowsEnvForActiveModule denies when policy enabled and name not in allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .env = .{ .enabled = true, .values = &[_][]const u8{"ALLOWED"} },
+    };
+
+    const token = pushActiveModuleContext("zttp:env-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsEnvForActiveModule(ctx, "ALLOWED"));
+    try std.testing.expect(!try allowsEnvForActiveModule(ctx, "DENIED"));
+}
+
+test "allowsEnvForActiveModule allows everything when policy section is disabled" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    // ctx.capability_policy is default: env.enabled = false → permissive
+
+    const token = pushActiveModuleContext("zttp:env-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsEnvForActiveModule(ctx, "ANYTHING"));
+}
+
+test "allowsEnvForActiveModule fails closed when active module lacks policy_check" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Active module declares clock but not policy_check.
+    const token = pushActiveModuleContext("zttp:env-test", &.{.clock});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        ModuleCapabilityError.MissingModuleCapability,
+        allowsEnvForActiveModule(ctx, "DENIED"),
+    );
+}
+
+test "SDK module state slots are active-module scoped" {
+    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
+
+    const sql_token = pushActiveModuleContext("zttp:sql", &.{});
+    defer popActiveModuleContext(sql_token);
+
+    try std.testing.expect(activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.cache)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(15));
+}
+
+test "SDK filesystem reads require canonical allowlist entry" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext("zttp:service", &.{.filesystem});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        error.FilePathNotAllowed,
+        readFileChecked(ctx, "build.zig", 1024 * 1024),
+    );
+
+    try allowSdkFilePath(ctx, "build.zig");
+    const bytes = try readFileChecked(ctx, "build.zig", 1024 * 1024);
+    defer allocator.free(bytes);
+    try std.testing.expect(bytes.len > 0);
+}
+
+test "SDK sqlite opens require canonical allowlist entry" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext("zttp:sql", &.{.sqlite});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expectError(
+        error.SqlitePathNotAllowed,
+        openSqliteDbChecked(ctx, "default-deny-test.sqlite"),
+    );
+}
+
+test "allowsCacheNamespaceForActiveModule denies namespaces outside the allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
+    };
+
+    const token = pushActiveModuleContext("zttp:cache-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsCacheNamespaceForActiveModule(ctx, "sessions"));
+    try std.testing.expect(!try allowsCacheNamespaceForActiveModule(ctx, "secrets"));
+}
+
+test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    ctx.capability_policy = .{
+        .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"}, .queries = &.{} },
+    };
+
+    const token = pushActiveModuleContext("zttp:sql-test", &.{.policy_check});
+    defer popActiveModuleContext(token);
+
+    try std.testing.expect(try allowsSqlQueryForActiveModule(ctx, "listTodos"));
+    try std.testing.expect(!try allowsSqlQueryForActiveModule(ctx, "dropEverything"));
+    // Legacy policy JSON allow_queries entries have no operation metadata, so
+    // they remain explicit read/write overrides. Generated contract query
+    // entries are split in handler_policy.zig.
+    try std.testing.expect(try allowsSqlWriteForActiveModule(ctx, "listTodos"));
+    try std.testing.expect(!try allowsSqlWriteForActiveModule(ctx, "dropEverything"));
+}
+
+// Egress is unlike the other four policy categories: there is no
+// `allowsEgressHostForActiveModule` wrapper. Outbound `fetch` is a
+// runtime-initiated check (see zruntime.zig calling
+// `ctx.capability_policy.allowsEgressHost(host)`), not an SDK module
+// call routed through `active_module_context`, so it does not require
+// `.policy_check`. This test pins the raw `RuntimePolicy.allowsEgressHost`
+// semantics (case-insensitive host match). If a future change moves
+// outbound checks into an SDK module, the parity (a `*ForActiveModule`
+// wrapper, gated by `.policy_check`) must be added at the same time.
+test "allowsEgressHost is case-insensitive against the runtime policy" {
+    const policy: handler_policy.RuntimePolicy = .{
+        .egress = .{ .enabled = true, .values = &[_][]const u8{"api.example.com"} },
+    };
+    try std.testing.expect(policy.allowsEgressHost("api.example.com"));
+    try std.testing.expect(policy.allowsEgressHost("API.EXAMPLE.COM"));
+    try std.testing.expect(!policy.allowsEgressHost("evil.example.com"));
+}

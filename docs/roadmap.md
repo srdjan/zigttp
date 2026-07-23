@@ -11,13 +11,13 @@ behavior lives in [User Guide](user-guide.md).
 - Zig `0.16.0` as declared by `build.zig.zon`.
 - Threaded HTTP/1.1 server with per-request runtime isolation and decoded
   `Content-Length` or `Transfer-Encoding: chunked` request bodies.
-- Restricted JS/TS/TSX handler execution through `zigts`.
+- Restricted JS/TS/TSX handler execution through `zts`.
 - WebSocket gateway support with parsed peer close-code metadata.
-- The five core `zigttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
+- The five core `zttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
 - Compile-time checks for response paths, Result and optional handling,
   state isolation, active specs, flow properties, contracts, and module policy.
-- Built-in `zigttp:*` virtual modules listed in
+- Built-in `zttp:*` virtual modules listed in
   [Virtual Modules](virtual-modules/README.md).
 - Optional Studio and edge runtime builds via `-Dstudio` and `-Dedge`.
 
@@ -29,7 +29,7 @@ behavior lives in [User Guide](user-guide.md).
 - The runtime uses the threaded HTTP server path. The evented `std.Io`
   networking path is not a supported request backend.
 - Handlers receive raw `multipart/form-data` bodies from the HTTP server. Use
-  `decodeFormMultipart` from `zigttp:decode` or handler-owned parsing when a
+  `decodeFormMultipart` from `zttp:decode` or handler-owned parsing when a
   handler accepts multipart input.
 - Native JIT code has a per-runtime-context soft cap; when the cap is exceeded
   at a JIT compile safe point, compiled function pointers are cleared and the
@@ -48,12 +48,12 @@ behavior lives in [User Guide](user-guide.md).
 - Keep near-term module work limited to table-stakes gaps: fetch resilience,
   capability surfacing, and build-feature diagnostics. Cloud-adapter modules
   stay in a separate evaluated track.
-- Keep `zigttp help --all`, `packages/zigts/src/builtin_modules.zig`, and
+- Keep `zttp help --all`, `packages/zts/src/builtin_modules.zig`, and
   `packages/modules/module-specs/` as the sources of truth for CLI and module
   docs.
 - Add server-level rate limiting only if the standalone server becomes a
   first-class unproxied deployment target; application limits are currently
-  handled with `zigttp:ratelimit`.
+  handled with `zttp:ratelimit`.
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands are present in default docs.
 - Defer VM-loop dedupe until the FaaS hardening, engine facade, and measurement

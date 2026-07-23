@@ -5,7 +5,7 @@
 // room via getWebSockets(room).
 //
 // Run:
-//   zigttp serve examples/websocket/chat.ts --watch --prove --durable /tmp/chat -p 3000
+//   zttp serve examples/websocket/chat.ts --watch --prove --durable /tmp/chat -p 3000
 //
 // Connect two clients:
 //   websocat ws://localhost:3000/room/alpha
@@ -14,14 +14,14 @@
 // The first message you send on each client becomes its name; every
 // subsequent message appears on both clients as "<name>: <text>".
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 import {
   send,
   getWebSockets,
   serializeAttachment,
   deserializeAttachment,
   setAutoResponse,
-} from "zigttp:websocket";
+} from "zttp:websocket";
 
 type WebSocketProof = Spec<"state_isolated" | "no_secret_leakage">;
 

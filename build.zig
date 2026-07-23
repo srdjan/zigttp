@@ -5,69 +5,69 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
-    const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zigttp studio) into the dev CLI") orelse false;
-    const edge_enabled = b.option(bool, "edge", "Compile the in-process edge runtime (zigttp edge) into the binaries") orelse false;
-    const strip_enabled = b.option(bool, "strip", "Strip debug info from the installed zigttp/zigts/zigttp-runtime binaries (release artifacts)") orelse false;
-    const zigts_dep = b.dependency("zigts", .{
+    const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zttp studio) into the dev CLI") orelse false;
+    const edge_enabled = b.option(bool, "edge", "Compile the in-process edge runtime (zttp edge) into the binaries") orelse false;
+    const strip_enabled = b.option(bool, "strip", "Strip debug info from the installed zttp/zts/zttp-runtime binaries (release artifacts)") orelse false;
+    const zts_dep = b.dependency("zts", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const zigts_mod = zigts_dep.module("zigts");
-    const zigts_host_dep = b.dependency("zigts", .{
+    const zts_mod = zts_dep.module("zts");
+    const zts_host_dep = b.dependency("zts", .{
         .target = b.graph.host,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const zigts_host_mod = zigts_host_dep.module("zigts");
+    const zts_host_mod = zts_host_dep.module("zts");
 
-    const tools_dep = b.dependency("zigttp_tools", .{
+    const tools_dep = b.dependency("zttp_tools", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const zigts_cli_mod = tools_dep.module("zigts_cli");
+    const zts_cli_mod = tools_dep.module("zts_cli");
     const project_config_mod = tools_dep.module("project_config");
 
-    const runtime_dep = b.dependency("zigttp_runtime", .{
+    const runtime_dep = b.dependency("zttp_runtime", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
         .studio = studio_enabled,
         .edge = edge_enabled,
     });
-    const runtime_bench_dep = b.dependency("zigttp_runtime", .{
+    const runtime_bench_dep = b.dependency("zttp_runtime", .{
         .target = target,
         .optimize = bench_optimize,
         .perf_histogram = perf_histogram_enabled,
     });
     // The benchmark exe is built ReleaseFast. Its embedded_handler import must
-    // resolve `zigts` to the matching ReleaseFast module - wiring the Debug
-    // `zigts` here collides the module graph (file exists in modules zigts and
-    // zigts0) and breaks `zig build bench` on a Debug-default toolchain.
-    const zigts_bench_dep = b.dependency("zigts", .{
+    // resolve `zts` to the matching ReleaseFast module - wiring the Debug
+    // `zts` here collides the module graph (file exists in modules zts and
+    // zts0) and breaks `zig build bench` on a Debug-default toolchain.
+    const zts_bench_dep = b.dependency("zts", .{
         .target = target,
         .optimize = bench_optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const zigts_bench_mod = zigts_bench_dep.module("zigts");
+    const zts_bench_mod = zts_bench_dep.module("zts");
 
     // Pi dependency: used for the in-process expert tool tests below. The
-    // `pi_app` module itself is linked into the developer `zigttp` binary via
-    // packages/runtime/build.zig (cli_main), not here — the standalone `zigts`
+    // `pi_app` module itself is linked into the developer `zttp` binary via
+    // packages/runtime/build.zig (cli_main), not here — the standalone `zts`
     // analyzer binary is intentionally pi-free.
-    const pi_dep = b.dependency("zigttp_pi", .{
+    const pi_dep = b.dependency("zttp_pi", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
 
-    // Sub-dependencies needed for zigts test module construction
-    const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
+    // Sub-dependencies needed for zts test module construction
+    const zttp_sdk_dep = b.dependency("zttp_sdk", .{
         .target = target,
         .optimize = optimize,
     });
-    const zigttp_modules_dep = b.dependency("zigttp_modules", .{
+    const zttp_modules_dep = b.dependency("zttp_modules", .{
         .target = target,
         .optimize = optimize,
     });
@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
     const openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false;
     const sdk_target = b.option([]const u8, "sdk", "Emit generated SDK artifact (values: ts)");
-    const sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zigttp:sql validation");
+    const sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zttp:sql validation");
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking");
     const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
@@ -100,76 +100,76 @@ pub fn build(b: *std.Build) void {
     const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
-    // zigts tests
-    const zigts_tests_root = b.createModule(.{
-        .root_source_file = zigts_dep.path("src/root.zig"),
+    // zts tests
+    const zts_tests_root = b.createModule(.{
+        .root_source_file = zts_dep.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    const zigts_build_options = b.addOptions();
-    zigts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
-    zigts_build_options.addOption(bool, "analyzer_only", false);
-    zigts_tests_root.addOptions("build_options", zigts_build_options);
-    zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
-    zigts_tests_root.addImport("zigttp-modules", zigttp_modules_dep.module("zigttp-modules"));
-    zigts_tests_root.addCSourceFile(.{
-        .file = zigts_dep.path("deps/sqlite/sqlite3.c"),
+    const zts_build_options = b.addOptions();
+    zts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
+    zts_build_options.addOption(bool, "analyzer_only", false);
+    zts_tests_root.addOptions("build_options", zts_build_options);
+    zts_tests_root.addImport("zttp-sdk", zttp_sdk_dep.module("zttp-sdk"));
+    zts_tests_root.addImport("zttp-modules", zttp_modules_dep.module("zttp-modules"));
+    zts_tests_root.addCSourceFile(.{
+        .file = zts_dep.path("deps/sqlite/sqlite3.c"),
         .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
     });
-    zigts_tests_root.addIncludePath(zigts_dep.path("deps/sqlite"));
-    const zigts_tests = b.addTest(.{
-        .root_module = zigts_tests_root,
+    zts_tests_root.addIncludePath(zts_dep.path("deps/sqlite"));
+    const zts_tests = b.addTest(.{
+        .root_module = zts_tests_root,
     });
-    const run_zigts_tests = b.addRunArtifact(zigts_tests);
-    const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
-    zigts_test_step.dependOn(&run_zigts_tests.step);
+    const run_zts_tests = b.addRunArtifact(zts_tests);
+    const zts_test_step = b.step("test-zts", "Run zts unit tests");
+    zts_test_step.dependOn(&run_zts_tests.step);
 
     const sdk_test_shim_mod = b.createModule(.{
-        .root_source_file = zigttp_sdk_dep.path("src/test_shim.zig"),
+        .root_source_file = zttp_sdk_dep.path("src/test_shim.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
+            .{ .name = "zttp-sdk", .module = zttp_sdk_dep.module("zttp-sdk") },
         },
     });
     const sdk_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = zigttp_sdk_dep.path("src/test_root.zig"),
+            .root_source_file = zttp_sdk_dep.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
-                .{ .name = "zigttp-sdk-test-shim", .module = sdk_test_shim_mod },
+                .{ .name = "zttp-sdk", .module = zttp_sdk_dep.module("zttp-sdk") },
+                .{ .name = "zttp-sdk-test-shim", .module = sdk_test_shim_mod },
             },
         }),
     });
     const run_sdk_tests = b.addRunArtifact(sdk_tests);
-    const sdk_test_step = b.step("test-sdk", "Run zigttp-sdk tests");
+    const sdk_test_step = b.step("test-sdk", "Run zttp-sdk tests");
     sdk_test_step.dependOn(&run_sdk_tests.step);
 
     const modules_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = zigttp_modules_dep.path("src/test_root.zig"),
+            .root_source_file = zttp_modules_dep.path("src/test_root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zigttp-sdk", .module = zigttp_sdk_dep.module("zigttp-sdk") },
-                .{ .name = "zigttp-sdk-test-shim", .module = sdk_test_shim_mod },
+                .{ .name = "zttp-sdk", .module = zttp_sdk_dep.module("zttp-sdk") },
+                .{ .name = "zttp-sdk-test-shim", .module = sdk_test_shim_mod },
             },
         }),
     });
     const run_modules_tests = b.addRunArtifact(modules_tests);
-    const modules_test_step = b.step("test-modules", "Run zigttp-modules tests");
+    const modules_test_step = b.step("test-modules", "Run zttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
-    // zigttp proof-review package tests
+    // zttp proof-review package tests
     // Pass perf_histogram so the build-graph dedups this dep with the one
     // runtime threads through its own modules. Without it the option-set
-    // hashes diverge and Zig instantiates zigttp_proof_review twice, splitting
+    // hashes diverge and Zig instantiates zttp_proof_review twice, splitting
     // type identity across the proof-review/runtime boundary.
-    const proof_review_pkg_dep = b.dependency("zigttp_proof_review", .{
+    const proof_review_pkg_dep = b.dependency("zttp_proof_review", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
@@ -181,13 +181,13 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_dep.module("zigts") },
-                .{ .name = "zigts_cli", .module = zigts_cli_mod },
+                .{ .name = "zts", .module = zts_dep.module("zts") },
+                .{ .name = "zts_cli", .module = zts_cli_mod },
             },
         }),
     });
     const run_proof_review_pkg_tests = b.addRunArtifact(proof_review_pkg_tests);
-    const proof_review_pkg_test_step = b.step("test-proof-review", "Run zigttp proof-review package tests");
+    const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
     proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 
     const precompile_tests = b.addTest(.{
@@ -198,13 +198,13 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    precompile_tests.root_module.addImport("zigts", zigts_host_mod);
+    precompile_tests.root_module.addImport("zts", zts_host_mod);
     const run_precompile_tests = b.addRunArtifact(precompile_tests);
     const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
     precompile_test_step.dependOn(&run_precompile_tests.step);
 
     // Canonicalize/normalize tool tests. The tools `canonicalize.zig` is only
-    // reached through the `zigts_cli` named module, so its `test {}` blocks are
+    // reached through the `zts_cli` named module, so its `test {}` blocks are
     // not collected by any other test root; this step roots at it directly.
     const canonicalize_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -214,7 +214,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    canonicalize_tests.root_module.addImport("zigts", zigts_host_mod);
+    canonicalize_tests.root_module.addImport("zts", zts_host_mod);
     // edit_simulate.zig (reached from canonicalize.zig's test graph) resolves
     // the project SQL schema through the shared project_config module.
     canonicalize_tests.root_module.addImport("project_config", project_config_mod);
@@ -230,7 +230,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    prop_expect_tests.root_module.addImport("zigts", zigts_host_mod);
+    prop_expect_tests.root_module.addImport("zts", zts_host_mod);
     const run_prop_expect_tests = b.addRunArtifact(prop_expect_tests);
     const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
     prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
@@ -243,7 +243,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    rollout_tests.root_module.addImport("zigts", zigts_host_mod);
+    rollout_tests.root_module.addImport("zts", zts_host_mod);
     const run_rollout_tests = b.addRunArtifact(rollout_tests);
     const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
     rollout_test_step.dependOn(&run_rollout_tests.step);
@@ -256,29 +256,29 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    expert_tests.root_module.addImport("zigts", zigts_host_mod);
+    expert_tests.root_module.addImport("zts", zts_host_mod);
     const run_expert_tests = b.addRunArtifact(expert_tests);
-    const expert_test_step = b.step("test-expert", "Run zigts expert v1 contract tripwires");
+    const expert_test_step = b.step("test-expert", "Run zts expert v1 contract tripwires");
     expert_test_step.dependOn(&run_expert_tests.step);
 
-    // Analyzer dispatch + machine-command modules. zigts_cli.zig and the
+    // Analyzer dispatch + machine-command modules. zts_cli.zig and the
     // command files it imports (describe_rule.zig, search_rules.zig, ...) are
-    // only reached through the `zigts_cli` named module, which is never an
+    // only reached through the `zts_cli` named module, which is never an
     // addTest root, so their `test {}` blocks were collected by no suite. This
     // step roots at the dispatcher directly. Same rationale as canonicalize_tests.
-    const zigts_cli_tests = b.addTest(.{
+    const zts_cli_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/zigts_cli.zig"),
+            .root_source_file = tools_dep.path("src/zts_cli.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
         }),
     });
-    zigts_cli_tests.root_module.addImport("zigts", zigts_host_mod);
-    zigts_cli_tests.root_module.addImport("project_config", project_config_mod);
-    const run_zigts_cli_tests = b.addRunArtifact(zigts_cli_tests);
-    const zigts_cli_test_step = b.step("test-zigts-cli", "Run analyzer dispatch + machine-command module tests");
-    zigts_cli_test_step.dependOn(&run_zigts_cli_tests.step);
+    zts_cli_tests.root_module.addImport("zts", zts_host_mod);
+    zts_cli_tests.root_module.addImport("project_config", project_config_mod);
+    const run_zts_cli_tests = b.addRunArtifact(zts_cli_tests);
+    const zts_cli_test_step = b.step("test-zts-cli", "Run analyzer dispatch + machine-command module tests");
+    zts_cli_test_step.dependOn(&run_zts_cli_tests.step);
 
     const deploy_manifest_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -288,22 +288,22 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    deploy_manifest_tests.root_module.addImport("zigts", zigts_host_mod);
+    deploy_manifest_tests.root_module.addImport("zts", zts_host_mod);
     const run_deploy_manifest_tests = b.addRunArtifact(deploy_manifest_tests);
     const deploy_manifest_test_step = b.step("test-deploy-manifest", "Run deploy manifest renderer tests");
     deploy_manifest_test_step.dependOn(&run_deploy_manifest_tests.step);
 
     // Pi in-process tool registry tests. The pi package owns its own module
     // graph; shared tool cores (expert_meta, verify_paths_core, etc.) are
-    // consumed through the `zigts_cli` named module rather than relatively
+    // consumed through the `zts_cli` named module rather than relatively
     // imported, so the file graphs stay disjoint.
-    const pi_host_tools_dep = b.dependency("zigttp_tools", .{
+    const pi_host_tools_dep = b.dependency("zttp_tools", .{
         .target = b.graph.host,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const pi_zigts_cli_host_mod = pi_host_tools_dep.module("zigts_cli");
-    const pi_zigts_expert_skill_host_mod = pi_host_tools_dep.module("zigts_expert_skill");
+    const pi_zts_cli_host_mod = pi_host_tools_dep.module("zts_cli");
+    const pi_zts_expert_skill_host_mod = pi_host_tools_dep.module("zts_expert_skill");
     const pi_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = pi_dep.path("src/tests.zig"),
@@ -312,12 +312,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    pi_tests.root_module.addImport("zigts", zigts_host_mod);
-    pi_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
-    pi_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
+    pi_tests.root_module.addImport("zts", zts_host_mod);
+    pi_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
+    pi_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
     pi_tests.root_module.addImport("project_config", project_config_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
-    const expert_app_test_step = b.step("test-expert-app", "Run zigts expert in-process app tests");
+    const expert_app_test_step = b.step("test-expert-app", "Run zts expert in-process app tests");
     expert_app_test_step.dependOn(&run_pi_tests.step);
 
     // Cassette harness tests. Focused subset that only covers the
@@ -331,9 +331,9 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    cassette_tests.root_module.addImport("zigts", zigts_host_mod);
-    cassette_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
-    cassette_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
+    cassette_tests.root_module.addImport("zts", zts_host_mod);
+    cassette_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
+    cassette_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
     cassette_tests.root_module.addImport("project_config", project_config_mod);
     const run_cassette_tests = b.addRunArtifact(cassette_tests);
     const cassette_test_step = b.step("test-cassette", "Run pi provider cassette harness tests (offline)");
@@ -351,7 +351,7 @@ pub fn build(b: *std.Build) void {
     const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
     doc_links_step.dependOn(&doc_links.step);
 
-    // Internal precompile tool used by build steps and the zigts CLI.
+    // Internal precompile tool used by build steps and the zts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
         .root_module = b.createModule(.{
@@ -360,14 +360,14 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    precompile_exe.root_module.addImport("zigts", zigts_host_mod);
+    precompile_exe.root_module.addImport("zts", zts_host_mod);
 
     // Runtime template binary — used for self-contained outputs and direct
     // runtime tests. Minimal dependencies:
     // only what's needed to serve HTTP and execute a (possibly embedded)
-    // handler. No pi_app, no deploy, no zigts_cli.
+    // handler. No pi_app, no deploy, no zts_cli.
     const runtime_exe = b.addExecutable(.{
-        .name = "zigttp-runtime",
+        .name = "zttp-runtime",
         .root_module = runtime_dep.module("runtime_main"),
     });
 
@@ -459,11 +459,11 @@ pub fn build(b: *std.Build) void {
         // Runtime and user-facing CLI both depend on precompile completing.
         runtime_exe.step.dependOn(&run_precompile.step);
 
-        // Add the generated module (with zigts dependency for transpiled handlers)
+        // Add the generated module (with zts dependency for transpiled handlers)
         runtime_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_mod },
+                .{ .name = "zts", .module = zts_mod },
             },
         });
     } else {
@@ -471,19 +471,19 @@ pub fn build(b: *std.Build) void {
         runtime_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_mod },
+                .{ .name = "zts", .module = zts_mod },
             },
         });
     }
 
     b.installArtifact(runtime_exe);
 
-    // Developer CLI — the primary user-facing `zigttp` binary. Contains init,
+    // Developer CLI — the primary user-facing `zttp` binary. Contains init,
     // dev, serve, check, compile, prove, mock, link, expert, local deploy,
     // doctor, and the proof/proof-ledger tools. Hosted deploy account verbs
     // are intentionally absent from CLI dispatch in the beta.
     const cli_exe = b.addExecutable(.{
-        .name = "zigttp",
+        .name = "zttp",
         .root_module = runtime_dep.module("cli_main"),
     });
     if (embedded_handler_step) |step| {
@@ -491,14 +491,14 @@ pub fn build(b: *std.Build) void {
         cli_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_mod },
+                .{ .name = "zts", .module = zts_mod },
             },
         });
     } else {
         cli_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
             .imports = &.{
-                .{ .name = "zigts", .module = zigts_mod },
+                .{ .name = "zts", .module = zts_mod },
             },
         });
     }
@@ -506,20 +506,20 @@ pub fn build(b: *std.Build) void {
 
     // Compiler/analyzer CLI installed for IDE and CI integrations that call
     // the analyzer directly. Pi-free by design: the interactive `expert` and
-    // session `ledger` commands live only in the developer `zigttp` binary, so
+    // session `ledger` commands live only in the developer `zttp` binary, so
     // the ~37 KLOC agent (and its network/credential surface) is compiled
     // exactly once across the whole build.
-    const zigts_exe = b.addExecutable(.{
-        .name = "zigts",
+    const zts_exe = b.addExecutable(.{
+        .name = "zts",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zigts_main.zig"),
+            .root_source_file = b.path("zts_main.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
     });
-    zigts_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
-    b.installArtifact(zigts_exe);
+    zts_exe.root_module.addImport("zts_cli", zts_cli_mod);
+    b.installArtifact(zts_exe);
 
     // Strip debug info from the three installed binaries when -Dstrip is set.
     // The release workflow passes -Dstrip so shipped tarballs stay small; local
@@ -528,23 +528,23 @@ pub fn build(b: *std.Build) void {
     if (strip_enabled) {
         runtime_exe.root_module.strip = true;
         cli_exe.root_module.strip = true;
-        zigts_exe.root_module.strip = true;
+        zts_exe.root_module.strip = true;
     }
 
-    // Runtime purity guard: the deployable `zigttp-runtime` template and the
-    // pi-free `zigts` analyzer must carry no expert-agent / model-provider
-    // surface; the developer `zigttp` binary is the sole pi host. Enforces the
+    // Runtime purity guard: the deployable `zttp-runtime` template and the
+    // pi-free `zts` analyzer must carry no expert-agent / model-provider
+    // surface; the developer `zttp` binary is the sole pi host. Enforces the
     // invariant against future regressions. See scripts/check-runtime-purity.sh.
     const runtime_purity_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-runtime-purity.sh" });
     runtime_purity_cmd.addFileArg(cli_exe.getEmittedBin());
     runtime_purity_cmd.addFileArg(runtime_exe.getEmittedBin());
-    runtime_purity_cmd.addFileArg(zigts_exe.getEmittedBin());
+    runtime_purity_cmd.addFileArg(zts_exe.getEmittedBin());
     const runtime_purity_step = b.step("test-runtime-purity", "Assert the deployed runtime and analyzer carry no agent/provider surface");
     runtime_purity_step.dependOn(&runtime_purity_cmd.step);
 
-    // WebAssembly analyzer — the zigts static analysis pipeline compiled to
+    // WebAssembly analyzer — the zts static analysis pipeline compiled to
     // wasm64-freestanding for the in-browser proof playground. It runs the
-    // same `runCheckOnlyFromSource` path as `zigts check --json`, so the
+    // same `runCheckOnlyFromSource` path as `zts check --json`, so the
     // playground renders the real compiler's verdict, not an approximation.
     // wasm64 (not wasm32) because the value layer's NaN-boxing assumes 64-bit
     // pointers. `analyzer_only` strips the interpreter, JIT, GC, SQLite, libc.
@@ -552,76 +552,76 @@ pub fn build(b: *std.Build) void {
         .cpu_arch = .wasm64,
         .os_tag = .freestanding,
     });
-    const wasm_zigts_dep = b.dependency("zigts", .{
+    const wasm_zts_dep = b.dependency("zts", .{
         .target = wasm_target,
         .optimize = .ReleaseSmall,
         .analyzer_only = true,
     });
     const wasm_exe = b.addExecutable(.{
-        .name = "zigts-analyzer",
+        .name = "zts-analyzer",
         .root_module = b.createModule(.{
             .root_source_file = tools_dep.path("src/wasm_analyzer.zig"),
             .target = wasm_target,
             .optimize = .ReleaseSmall,
         }),
     });
-    wasm_exe.root_module.addImport("zigts", wasm_zigts_dep.module("zigts"));
+    wasm_exe.root_module.addImport("zts", wasm_zts_dep.module("zts"));
     // Reactor-style module: no _start, exported functions only.
     wasm_exe.entry = .disabled;
     wasm_exe.rdynamic = true;
     const wasm_install = b.addInstallArtifact(wasm_exe, .{
         .dest_dir = .{ .override = .{ .custom = "wasm" } },
     });
-    const wasm_step = b.step("wasm", "Build the zigts analyzer as a wasm64-freestanding module for the web playground");
+    const wasm_step = b.step("wasm", "Build the zts analyzer as a wasm64-freestanding module for the web playground");
     wasm_step.dependOn(&wasm_install.step);
 
-    const run_module_governance = b.addRunArtifact(zigts_exe);
+    const run_module_governance = b.addRunArtifact(zts_exe);
     run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });
     const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
     module_governance_step.dependOn(&run_module_governance.step);
 
-    // Golden-output checks that run the built `zigts` binary and assert
+    // Golden-output checks that run the built `zts` binary and assert
     // stdout is byte-identical to a fixture. Covers the direct-command v1 JSON
     // contract for `meta`, `verify-paths`, and `describe-rule`.
     // Regenerate the fixtures with `scripts/update-expert-goldens.sh` (or by
     // rerunning each command and redirecting into
     // packages/tools/tests/fixtures/expert/) after a deliberate contract
-    // change; see docs/zigts-expert-contract.md.
-    const expert_golden_step = b.step("test-expert-golden", "Check zigts direct tool contract against golden fixtures");
+    // change; see docs/zts-expert-contract.md.
+    const expert_golden_step = b.step("test-expert-golden", "Check zts direct tool contract against golden fixtures");
     const fixtures_root = "packages/tools/tests/fixtures/expert";
     // `meta --json` leads with `compiler_version`, which bumps every release.
     // Pinning it in a byte-exact golden made the fixture stale on each release
     // for no contract value. Assert the version-independent tail exactly (policy
     // hash, module hash, rule count, categories, mode) and only that the
     // version field is present, so the meaningful contract stays covered.
-    addExpertMetaGolden(b, expert_golden_step, zigts_exe, fixtures_root ++ "/meta.golden.json");
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertMetaGolden(b, expert_golden_step, zts_exe, fixtures_root ++ "/meta.golden.json");
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
         "--json",
     }, fixtures_root ++ "/verify_paths_clean.golden.json", 0);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/missing.ts",
         "--json",
     }, fixtures_root ++ "/verify_paths_missing.golden.json", 1);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{ "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "canonicalize",
         fixtures_root ++ "/canonicalize_mixed.ts",
         "--json",
     }, fixtures_root ++ "/canonicalize_mixed.golden.json", 0);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "canonicalize",
         fixtures_root ++ "/canonicalize_mixed.ts",
         "--json",
         "--simulate",
     }, fixtures_root ++ "/canonicalize_mixed_simulate.golden.json", 0);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
     }, fixtures_root ++ "/verify_paths_clean_text.golden.txt", 0);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "verify-paths",
         fixtures_root ++ "/missing.ts",
     }, fixtures_root ++ "/verify_paths_missing_text.golden.txt", 1);
@@ -629,20 +629,20 @@ pub fn build(b: *std.Build) void {
     // Exit-code contract for help/error paths. Stdout isn't pinned because
     // help text edits should not break tests; only the exit code is part of
     // the contract. The `expert` command now lives only in the developer
-    // `zigttp` binary (cli_exe); analyzer commands stay on `zigts` (zigts_exe).
+    // `zttp` binary (cli_exe); analyzer commands stay on `zts` (zts_exe).
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "expert", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "meta", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "meta", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "verify-paths", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "expert", "no-such-sub" }, 1);
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "ledger", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{"verify-paths"}, 1);
+    addExpertExitCheck(b, expert_golden_step, zts_exe, &.{"verify-paths"}, 1);
 
     // Machine-command unknown-flag contract (plan 009): a typo'd flag is a loud
     // non-zero exit via the clean dev-CLI mapping, not a silently-ignored arg
     // that yields wrong output for tool/CI callers; valid invocations stay
-    // exit 0. These run the developer `zigttp` binary (cli_exe), which owns the
-    // invalid-arguments message; the analyzer `zigts` binary shares the same
+    // exit 0. These run the developer `zttp` binary (cli_exe), which owns the
+    // invalid-arguments message; the analyzer `zts` binary shares the same
     // dispatch. Stdout is intentionally not pinned.
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "features", "--josn" }, 1);
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "features", "--json" }, 0);
@@ -669,7 +669,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         cli_run_cmd.addArgs(args);
     }
-    const cli_run_step = b.step("cli", "Run the zigttp CLI");
+    const cli_run_step = b.step("cli", "Run the zttp CLI");
     cli_run_step.dependOn(&cli_run_cmd.step);
 
     // Tests
@@ -682,13 +682,13 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
+            .{ .name = "zts", .module = zts_mod },
         },
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
-    // dependencies (deploy, pi_app wiring, zigts_cli delegation).
+    // dependencies (deploy, pi_app wiring, zts_cli delegation).
     const cli_tests = b.addTest(.{
         .root_module = runtime_dep.module("cli_main_tests"),
         .test_runner = .{
@@ -699,7 +699,7 @@ pub fn build(b: *std.Build) void {
     cli_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
+            .{ .name = "zts", .module = zts_mod },
         },
     });
     const run_cli_tests = b.addRunArtifact(cli_tests);
@@ -714,14 +714,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
     test_step.dependOn(&run_expert_tests.step);
-    test_step.dependOn(&run_zigts_cli_tests.step);
+    test_step.dependOn(&run_zts_cli_tests.step);
     test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&run_cassette_tests.step);
     test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&docs_drift.step);
     test_step.dependOn(&run_module_governance.step);
-    test_step.dependOn(&run_zigts_tests.step);
+    test_step.dependOn(&run_zts_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);
@@ -735,7 +735,7 @@ pub fn build(b: *std.Build) void {
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
+            .{ .name = "zts", .module = zts_mod },
         },
     });
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
@@ -755,7 +755,7 @@ pub fn build(b: *std.Build) void {
     server_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
+            .{ .name = "zts", .module = zts_mod },
         },
     });
     const run_server_tests = b.addRunArtifact(server_tests);
@@ -765,13 +765,13 @@ pub fn build(b: *std.Build) void {
 
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
-        .name = "zigttp-bench",
+        .name = "zttp-bench",
         .root_module = runtime_bench_dep.module("benchmark"),
     });
     bench_exe.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_bench_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zigts", .module = zigts_bench_mod },
+            .{ .name = "zts", .module = zts_bench_mod },
         },
     });
     // Bench is not installed by default. `zig build bench` still builds and
@@ -793,7 +793,7 @@ pub fn build(b: *std.Build) void {
     bench_check_cmd.has_side_effects = true;
 
     // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-runtime, zigts)");
+    const release_step = b.step("release", "Build optimized release binaries (zttp, zttp-runtime, zts)");
     release_step.dependOn(b.getInstallStep());
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
@@ -811,8 +811,8 @@ pub fn build(b: *std.Build) void {
     const smoke_v1_step = b.step("smoke-v1", "Run the v1 user-flow smoke test in a temp dir");
     smoke_v1_step.dependOn(&smoke_v1_cmd.step);
 
-    const panic_isolation_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-panic-isolation.sh", "--skip-build", "--zigttp" });
-    panic_isolation_cmd.addArg(b.getInstallPath(.bin, "zigttp"));
+    const panic_isolation_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-panic-isolation.sh", "--skip-build", "--zttp" });
+    panic_isolation_cmd.addArg(b.getInstallPath(.bin, "zttp"));
     panic_isolation_cmd.has_side_effects = true;
     panic_isolation_cmd.step.dependOn(b.getInstallStep());
     const panic_isolation_step = b.step("test-panic-isolation", "Run handler panic isolation E2E test");
@@ -837,7 +837,7 @@ pub fn build(b: *std.Build) void {
     // across a small synthesized corpus. Scaffolding for Phase 8 tuning of
     // reserveCapacity and intern_pool capacity hints.
     const compile_bench_exe = b.addExecutable(.{
-        .name = "zigttp-compile-bench",
+        .name = "zttp-compile-bench",
         .root_module = runtime_dep.module("compile_benchmark"),
     });
 
@@ -860,7 +860,7 @@ pub fn build(b: *std.Build) void {
 
     // System linking step (cross-handler contract verification)
     if (system_path) |sys_path| {
-        const run_system = b.addRunArtifact(zigts_exe);
+        const run_system = b.addRunArtifact(zts_exe);
         run_system.addArg("link");
         run_system.addArg(sys_path);
         if (b.args) |args| {
@@ -896,12 +896,12 @@ fn detectGitCommit(b: *std.Build) ?[]const u8 {
 fn addExpertGolden(
     b: *std.Build,
     step: *std.Build.Step,
-    zigts_exe: *std.Build.Step.Compile,
+    zts_exe: *std.Build.Step.Compile,
     args: []const []const u8,
     golden_rel: []const u8,
     expected_exit: u8,
 ) void {
-    addExpertRun(b, step, zigts_exe, args, expected_exit, golden_rel);
+    addExpertRun(b, step, zts_exe, args, expected_exit, golden_rel);
 }
 
 /// Version-agnostic golden for `meta --json`. The command's first field is
@@ -913,7 +913,7 @@ fn addExpertGolden(
 fn addExpertMetaGolden(
     b: *std.Build,
     step: *std.Build.Step,
-    zigts_exe: *std.Build.Step.Compile,
+    zts_exe: *std.Build.Step.Compile,
     golden_rel: []const u8,
 ) void {
     const golden = b.build_root.handle.readFileAlloc(b.graph.io, golden_rel, b.allocator, .unlimited) catch |err| {
@@ -924,7 +924,7 @@ fn addExpertMetaGolden(
         std.debug.panic("meta golden {s} is missing the {s} field", .{ golden_rel, marker });
     const version_independent_tail = golden[idx..];
 
-    const run = b.addRunArtifact(zigts_exe);
+    const run = b.addRunArtifact(zts_exe);
     run.addArgs(&.{ "meta", "--json" });
     run.expectExitCode(0);
     run.expectStdOutMatch("{\"compiler_version\":\"");
@@ -938,22 +938,22 @@ fn addExpertMetaGolden(
 fn addExpertExitCheck(
     b: *std.Build,
     step: *std.Build.Step,
-    zigts_exe: *std.Build.Step.Compile,
+    zts_exe: *std.Build.Step.Compile,
     args: []const []const u8,
     expected_exit: u8,
 ) void {
-    addExpertRun(b, step, zigts_exe, args, expected_exit, null);
+    addExpertRun(b, step, zts_exe, args, expected_exit, null);
 }
 
 fn addExpertRun(
     b: *std.Build,
     step: *std.Build.Step,
-    zigts_exe: *std.Build.Step.Compile,
+    zts_exe: *std.Build.Step.Compile,
     args: []const []const u8,
     expected_exit: u8,
     golden_rel: ?[]const u8,
 ) void {
-    const run = b.addRunArtifact(zigts_exe);
+    const run = b.addRunArtifact(zts_exe);
     run.addArgs(args);
     run.expectExitCode(expected_exit);
     // Zig 0.16's run-step still fails non-zero commands that write to stderr

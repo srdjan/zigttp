@@ -1,8 +1,8 @@
 # pi
 
-The coding agent behind the `zigttp expert` and `zigttp ledger` CLI commands.
-Linked only into the developer `zigttp` binary, never into the pi-free `zigts`
-analyzer binary or the deployed `zigttp-runtime`. Built in Zig against the
+The coding agent behind the `zttp expert` and `zttp ledger` CLI commands.
+Linked only into the developer `zttp` binary, never into the pi-free `zts`
+analyzer binary or the deployed `zttp-runtime`. Built in Zig against the
 Anthropic Messages and OpenAI Responses APIs, driven by a pure turn state
 machine with a compiler-aware tool registry and a mandatory compile-check veto
 on every edit.
@@ -33,7 +33,7 @@ packages/pi/
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip
-    veto.zig              # runVeto: wraps zigts_cli.edit_simulate for pre-apply gate
+    veto.zig              # runVeto: wraps zts_cli.edit_simulate for pre-apply gate
     transcript.zig        # OwnedEntry union + renderers
     expert_persona.zig    # buildSystemPromptWithContext: prologue + skill + live rule / feature / module snapshots + optional AGENTS.md
     repl.zig              # line-buffered REPL + slash command router
@@ -53,7 +53,7 @@ packages/pi/
     tools/                # compiler and Pi primitives exposed to the model
     session/
       session_id.zig      # 26-char ULID
-      paths.zig           # $HOME/.zigttp/sessions/<cwd_hash>/<sid>
+      paths.zig           # $HOME/.zttp/sessions/<cwd_hash>/<sid>
       events.zig          # Meta + NDJSON event append
       persister.zig       # OwnedEntry → events.jsonl
       reconstructor.zig   # events.jsonl → Transcript
@@ -84,7 +84,7 @@ time. Each surface has exactly one source:
 | Models             | `providers/models.zig`                              |
 | System prompt      | `expert_persona.buildSystemPromptWithContext`       |
 
-Adding to any of these requires a rebuild. No `~/.zigttp/models.json`
+Adding to any of these requires a rebuild. No `~/.zttp/models.json`
 loader, no `SYSTEM.md` or `APPEND_SYSTEM.md` override, no dynamic
 library loading.
 
@@ -96,7 +96,7 @@ truncates the project-context section first on overflow.
 
 `test_support/lockdown.zig` enforces the policy mechanically: a
 build-time seal test walks the source tree and fails if any `.zig`
-file contains `~/.zigttp/{skills,prompts,extensions,models.json}`,
+file contains `~/.zttp/{skills,prompts,extensions,models.json}`,
 `SYSTEM.md`, `APPEND_SYSTEM.md`, `dlopen`, `dlsym`, or `LoadLibrary`.
 
 ## Key features
@@ -126,7 +126,7 @@ REPL/RPC surfaces can inspect the generated source, diff, steps, and
 verification summary without a new payload.
 
 The v1 repair lane supports deterministic/idempotent handlers by wrapping
-`Date.now()` and `Math.random()` in `step(...)` from `zigttp:durable`.
+`Date.now()` and `Math.random()` in `step(...)` from `zttp:durable`.
 Other unsupported structural repairs return typed blockers rather than
 writing speculative code.
 
@@ -153,7 +153,7 @@ Suppress with `--no-context-files`.
 
 ### Policy-hash drift detection (`agent.zig:injectDriftNote`)
 
-`meta.json` stamps the `policy_hash` computed from `zigts.rule_registry.policyHash()`
+`meta.json` stamps the `policy_hash` computed from `zts.rule_registry.policyHash()`
 at session create. On `--resume`, if the binary's current hash differs
 from the stamped one, `injectDriftNote` prepends a `[policy drift]`
 system_note to the transcript so the model knows prior rule citations
@@ -161,15 +161,15 @@ may be stale against today's compiler.
 
 ### Session persistence (`session/`)
 
-`$HOME/.zigttp/sessions/<cwd_sha256>/<session_id>/` carries
+`$HOME/.zttp/sessions/<cwd_sha256>/<session_id>/` carries
 `meta.json`, `workspace.txt`, and append-only `events.jsonl`. `--resume`
 reconstructs the transcript; `--fork` branches with `parent_id`;
-`--continue` is an alias for `--resume`. `$ZIGTTP_SESSIONS_DIR`
+`--continue` is an alias for `--resume`. `$ZTTP_SESSIONS_DIR`
 overrides the root (used by tests).
 
 ### `--mode rpc` (line-delimited JSON-RPC 2.0)
 
-`zigttp expert --mode rpc` exposes the agent over stdio for programmatic
+`zttp expert --mode rpc` exposes the agent over stdio for programmatic
 clients. Methods: `turn`, `compact`, `session.info`, `tools.list`,
 `tools.invoke`, `skills.list`, `templates.{list,expand}`,
 `model.{list,set}`, `shutdown`. Turn events emit as `"event"`
@@ -177,14 +177,14 @@ notifications using the same `{v,k,d}` envelope as `events.jsonl`.
 
 ### CLI REPL
 
-`zigttp expert` runs a line-buffered CLI REPL for interactive work.
+`zttp expert` runs a line-buffered CLI REPL for interactive work.
 Natural-language lines go to the model; slash commands route to local
 compiler tools, session management, skills, templates, and ledger export.
 Non-interactive integrations use `--print`, `--mode json`, or
 `--mode rpc`.
 
 Proof deltas and witness details are persisted as session events. Inspect
-them with `/ledger export <path>`, `zigttp ledger`, `/witnesses <handler.ts>`,
+them with `/ledger export <path>`, `zttp ledger`, `/witnesses <handler.ts>`,
 or the browser proof workbench surfaced by `/studio <handler.ts>`.
 
 ### Backends
@@ -204,7 +204,7 @@ Model IDs select within the active provider and never change providers.
 `--model`, `/model`, and RPC `model.set` all use the same exact registry lookup.
 `/model` and RPC `model.list` show only the active provider's entries. A switch
 lasts for the current session and applies the registry request budget. The
-OpenAI entry records a 16,384-token output capability but keeps zigttp's
+OpenAI entry records a 16,384-token output capability but keeps zttp's
 8,192-token request policy.
 
 The model client is a vtable (`loop.ModelClient = {context, request_fn}`), so
@@ -307,8 +307,8 @@ uses. Reopen if a future UI needs a typed payload for rendering.
 ## See also
 
 - [../../README.md](../../README.md) — repository overview; pi is
-  linked from the zigts CLI section.
+  linked from the zts CLI section.
 - [../../docs/internals/architecture.md](../../docs/internals/architecture.md) — how
-  `pi_app` fits alongside `zigts`, `zigttp`, and `zigttp-runtime`.
-- [../../docs/internals/zigts-expert-contract.md](../../docs/internals/zigts-expert-contract.md)
-  — the v1 JSON contract for the `zigts` tool commands pi invokes.
+  `pi_app` fits alongside `zts`, `zttp`, and `zttp-runtime`.
+- [../../docs/internals/zts-expert-contract.md](../../docs/internals/zts-expert-contract.md)
+  — the v1 JSON contract for the `zts` tool commands pi invokes.

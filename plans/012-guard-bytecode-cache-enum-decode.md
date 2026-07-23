@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files listed as in scope. If any STOP condition occurs, stop and report; do not improvise around it. When done, update the status row for this plan in `plans/README.md`, unless a reviewer says they maintain the index.
 >
-> **Drift check, run first**: `git diff --name-only a4a731bd -- packages/zigts/src/bytecode_cache.zig packages/runtime/src/runtime_pool.zig`
+> **Drift check, run first**: `git diff --name-only a4a731bd -- packages/zts/src/bytecode_cache.zig packages/runtime/src/runtime_pool.zig`
 > Empty means no drift. If any path appears, re-open it and compare against the Current state excerpts before editing.
 
 ## Status
@@ -16,19 +16,19 @@
 
 ## Why this matters
 
-`bytecode_cache.zig`'s deserializer decodes on-disk/embedded tag bytes directly into exhaustive enums via raw `@enumFromInt`, with no range check. In Debug/ReleaseSafe builds this panics; in ReleaseFast it is undefined behavior. The embedded/self-extracting-binary fast path in `runtime_pool.zig` (`loadHandlerCached`) calls this deserializer with a bare `try` and no fallback, so any corrupted or version-skewed embedded bytecode payload (bit rot, a self-extracting binary trailer built by a different `zigts` version than the one running it) crashes every request on that binary instead of failing gracefully. The sibling dev-cache path four lines below already handles exactly this failure class: it wraps the same deserialize call in a `catch` that logs, disables the cache, and falls back to recompiling from source. This plan brings the enum decode itself to a catchable error and gives the embedded path the same graceful-degradation the dev path already has.
+`bytecode_cache.zig`'s deserializer decodes on-disk/embedded tag bytes directly into exhaustive enums via raw `@enumFromInt`, with no range check. In Debug/ReleaseSafe builds this panics; in ReleaseFast it is undefined behavior. The embedded/self-extracting-binary fast path in `runtime_pool.zig` (`loadHandlerCached`) calls this deserializer with a bare `try` and no fallback, so any corrupted or version-skewed embedded bytecode payload (bit rot, a self-extracting binary trailer built by a different `zts` version than the one running it) crashes every request on that binary instead of failing gracefully. The sibling dev-cache path four lines below already handles exactly this failure class: it wraps the same deserialize call in a `catch` that logs, disables the cache, and falls back to recompiling from source. This plan brings the enum decode itself to a catchable error and gives the embedded path the same graceful-degradation the dev path already has.
 
 ## Current state
 
-- `packages/zigts/src/bytecode_cache.zig:32-38` — `ConstantTag` (exhaustive `enum(u8)`, values 0-4).
-- `packages/zigts/src/bytecode_cache.zig:41-47` — `SpecialCode` (exhaustive `enum(u8)`, values 0-4).
-- `packages/zigts/src/bytecode.zig:564-568` — `PatternType` (exhaustive `enum(u2)`, values 0-2).
+- `packages/zts/src/bytecode_cache.zig:32-38` — `ConstantTag` (exhaustive `enum(u8)`, values 0-4).
+- `packages/zts/src/bytecode_cache.zig:41-47` — `SpecialCode` (exhaustive `enum(u8)`, values 0-4).
+- `packages/zts/src/bytecode.zig:564-568` — `PatternType` (exhaustive `enum(u2)`, values 0-2).
 - Raw decode sites in `bytecode_cache.zig` (verify exact line numbers first — they may have shifted):
   - `:247` — `const tag: ConstantTag = @enumFromInt(tag_byte);` inside `deserializeConstant`.
   - `:283` — `const code: SpecialCode = @enumFromInt(code_byte);`.
   - `:386` — `pattern.pattern_type = @enumFromInt(try reader.readByte());`.
   - `:389` — `pattern.url_atom = @enumFromInt(url_atom_raw);` — check the declared type of `url_atom` before including this site. If it resolves to a non-exhaustive enum (has a trailing `_,` variant, as `object.ClassId` does elsewhere in this codebase), `@enumFromInt` on it cannot panic and this site is out of scope; only include it if its enum is exhaustive.
-- `packages/zigts/src/bytecode_cache.zig:217-221` — existing `DeserializeError` set: `error{ EndOfStream, OutOfMemory, IncompleteRead }`.
+- `packages/zts/src/bytecode_cache.zig:217-221` — existing `DeserializeError` set: `error{ EndOfStream, OutOfMemory, IncompleteRead }`.
 - `packages/runtime/src/runtime_pool.zig:920-936` — `loadHandlerCached`'s embedded fast path: `try rt.loadFromCachedBytecode(entry_bytecode);` (line 934), no catch.
 - `packages/runtime/src/runtime_pool.zig:948-963` — the dev-cache sibling path's existing fallback pattern to model the fix after:
   ```zig
@@ -51,7 +51,7 @@
 | Purpose | Command | Expected on success |
 |---|---|---|
 | Build | `zig build` | exit 0 |
-| zigts tests (bytecode_cache) | `zig build test-zigts` | success |
+| zts tests (bytecode_cache) | `zig build test-zts` | success |
 | ZRuntime tests (runtime_pool) | `zig build test-zruntime` | success |
 | Format gate | `zig fmt --check build.zig packages/` | no output |
 | Full local gate | `bash scripts/verify.sh` | exit 0 |
@@ -60,7 +60,7 @@
 
 **In scope, the only files/directories to modify:**
 
-- `packages/zigts/src/bytecode_cache.zig` — replace the raw `@enumFromInt` at the confirmed exhaustive-enum sites with a bounds-checked decode that returns a new `DeserializeError` member (e.g. `error.InvalidTag`) instead of panicking/UB on an out-of-range byte.
+- `packages/zts/src/bytecode_cache.zig` — replace the raw `@enumFromInt` at the confirmed exhaustive-enum sites with a bounds-checked decode that returns a new `DeserializeError` member (e.g. `error.InvalidTag`) instead of panicking/UB on an out-of-range byte.
 - `packages/runtime/src/runtime_pool.zig` — give the embedded-bytecode fast path in `loadHandlerCached` (around line 934) a `catch` fallback. Exact recovery behavior needs a decision: the embedded path has no "source to recompile from" the way the dev path does (there is no `self.handler_code` guarantee at deploy time) — see Step 2 before assuming the dev path's exact recovery shape transfers directly.
 
 **Out of scope:**
@@ -72,7 +72,7 @@
 ## Git/workflow guidance
 
 - Branch: work on `main`.
-- Commit style: Conventional Commits, e.g. `fix(zigts): make malformed bytecode-cache tag bytes a catchable error`.
+- Commit style: Conventional Commits, e.g. `fix(zts): make malformed bytecode-cache tag bytes a catchable error`.
 - Do not push or open a PR unless the operator asks.
 
 ## Steps
@@ -81,7 +81,7 @@
 
 Add a small helper in `bytecode_cache.zig`, e.g. `fn decodeTag(comptime E: type, raw: u8) !E`, that uses `std.meta.intToEnum(E, raw)` (which already returns `error.InvalidEnumTag` for out-of-range values on exhaustive enums) instead of `@enumFromInt`. Map `std.meta.intToEnum`'s error to a `DeserializeError` member (add `InvalidTag` to the `DeserializeError` set at `:217-221`, or reuse `std.meta.IntToEnumError` directly if `DeserializeError` can absorb it cleanly — check how `SerializeError`/`DeserializeError` are declared and composed elsewhere in this file first, and match that pattern rather than inventing a new one). Apply it at the three (or four, per the `url_atom` check above) confirmed exhaustive-enum decode sites.
 
-**Verify**: `zig build test-zigts` -> success. Add a test that feeds an out-of-range tag byte into `deserializeConstant` (or the lowest-level function you changed) and asserts it returns an error rather than panicking — model after the existing `test "validateCache detects corruption"` (`bytecode_cache.zig:1011`).
+**Verify**: `zig build test-zts` -> success. Add a test that feeds an out-of-range tag byte into `deserializeConstant` (or the lowest-level function you changed) and asserts it returns an error rather than panicking — model after the existing `test "validateCache detects corruption"` (`bytecode_cache.zig:1011`).
 
 ### Step 2: Decide and implement the embedded-path fallback
 
@@ -106,7 +106,7 @@ All must hold:
 
 - [ ] All confirmed exhaustive-enum `@enumFromInt` decode sites in `bytecode_cache.zig`'s deserialization path return a catchable error on out-of-range input instead of panicking/UB.
 - [ ] The embedded-bytecode fast path in `runtime_pool.zig` no longer takes down the process on a malformed/corrupted payload; it fails the specific handler load/request cleanly (or recompiles, if source is genuinely available — see Step 2).
-- [ ] `zig build test-zigts test-zruntime` exit 0.
+- [ ] `zig build test-zts test-zruntime` exit 0.
 - [ ] `bash scripts/verify.sh` exit 0.
 - [ ] New tests prove both the decode-level error return and the embedded-path fallback, with the panic/crash reproduced pre-fix.
 - [ ] No files outside the in-scope list are modified.

@@ -4,7 +4,7 @@
 // the cached response without hitting upstream again.
 //
 // Run:
-//   zigttp serve examples/fetch/webhook.ts \
+//   zttp serve examples/fetch/webhook.ts \
 //     --outbound-host billing.example \
 //     --durable /tmp/webhook -p 3000
 //
@@ -17,8 +17,8 @@
 //   # The second call replays from <durable>/fetch/<hash>.step —
 //   # upstream sees exactly one request for key charge-abc-123.
 
-import type { Spec } from "zigttp:types";
-import { fetch } from "zigttp:fetch";
+import type { Spec } from "zttp:types";
+import { fetch } from "zttp:fetch";
 
 type WebhookProof = Spec<"state_isolated" | "no_secret_leakage">;
 

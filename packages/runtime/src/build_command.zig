@@ -1,4 +1,4 @@
-//! `zigttp compile`, `zigttp build`, and `zigttp deploy --local` — the three
+//! `zttp compile`, `zttp build`, and `zttp deploy --local` — the three
 //! commands that turn a handler into a self-contained binary. They share the
 //! artifact pipeline (prepareProjectArtifact + buildArtifact), so they live
 //! together. Dispatch and error-to-exit-code translation stay in dev_cli.main;
@@ -7,10 +7,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
-const precompile = zigts_cli.precompile;
-const deploy_manifest = zigts_cli.deploy_manifest;
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
+const precompile = zts_cli.precompile;
+const deploy_manifest = zts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
@@ -27,7 +27,7 @@ const no_attest_flag: []const u8 = "--no-attest";
 const no_attest_help_block: []const u8 =
     \\  --no-attest           Skip proof-receipt signing for this build.
     \\                        Default is to sign with the persistent
-    \\                        identity at ~/.zigttp/attest/keypair.bin.
+    \\                        identity at ~/.zttp/attest/keypair.bin.
     \\
 ;
 
@@ -176,8 +176,8 @@ const ProjectArtifact = struct {
     }
 };
 
-/// Discover `zigttp.json`, resolve the handler entry, and compute the artifact
-/// output path under `<root>/.zigttp/<subdir>/<project-name>`. Creates the
+/// Discover `zttp.json`, resolve the handler entry, and compute the artifact
+/// output path under `<root>/.zttp/<subdir>/<project-name>`. Creates the
 /// parent dir for the default path; for an explicit override, trusts the
 /// caller (avoids macOS symlink quirks like `/tmp` → `/private/tmp`).
 fn prepareProjectArtifact(
@@ -199,7 +199,7 @@ fn prepareProjectArtifact(
     const output_path = if (output_override) |p|
         try allocator.dupe(u8, p)
     else blk: {
-        const path = try std.fs.path.resolve(allocator, &.{ project.root_dir, ".zigttp", subdir, project_name });
+        const path = try std.fs.path.resolve(allocator, &.{ project.root_dir, ".zttp", subdir, project_name });
         errdefer allocator.free(path);
         if (std.fs.path.dirname(path)) |parent| {
             std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent) catch |err| switch (err) {
@@ -365,7 +365,7 @@ fn failLocalDeployCommandArgs(err: LocalDeployArgError) !void {
             return error.InvalidArgument;
         },
         .unknown_arg => |arg| {
-            std.debug.print("Unknown argument for `zigttp deploy --local`: {s}\n\n", .{arg});
+            std.debug.print("Unknown argument for `zttp deploy --local`: {s}\n\n", .{arg});
             printLocalDeployHelp();
             return error.UnknownOption;
         },
@@ -388,7 +388,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
     var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "deploy", null);
     defer artifact.deinit(allocator);
 
-    // proof_ledger.appendEvent writes the relative path `.zigttp/proofs.jsonl`,
+    // proof_ledger.appendEvent writes the relative path `.zttp/proofs.jsonl`,
     // so anchor CWD at the project root before buildArtifact emits the ledger
     // row. The summary block below advertises the ledger; failure here must
     // surface, not silently warn.
@@ -406,12 +406,12 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         \\Deployed: {s}
         \\Run:      {s}
         \\Try:      curl http://{s}:{d}/
-        \\Ledger:   .zigttp/proofs.jsonl (kind=deploy)
+        \\Ledger:   .zttp/proofs.jsonl (kind=deploy)
         \\
         \\Note:     serves plain HTTP and binds 127.0.0.1 by default. For public
         \\          traffic, terminate TLS at a reverse proxy and set the host.
         \\
-        \\Inspect the proof ledger: zigttp proofs list
+        \\Inspect the proof ledger: zttp proofs list
         \\
     , .{ artifact.output_path, artifact.output_path, artifact.project.host, artifact.project.port });
 }
@@ -425,7 +425,7 @@ fn buildAttestationJws(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     bytecode: []const u8,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
 ) !?[]u8 {
     return try attest_build_receipt.buildJws(
@@ -439,11 +439,11 @@ fn buildAttestationJws(
 
 fn serializeContractJson(
     allocator: std.mem.Allocator,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
 ) ![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
-    zigts.writeContractJson(contract, &output.writer) catch |err| switch (err) {
+    zts.writeContractJson(contract, &output.writer) catch |err| switch (err) {
         // Allocating.Writer intentionally erases allocator errors behind its
         // generic writer error. At this boundary allocation is its only
         // failure source, so restore the actionable cause for callers.
@@ -458,7 +458,7 @@ const ArtifactTailInput = struct {
     attest_requested: bool,
     bytecode: []const u8,
     dep_bytecodes: []const []const u8,
-    contract: ?*const zigts.HandlerContract,
+    contract: ?*const zts.HandlerContract,
 };
 
 const ArtifactTailCapabilities = struct {
@@ -466,14 +466,14 @@ const ArtifactTailCapabilities = struct {
     serialize_contract: *const fn (
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
-        contract: *const zigts.HandlerContract,
+        contract: *const zts.HandlerContract,
     ) anyerror![]u8,
     sign_contract: *const fn (
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
         contract_json: []const u8,
         bytecode: []const u8,
-        contract: *const zigts.HandlerContract,
+        contract: *const zts.HandlerContract,
         runtime_policy_sha256: []const u8,
     ) anyerror!?[]u8,
     create_artifact: *const fn (
@@ -488,7 +488,7 @@ const ArtifactTailCapabilities = struct {
 fn serializeContractCapability(
     _: ?*anyopaque,
     allocator: std.mem.Allocator,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
 ) ![]u8 {
     return serializeContractJson(allocator, contract);
 }
@@ -498,7 +498,7 @@ fn signContractCapability(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     bytecode: []const u8,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
 ) !?[]u8 {
     return buildAttestationJws(
@@ -526,8 +526,8 @@ fn createArtifactCapability(
             // is missing alongside the dev CLI.
             std.debug.print(
                 \\
-                \\Aborted: zigttp-runtime template not found at '{s}'.
-                \\Install zigttp-runtime alongside zigttp, or rebuild via `zig build`.
+                \\Aborted: zttp-runtime template not found at '{s}'.
+                \\Install zttp-runtime alongside zttp, or rebuild via `zig build`.
                 \\
             , .{runtime_binary});
         } else {
@@ -556,9 +556,9 @@ fn writeArtifactTail(
     defer if (contract_json) |json| allocator.free(json);
 
     const policy = if (input.contract) |contract|
-        zigts.handler_policy.contractToRuntimePolicy(contract)
+        zts.handler_policy.contractToRuntimePolicy(contract)
     else
-        zigts.handler_policy.RuntimePolicy{};
+        zts.handler_policy.RuntimePolicy{};
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 
@@ -601,7 +601,7 @@ fn writeArtifactTail(
 
 fn appendDeployLedgerEntry(
     allocator: std.mem.Allocator,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
     handler_path: []const u8,
     sha_hex: []const u8,
     service_name: []const u8,
@@ -649,7 +649,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
         std.log.warn("--no-attest: this artifact will be built without a signed proof receipt", .{});
     }
 
-    const source = zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
+    const source = zts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
         return err;
     };
@@ -666,7 +666,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
         // the remediation hint so the dev knows where to look.
         std.debug.print(
             \\
-            \\Aborted: handler did not compile. Run `zigttp check` to inspect.
+            \\Aborted: handler did not compile. Run `zttp check` to inspect.
             \\
         , .{});
         return err;
@@ -764,12 +764,12 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
 
 fn printCompileHelp() void {
     const help =
-        \\zigttp compile <handler.ts> -o <output>
+        \\zttp compile <handler.ts> -o <output>
         \\
         \\Compile a handler into a self-contained binary.
         \\Verification is mandatory: the handler must pass all checks.
-        \\The output binary wraps the zigttp runtime template, which must be
-        \\installed alongside zigttp as `zigttp-runtime`.
+        \\The output binary wraps the zttp runtime template, which must be
+        \\installed alongside zttp as `zttp-runtime`.
         \\
         \\Options:
         \\  -o, --output <PATH>   Output binary path (required)
@@ -777,8 +777,8 @@ fn printCompileHelp() void {
     ++ no_attest_help_block ++
         \\  --help                Show this help
         \\
-        \\For a no-args version that auto-detects from zigttp.json, use
-        \\`zigttp build` instead.
+        \\For a no-args version that auto-detects from zttp.json, use
+        \\`zttp build` instead.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -786,11 +786,11 @@ fn printCompileHelp() void {
 
 fn printBuildHelp() void {
     const help =
-        \\zigttp build [-o <output>] [--no-attest]
+        \\zttp build [-o <output>] [--no-attest]
         \\
         \\Verify the handler in this project and emit a self-contained binary.
-        \\Reads zigttp.json from the current directory or any parent.
-        \\Default output path is `.zigttp/build/<project-name>`.
+        \\Reads zttp.json from the current directory or any parent.
+        \\Default output path is `.zttp/build/<project-name>`.
         \\
         \\Options:
         \\  -o, --output <PATH>   Override the output binary path
@@ -804,16 +804,16 @@ fn printBuildHelp() void {
 
 fn printLocalDeployHelp() void {
     const help =
-        \\zigttp deploy [--no-attest]
+        \\zttp deploy [--no-attest]
         \\  (--local is an accepted alias; deploy takes no arguments)
         \\
         \\Build a self-contained binary for the handler in this project and
         \\record the deploy in the local proof ledger. No cloud credentials,
         \\Docker, or network access required.
         \\
-        \\Reads zigttp.json from the current directory or any parent.
-        \\Output: .zigttp/deploy/<project-name>
-        \\Ledger: .zigttp/proofs.jsonl (appends a kind=deploy row)
+        \\Reads zttp.json from the current directory or any parent.
+        \\Output: .zttp/deploy/<project-name>
+        \\Ledger: .zttp/proofs.jsonl (appends a kind=deploy row)
         \\
         \\Options:
         \\  --local               Use the local target (this command)
@@ -842,7 +842,7 @@ const ArtifactTailProbe = struct {
     fn recordSerialization(
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
-        contract: *const zigts.HandlerContract,
+        contract: *const zts.HandlerContract,
     ) ![]u8 {
         const self = fromContext(context);
         self.serialize_calls += 1;
@@ -854,7 +854,7 @@ const ArtifactTailProbe = struct {
         allocator: std.mem.Allocator,
         _: []const u8,
         _: []const u8,
-        _: *const zigts.HandlerContract,
+        _: *const zts.HandlerContract,
         runtime_policy_sha256: []const u8,
     ) !?[]u8 {
         const self = fromContext(context);
@@ -895,7 +895,7 @@ const ArtifactTailProbe = struct {
 
 fn serializeContractForAllocationTest(
     allocator: std.mem.Allocator,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
 ) !void {
     const json = try serializeContractJson(allocator, contract);
     defer allocator.free(json);
@@ -904,14 +904,14 @@ fn serializeContractForAllocationTest(
 test "serializeContractJson returns complete parseable JSON" {
     const allocator = std.testing.allocator;
     const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zigts.handler_contract.emptyContract(path);
+    var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
 
     const json = try serializeContractJson(allocator, &contract);
     defer allocator.free(json);
     try std.testing.expect(json.len > 0);
 
-    var parsed = try zigts.handler_contract.parseFromJson(allocator, json);
+    var parsed = try zts.handler_contract.parseFromJson(allocator, json);
     defer parsed.deinit(allocator);
     try std.testing.expectEqualStrings("handler.ts", parsed.handler.path);
 }
@@ -919,7 +919,7 @@ test "serializeContractJson returns complete parseable JSON" {
 test "serializeContractJson cleans every allocation failure" {
     const allocator = std.testing.allocator;
     const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zigts.handler_contract.emptyContract(path);
+    var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
 
     try std.testing.checkAllAllocationFailures(
@@ -932,7 +932,7 @@ test "serializeContractJson cleans every allocation failure" {
 test "artifact tail stops before signing or creation when serialization fails" {
     const allocator = std.testing.allocator;
     const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zigts.handler_contract.emptyContract(path);
+    var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
 
     var tmp = std.testing.tmpDir(.{});
@@ -968,7 +968,7 @@ test "artifact tail stops before signing or creation when serialization fails" {
         try std.testing.expectEqual(@as(usize, 0), probe.sign_calls);
         try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
 
-        const existing = try zigts.file_io.readFile(allocator, output_path, 64);
+        const existing = try zts.file_io.readFile(allocator, output_path, 64);
         defer allocator.free(existing);
         try std.testing.expectEqualStrings("sentinel", existing);
     }
@@ -995,7 +995,7 @@ test "artifact tail preserves absent-contract creation behavior" {
 test "artifact tail embeds complete contracts and signs only when requested" {
     const allocator = std.testing.allocator;
     const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zigts.handler_contract.emptyContract(path);
+    var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
 
     for ([_]bool{ true, false }) |attest_requested| {
@@ -1025,7 +1025,7 @@ test "artifact tail embeds complete contracts and signs only when requested" {
     }
 }
 
-test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
+test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -1039,7 +1039,7 @@ test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data = "{\"entry\":\"src/handler.ts\",\"port\":3000}",
     });
     try std.Io.Dir.createDirPath(tmp.dir, io, "src");
@@ -1051,8 +1051,8 @@ test "prepareProjectArtifact default path: <root>/.zigttp/<subdir>/<basename>" {
     var artifact = try prepareProjectArtifact(testing.allocator, io, "build", null);
     defer artifact.deinit(testing.allocator);
 
-    // Output path ends in `.zigttp/build/<basename(root)>`.
-    try testing.expect(std.mem.indexOf(u8, artifact.output_path, ".zigttp/build/") != null);
+    // Output path ends in `.zttp/build/<basename(root)>`.
+    try testing.expect(std.mem.indexOf(u8, artifact.output_path, ".zttp/build/") != null);
     try testing.expectEqualStrings(artifact.project_name, std.fs.path.basename(artifact.output_path));
 
     // Parent dir exists (createDirPath ran).
@@ -1077,7 +1077,7 @@ test "prepareProjectArtifact override path: passes through unchanged, no parent 
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data = "{\"entry\":\"src/handler.ts\"}",
     });
     try std.Io.Dir.createDirPath(tmp.dir, io, "src");
@@ -1103,7 +1103,7 @@ test "deploy ledger payload includes worst-case cost summary" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zigts.handler_contract.emptyContract(path);
+    var contract = zts.handler_contract.emptyContract(path);
     defer contract.deinit(allocator);
     contract.cost_envelope = .{
         .total = .{ .linear = .{
@@ -1119,14 +1119,14 @@ test "deploy ledger payload includes worst-case cost summary" {
 
     try appendDeployLedgerEntry(allocator, &contract, "handler.ts", "sha-cost", "demo");
 
-    const raw = try zigts.file_io.readFile(allocator, proof_ledger.ledgerPath(), 64 * 1024);
+    const raw = try zts.file_io.readFile(allocator, proof_ledger.ledgerPath(), 64 * 1024);
     defer allocator.free(raw);
     try testing.expect(std.mem.indexOf(u8, raw, "\"kind\":\"deploy\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"costWorstCase\":1048579") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"costBodyLimit\":1048576") != null);
 }
 
-test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or above CWD" {
+test "prepareProjectArtifact returns NoProjectConfig when no zttp.json on or above CWD" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -1139,7 +1139,7 @@ test "prepareProjectArtifact returns NoProjectConfig when no zigttp.json on or a
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    // No zigttp.json present anywhere up the tree from this tmp dir.
+    // No zttp.json present anywhere up the tree from this tmp dir.
     try testing.expectError(error.NoProjectConfig, prepareProjectArtifact(testing.allocator, io, "build", null));
 }
 

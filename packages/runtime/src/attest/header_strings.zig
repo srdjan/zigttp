@@ -3,11 +3,11 @@
 //! Precomputes the two response header values exactly once, at runtime
 //! startup, so the per-request cost is one `writer.print` per header:
 //!
-//!   Zigttp-Proofs: pure, read_only, injection_safe, ...
-//!   Zigttp-Attest: <compact JWS>
+//!   Zttp-Proofs: pure, read_only, injection_safe, ...
+//!   Zttp-Attest: <compact JWS>
 //!
 //! Field set and emission order are fixed (`chip_field_names` below). Only
-//! `true` chips appear; the empty list signals "do not emit Zigttp-Proofs."
+//! `true` chips appear; the empty list signals "do not emit Zttp-Proofs."
 //! `has_egress` and `max_io_depth` are intentionally excluded: the header
 //! advertises positive proof claims to external consumers, not facts about
 //! the handler's I/O surface.
@@ -17,8 +17,8 @@ const std = @import("std");
 /// Wire names for the two HTTP headers slice 1 emits. Single source of truth
 /// so the writer (`server.zig:appendAttestationHeaders`) and the reader
 /// (`verify_cli.zig:fetchAttestHeader`) can't drift on capitalization.
-pub const header_name_proofs: []const u8 = "Zigttp-Proofs";
-pub const header_name_attest: []const u8 = "Zigttp-Attest";
+pub const header_name_proofs: []const u8 = "Zttp-Proofs";
+pub const header_name_attest: []const u8 = "Zttp-Attest";
 
 pub const chip_field_names = [_][]const u8{
     "pure",
@@ -39,7 +39,7 @@ pub const chip_field_names = [_][]const u8{
 };
 
 pub const HeaderStrings = struct {
-    /// Empty slice means the runtime should not emit `Zigttp-Proofs` at all
+    /// Empty slice means the runtime should not emit `Zttp-Proofs` at all
     /// (no chips were proven). `attest_value` is always present when this
     /// struct is built.
     proofs_value: []const u8,

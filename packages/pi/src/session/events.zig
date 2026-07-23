@@ -5,7 +5,7 @@
 //! mode, and CLI rendering.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
 
@@ -171,7 +171,7 @@ pub fn appendEvent(
     buf = aw.toArrayList();
     const bytes = buf.items;
 
-    const fd = try zigts.file_io.openAppend(allocator, events_path);
+    const fd = try zts.file_io.openAppend(allocator, events_path);
     defer std.Io.Threaded.closeFd(fd);
 
     var total: usize = 0;
@@ -326,7 +326,7 @@ fn writeDisplayPayload(
 }
 
 pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
-    const bytes = try zigts.file_io.readFile(allocator, meta_path, 1 * 1024 * 1024);
+    const bytes = try zts.file_io.readFile(allocator, meta_path, 1 * 1024 * 1024);
     defer allocator.free(bytes);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
@@ -417,7 +417,7 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
     buf = aw.toArrayList();
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{meta_path});
     defer allocator.free(tmp_path);
-    try zigts.file_io.writeFile(allocator, tmp_path, buf.items);
+    try zts.file_io.writeFile(allocator, tmp_path, buf.items);
 
     const old_z = try allocator.dupeZ(u8, tmp_path);
     defer allocator.free(old_z);
@@ -456,7 +456,7 @@ fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
 }
 
 fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return try zigts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
+    return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
 }
 
 test "appendEvent round-trips a user_text event as NDJSON" {
@@ -477,7 +477,7 @@ test "appendEvent round-trips a user_text event as NDJSON" {
 }
 
 test "model_text event matches the documented v2 envelope" {
-    // Guards docs/internals/zigts-expert-contract.md: the documented example is
+    // Guards docs/internals/zts-expert-contract.md: the documented example is
     // { "v": 2, "k": "model_text", "d": "..." } with a bare-string payload.
     const allocator = testing.allocator;
     var buf: std.ArrayList(u8) = .empty;
@@ -506,7 +506,7 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
 
     try appendEvent(allocator, path, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
-        .tool_name = "zigts_expert_verify_paths",
+        .tool_name = "zts_expert_verify_paths",
         .ok = false,
         .llm_text = "{\"ok\":false}",
         .ui_payload = .{ .plain_text = @constCast("fallback") },
@@ -663,7 +663,7 @@ test "readMeta accepts older schema versions" {
     const path = try tmp.childPath(allocator, "meta.json");
     defer allocator.free(path);
 
-    try zigts.file_io.writeFile(
+    try zts.file_io.writeFile(
         allocator,
         path,
         \\{"schema_version":1,"session_id":"sid","workspace_realpath":"/tmp/ws","created_at_unix_ms":123}

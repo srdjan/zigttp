@@ -1,4 +1,4 @@
-//! `zigttp dev` and `zigttp studio` — the local edit loop. `dev` is the magnet
+//! `zttp dev` and `zttp studio` — the local edit loop. `dev` is the magnet
 //! surface (implies --watch --prove, optional proof-capsule recording and the
 //! first-run quest); `studio` adds the browser workbench and scaffolds an empty
 //! cwd in place. Both share runDevPreflight (analyzer gate before serving).
@@ -7,9 +7,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
-const precompile = zigts_cli.precompile;
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
+const precompile = zts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const cli_tour = @import("cli_tour.zig");
 const proof_cli = @import("proof_cli.zig");
@@ -31,7 +31,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
     defer allocator.free(serve_binary);
 
-    // `zigttp dev` is the magnet surface: it implies `--watch --prove` so the
+    // `zttp dev` is the magnet surface: it implies `--watch --prove` so the
     // proof HUD lights up on the first save. `--no-prove` opts out of proof
     // verification but still watches; both flags can be passed explicitly to
     // be a no-op (idempotent).
@@ -49,7 +49,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     const capsule_name = "default";
     const record_trace_path: ?[]u8 = if (user_record_proof)
         proof_cli.sessionTracePathAlloc(allocator, capsule_name) catch |err| blk: {
-            std.debug.print("zigttp dev: --record-proof could not prepare a capsule: {}\n", .{err});
+            std.debug.print("zttp dev: --record-proof could not prepare a capsule: {}\n", .{err});
             break :blk null;
         }
     else
@@ -80,10 +80,10 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
         // post-shutdown code here would not reliably run. Writing now means
         // the capsule is complete the moment the first request is captured.
         recordProofManifest(allocator, argv, capsule_name) catch |err| {
-            std.debug.print("zigttp dev: --record-proof could not write the capsule manifest: {}\n", .{err});
+            std.debug.print("zttp dev: --record-proof could not write the capsule manifest: {}\n", .{err});
         };
-        std.debug.print("Recording a proof capsule to .zigttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
-        std.debug.print("After an edit, replay it with: zigttp proof replay {s}\n", .{capsule_name});
+        std.debug.print("Recording a proof capsule to .zttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
+        std.debug.print("After an edit, replay it with: zttp proof replay {s}\n", .{capsule_name});
     }
 
     // Render the four-property explanation once, just before the serve child's
@@ -207,8 +207,8 @@ pub fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, arg
     propagateChildExit(child.wait(io) catch return);
 }
 
-/// Lets `mkdir myapp && cd myapp && zigttp studio` work as a single demo
-/// gesture. If the cwd (or any ancestor) already has a `zigttp.json`, this
+/// Lets `mkdir myapp && cd myapp && zttp studio` work as a single demo
+/// gesture. If the cwd (or any ancestor) already has a `zttp.json`, this
 /// is a no-op and the existing project loads. If the cwd is empty (only
 /// dotfiles like `.git` allowed), we scaffold the selected template
 /// in-place. If the cwd has user files but no manifest, we leave the
@@ -234,7 +234,7 @@ fn studioPreflight(allocator: std.mem.Allocator, template: Template) !void {
 
 /// Empty enough to scaffold over: no non-dotfile entries. `.git`,
 /// `.DS_Store`, IDE configs are all tolerated. A pre-existing
-/// `zigttp.json` would have been caught by `discover` upstream, so this
+/// `zttp.json` would have been caught by `discover` upstream, so this
 /// only inspects the surface of the cwd.
 fn directoryIsEffectivelyEmpty(io: std.Io) bool {
     var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, ".", .{ .iterate = true }) catch return false;
@@ -298,8 +298,8 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
 
     if (!doctorPathExists(io, target)) {
         if (!builtin.is_test) {
-            std.debug.print("zigttp {s} preflight failed: handler not found: {s}\n", .{ command, target });
-            std.debug.print("Next: update `entry` in zigttp.json or pass an explicit handler path.\n", .{});
+            std.debug.print("zttp {s} preflight failed: handler not found: {s}\n", .{ command, target });
+            std.debug.print("Next: update `entry` in zttp.json or pass an explicit handler path.\n", .{});
         }
         return error.FileNotFound;
     }
@@ -324,8 +324,8 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
 
     var check = precompile.runCheckOnly(allocator, target, sqlite_path, false, system_path) catch |err| {
         if (!builtin.is_test) {
-            std.debug.print("zigttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });
-            std.debug.print("Next: run `zigttp check {s}` for full diagnostics.\n", .{target});
+            std.debug.print("zttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });
+            std.debug.print("Next: run `zttp check {s}` for full diagnostics.\n", .{target});
         }
         return error.CheckFailed;
     };
@@ -333,9 +333,9 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
 
     if (check.totalErrors() > 0) {
         if (!builtin.is_test) {
-            std.debug.print("zigttp {s} preflight failed for {s}: {d} error(s)\n", .{ command, target, check.totalErrors() });
+            std.debug.print("zttp {s} preflight failed for {s}: {d} error(s)\n", .{ command, target, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
-            std.debug.print("Next: fix the errors above, then rerun `zigttp {s}`.\n", .{command});
+            std.debug.print("Next: fix the errors above, then rerun `zttp {s}`.\n", .{command});
         }
         return error.CheckFailed;
     }
@@ -363,7 +363,7 @@ fn optionValue(argv: []const []const u8, name: []const u8) ?[]const u8 {
 
 pub fn printDevHelp() void {
     const help =
-        \\zigttp dev [options] [handler.ts]
+        \\zttp dev [options] [handler.ts]
         \\
         \\Start the local edit loop. The command runs the analyzer, then
         \\serves the handler with watch mode enabled. By default it also
@@ -372,20 +372,20 @@ pub fn printDevHelp() void {
         \\Common options:
         \\  -p, --port <PORT>     Port to listen on (project default: 3000)
         \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
-        \\  --studio              Also serve the optional /_zigttp/studio mirror
+        \\  --studio              Also serve the optional /_zttp/studio mirror
         \\  --no-prove            Watch and reload without contract proof gating
         \\  --record-proof        Capture this session's requests into a replayable
-        \\                        proof capsule (.zigttp/capsules/default/)
+        \\                        proof capsule (.zttp/capsules/default/)
         \\  --no-quest            Skip the first-run proof tour and guided quest
         \\                        (alias: --no-tour)
         \\  --quest               Replay the guided proof quest
         \\  --outbound-http       Enable native outbound HTTP bridge
-        \\  --sqlite <FILE>       SQLite database for zigttp:sql
-        \\  --system <FILE>       Handler bundle for zigttp:service/workflow
+        \\  --sqlite <FILE>       SQLite database for zttp:sql
+        \\  --system <FILE>       Handler bundle for zttp:service/workflow
         \\  --no-env-check        Skip startup env validation
         \\  --help                Show this help
         \\
-        \\If no handler path is passed, the entry in zigttp.json is used.
+        \\If no handler path is passed, the entry in zttp.json is used.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -393,9 +393,9 @@ pub fn printDevHelp() void {
 
 pub fn printStudioHelp() void {
     const help =
-        \\zigttp studio [options] [handler.ts]
+        \\zttp studio [options] [handler.ts]
         \\
-        \\Open the optional browser proof workbench at /_zigttp/studio. In an
+        \\Open the optional browser proof workbench at /_zttp/studio. In an
         \\empty directory, this command scaffolds a project in place before
         \\launching.
         \\
@@ -450,11 +450,11 @@ test "studioPreflight scaffolds in an empty cwd" {
 
     try studioPreflight(testing.allocator, .basic);
 
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{});
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "src/handler.ts", .{});
 }
 
-test "studioPreflight is a no-op when zigttp.json already exists" {
+test "studioPreflight is a no-op when zttp.json already exists" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -469,7 +469,7 @@ test "studioPreflight is a no-op when zigttp.json already exists" {
 
     // Seed an existing project marker. Body content is intentionally bogus;
     // discover() only cares that the file exists.
-    try zigts.file_io.writeFile(testing.allocator, "zigttp.json", "{}");
+    try zts.file_io.writeFile(testing.allocator, "zttp.json", "{}");
 
     try studioPreflight(testing.allocator, .basic);
 
@@ -490,12 +490,12 @@ test "studioPreflight refuses to scaffold over user files" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try zigts.file_io.writeFile(testing.allocator, "notes.txt", "not a zigttp project");
+    try zts.file_io.writeFile(testing.allocator, "notes.txt", "not a zttp project");
 
     try studioPreflight(testing.allocator, .basic);
 
-    // No scaffold happened: zigttp.json must not exist.
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{}));
+    // No scaffold happened: zttp.json must not exist.
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{}));
 }
 
 test "studioPreflight tolerates dotfile-only cwd (e.g. .git)" {
@@ -515,7 +515,7 @@ test "studioPreflight tolerates dotfile-only cwd (e.g. .git)" {
 
     try studioPreflight(testing.allocator, .basic);
 
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{});
 }
 
 test "childExitCode propagates a failed serve child but not a clean stop" {
@@ -547,7 +547,7 @@ test "runDevPreflight reports analyzer failure before starting dev loop" {
 
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.writeFile(io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/handler.ts"

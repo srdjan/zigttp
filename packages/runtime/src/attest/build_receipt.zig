@@ -1,7 +1,7 @@
 //! Shared proof-receipt signer for build-time and dev-time attestation.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const envelope = @import("envelope.zig");
 const header_strings = @import("header_strings.zig");
@@ -10,21 +10,21 @@ const proof_ledger = @import("../proof_ledger.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 
-pub const compiler_version_tag: []const u8 = "zigttp-attest-slice1";
+pub const compiler_version_tag: []const u8 = "zttp-attest-slice1";
 
 /// Produces a compact JWS for build/deploy artifacts. Uses the persistent
-/// identity under ~/.zigttp/attest and fails if that identity cannot be
+/// identity under ~/.zttp/attest and fails if that identity cannot be
 /// loaded safely. Caller owns the returned bytes.
 pub fn buildJws(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     bytecode: []const u8,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
 ) ![]u8 {
     const loaded = identity.loadOrCreate(allocator) catch |err| {
         std.log.err(
-            "attest: failed to load identity from ~/.zigttp/attest/keypair.bin: {s}. Inspect the file, fix the permissions (chmod 600), or delete it to mint a fresh key.",
+            "attest: failed to load identity from ~/.zttp/attest/keypair.bin: {s}. Inspect the file, fix the permissions (chmod 600), or delete it to mint a fresh key.",
             .{@errorName(err)},
         );
         return err;
@@ -49,7 +49,7 @@ pub fn buildDevJws(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     bytecode: []const u8,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
 ) ![]u8 {
     return try buildJwsWithKey(
         allocator,
@@ -65,7 +65,7 @@ fn buildJwsWithKey(
     allocator: std.mem.Allocator,
     contract_json: []const u8,
     bytecode: []const u8,
-    contract: *const zigts.HandlerContract,
+    contract: *const zts.HandlerContract,
     runtime_policy_sha256: []const u8,
     key_pair: Ed25519.KeyPair,
 ) ![]u8 {
@@ -77,10 +77,10 @@ fn buildJwsWithKey(
     std.crypto.hash.sha2.Sha256.hash(bytecode, &bytecode_sha, .{});
     const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
 
-    const policy_sha_hex = zigts.rule_registry.policyHash();
+    const policy_sha_hex = zts.rule_registry.policyHash();
     const capability_hash_hex = std.fmt.bytesToHex(contract.capabilities.hash, .lower);
 
-    const props_or_default = contract.properties orelse zigts.handler_contract.HandlerProperties{
+    const props_or_default = contract.properties orelse zts.handler_contract.HandlerProperties{
         .pure = false,
         .read_only = false,
         .stateless = false,
@@ -129,7 +129,7 @@ fn ephemeralKeyPair() Ed25519.KeyPair {
     // predictable space an attacker could search to forge attestations. This
     // Zig version exposes no portable OS-CSPRNG fallback (no std.posix.getrandom;
     // arc4random_buf is absent on non-glibc Linux), so fail closed rather than
-    // mint a weak key - mirroring zigttp:id, which panics rather than seed its
+    // mint a weak key - mirroring zttp:id, which panics rather than seed its
     // CSPRNG from anything but /dev/urandom.
     fillCsprng(&seed) catch @panic("attest: /dev/urandom unavailable; refusing to mint a signing key from a weak seed");
     return envelope.keyPairFromSeed(seed) catch unreachable;

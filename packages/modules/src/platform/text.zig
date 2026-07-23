@@ -1,10 +1,10 @@
-//! zigttp:text - String escaping and transformation
+//! zttp:text - String escaping and transformation
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:text",
+    .specifier = "zttp:text",
     .name = "text",
     .exports = &.{
         .{ .name = "escapeHtml", .module_func = escapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },

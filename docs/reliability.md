@@ -24,7 +24,7 @@ bytes.
 
 The server does not enforce a global or per-IP rate limit. Put standalone
 servers behind a reverse proxy or load balancer for network-layer limits. Use
-`zigttp:ratelimit` inside handlers for application-level limits such as per API
+`zttp:ratelimit` inside handlers for application-level limits such as per API
 key, user, or route.
 
 ## Failure Behavior
@@ -103,7 +103,7 @@ Durable replay is conservative when a validated contract is present:
 
 `--workflow-queue` persists durable workflow child dispatch under
 `<durable>/workflow-queue`. Dead letters are visible operator state, not hidden
-cleanup: list, inspect, replay, or discard them with `zigttp workflow-queue`.
+cleanup: list, inspect, replay, or discard them with `zttp workflow-queue`.
 `saga()` remains unsupported with `--workflow-queue`.
 
 ## Access Logs
@@ -151,9 +151,9 @@ in-flight requests before the process exits.
 
 Common cases:
 
-- `zigttp check` / `zigts check`: `0` clean, `1` errors, `2` warning-only.
-- `zigttp build`: `0` success, `1` build failure.
-- `zigttp test`: `0` all tests passed, `1` test failure, `2` invalid fixture.
+- `zttp check` / `zts check`: `0` clean, `1` errors, `2` warning-only.
+- `zttp build`: `0` success, `1` build failure.
+- `zttp test`: `0` all tests passed, `1` test failure, `2` invalid fixture.
 
 Security-relevant crashes or bypasses should be reported through
 [SECURITY.md](../SECURITY.md).

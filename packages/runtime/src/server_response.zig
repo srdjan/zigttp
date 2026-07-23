@@ -187,7 +187,7 @@ pub fn buildDynamicResponseHeader(
     return pos;
 }
 
-/// Format the response headers for `GET /.well-known/zigttp-attest`. The
+/// Format the response headers for `GET /.well-known/zttp-attest`. The
 /// well-known endpoint is hot and deterministic: when cached, return 304
 /// with the precomputed ETag; otherwise 200 with Content-Type, ETag, and a
 /// precomputed body. Returns the prefix length (headers); the caller writes
@@ -215,7 +215,7 @@ pub fn formatWellKnownHeaders(
     return out.len;
 }
 
-/// Append the precomputed `Zigttp-Proofs` and `Zigttp-Attest` header lines.
+/// Append the precomputed `Zttp-Proofs` and `Zttp-Attest` header lines.
 /// Slice 1 of proof receipts: per-request work is two `bufPrint`s of static
 /// strings, never a parse or signature operation. `proofs_value.len == 0`
 /// signals "no chip is proven; skip the line so the header is never empty."
@@ -293,14 +293,14 @@ test "appendAttestationHeaders: null headers is a no-op" {
     try std.testing.expectEqual(@as(usize, 7), out);
 }
 
-test "appendAttestationHeaders: empty proofs writes only Zigttp-Attest" {
+test "appendAttestationHeaders: empty proofs writes only Zttp-Attest" {
     var buf: [256]u8 = undefined;
     const hs = attest_header_strings.HeaderStrings{
         .proofs_value = "",
         .attest_value = "abc.def.ghi",
     };
     const out = try appendAttestationHeaders(hs, &buf, 0);
-    try std.testing.expectEqualStrings("Zigttp-Attest: abc.def.ghi\r\n", buf[0..out]);
+    try std.testing.expectEqualStrings("Zttp-Attest: abc.def.ghi\r\n", buf[0..out]);
 }
 
 test "appendAttestationHeaders: both lines written in order" {
@@ -311,7 +311,7 @@ test "appendAttestationHeaders: both lines written in order" {
     };
     const out = try appendAttestationHeaders(hs, &buf, 0);
     try std.testing.expectEqualStrings(
-        "Zigttp-Proofs: pure, injection_safe\r\nZigttp-Attest: h.p.s\r\n",
+        "Zttp-Proofs: pure, injection_safe\r\nZttp-Attest: h.p.s\r\n",
         buf[0..out],
     );
 }

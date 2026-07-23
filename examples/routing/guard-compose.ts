@@ -1,10 +1,10 @@
 // Guard composition example
 // Demonstrates left-to-right guard chain with compile-time desugaring
 
-import { guard } from "zigttp:compose";
-import { routerMatch } from "zigttp:router";
-import { env } from "zigttp:env";
-import { parseBearer, jwtVerify } from "zigttp:auth";
+import { guard } from "zttp:compose";
+import { routerMatch } from "zttp:router";
+import { env } from "zttp:env";
+import { parseBearer, jwtVerify } from "zttp:auth";
 
 function preflight(req: Request): Response | undefined {
     if (req.method === "OPTIONS") {

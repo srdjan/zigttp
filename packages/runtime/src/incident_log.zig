@@ -8,7 +8,7 @@
 //! request path.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 
 pub fn open(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
     return zq.file_io.openAppend(allocator, path);

@@ -1,10 +1,10 @@
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const shared = @import("cli_shared.zig");
-const compat = zigts.compat;
+const compat = zts.compat;
 
-const fixture = zigts_cli.proof_quest_fixture;
+const fixture = zts_cli.proof_quest_fixture;
 
 pub const Config = struct {
     enabled: bool = false,
@@ -42,7 +42,7 @@ const baseline_actions = [_][]const u8{ "b", "s" };
 const preview_break_actions = [_][]const u8{ "y", "s" };
 const broken_actions = [_][]const u8{ "r", "s" };
 const preview_repair_actions = [_][]const u8{ "y", "s" };
-const complete_actions = [_][]const u8{ "zigttp check", "zigttp build", "zigttp deploy", "zigttp proofs badge" };
+const complete_actions = [_][]const u8{ "zttp check", "zttp build", "zttp deploy", "zttp proofs badge" };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
@@ -65,7 +65,7 @@ pub const State = struct {
         if (!self.config.enabled) return;
         if (!self.config.explicit and markerExists(self.allocator)) return;
 
-        const source = zigts.file_io.readFile(self.allocator, self.handler_path, 1024 * 1024) catch {
+        const source = zts.file_io.readFile(self.allocator, self.handler_path, 1024 * 1024) catch {
             if (self.config.explicit) printQuest("could not read {s}; quest unavailable.\n", .{self.handler_path});
             return;
         };
@@ -224,7 +224,7 @@ pub const State = struct {
         };
         self.mu.unlock();
 
-        const source = zigts.file_io.readFile(self.allocator, self.handler_path, 1024 * 1024) catch |err| {
+        const source = zts.file_io.readFile(self.allocator, self.handler_path, 1024 * 1024) catch |err| {
             printQuest("could not read {s}: {}.\n", .{ self.handler_path, err });
             return;
         };
@@ -247,7 +247,7 @@ pub const State = struct {
             },
         };
 
-        zigts.file_io.writeFile(self.allocator, self.handler_path, next_source) catch |err| {
+        zts.file_io.writeFile(self.allocator, self.handler_path, next_source) catch |err| {
             printQuest("could not write {s}: {}.\n", .{ self.handler_path, err });
             return;
         };
@@ -285,7 +285,7 @@ pub const State = struct {
                 .{},
             ),
             .complete => printQuest(
-                "complete. Next: `zigttp check`, `zigttp build`, `zigttp deploy`, then `zigttp proofs badge`.\n",
+                "complete. Next: `zttp check`, `zttp build`, `zttp deploy`, then `zttp proofs badge`.\n",
                 .{},
             ),
             else => {},
@@ -371,7 +371,7 @@ fn snapshotFor(stage: Stage, explicit: bool) Snapshot {
 }
 
 pub fn markerPath() []const u8 {
-    return ".zigttp/tour-shown";
+    return ".zttp/tour-shown";
 }
 
 fn markerExists(allocator: std.mem.Allocator) bool {
@@ -385,7 +385,7 @@ fn touchMarker(allocator: std.mem.Allocator) void {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".zigttp") catch return;
+    std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".zttp") catch return;
     var file = std.Io.Dir.createFile(std.Io.Dir.cwd(), io, markerPath(), .{}) catch return;
     file.close(io);
 }
@@ -396,7 +396,7 @@ fn printQuest(comptime fmt: []const u8, args: anytype) void {
 }
 
 test "marker path stays compatible with the original first-run tour" {
-    try std.testing.expectEqualStrings(".zigttp/tour-shown", markerPath());
+    try std.testing.expectEqualStrings(".zttp/tour-shown", markerPath());
 }
 
 test "snapshot exposes stage-specific passport actions" {
@@ -410,5 +410,5 @@ test "snapshot exposes stage-specific passport actions" {
     try std.testing.expect(complete.explicit);
     try std.testing.expect(complete.complete);
     try std.testing.expectEqualStrings("complete", complete.stage);
-    try std.testing.expectEqualStrings("zigttp deploy", complete.available_actions[2]);
+    try std.testing.expectEqualStrings("zttp deploy", complete.available_actions[2]);
 }

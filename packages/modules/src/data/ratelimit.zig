@@ -1,4 +1,4 @@
-//! zigttp:ratelimit - In-memory rate limiting
+//! zttp:ratelimit - In-memory rate limiting
 //!
 //! Exports:
 //!   rateCheck(key: string, limit: number, windowSec: number) -> Result
@@ -10,12 +10,12 @@
 //!     Clears the counter for the given key. Returns true if present.
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 const MODULE_STATE_SLOT: usize = 8; // module_slots.Slot.ratelimit
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:ratelimit",
+    .specifier = "zttp:ratelimit",
     .name = "ratelimit",
     .required_capabilities = &.{.clock},
     .stateful = true,

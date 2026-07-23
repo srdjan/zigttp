@@ -400,7 +400,7 @@ test "buildRequestBody: first turn carries instructions + one user input item an
 
     const body = try buildRequestBody(arena.allocator(), .{
         .api_key = "test-fixture-key",
-        .system_prompt = "you are a zigts expert",
+        .system_prompt = "you are a zts expert",
     }, &transcript, null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
@@ -410,7 +410,7 @@ test "buildRequestBody: first turn carries instructions + one user input item an
     try testing.expectEqualStrings(default_model, root.get("model").?.string);
     try testing.expect(root.get("tools") == null);
     try testing.expect(root.get("stream").?.bool);
-    try testing.expectEqualStrings("you are a zigts expert", root.get("instructions").?.string);
+    try testing.expectEqualStrings("you are a zts expert", root.get("instructions").?.string);
 
     const input = root.get("input").?.array.items;
     try testing.expectEqual(@as(usize, 1), input.len);
@@ -425,13 +425,13 @@ test "buildRequestBody: tool-use and tool-result entries serialize as Responses-
     defer transcript.deinit(testing.allocator);
 
     const calls = [_]turn.ToolCall{
-        .{ .id = "call_1", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "call_1", .name = "zts_expert_meta", .args_json = "{}" },
     };
     try transcript.append(testing.allocator, .{ .user_text = "inspect" });
     try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
     try transcript.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "call_1",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"version\":\"x\"}",
     } });
@@ -453,7 +453,7 @@ test "buildRequestBody: tool-use and tool-result entries serialize as Responses-
 
     try testing.expectEqualStrings("function_call", items[1].object.get("type").?.string);
     try testing.expectEqualStrings("call_1", items[1].object.get("call_id").?.string);
-    try testing.expectEqualStrings("zigts_expert_meta", items[1].object.get("name").?.string);
+    try testing.expectEqualStrings("zts_expert_meta", items[1].object.get("name").?.string);
     try testing.expectEqualStrings("{}", items[1].object.get("arguments").?.string);
 
     try testing.expectEqualStrings("function_call_output", items[2].object.get("type").?.string);

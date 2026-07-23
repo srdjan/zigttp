@@ -5,7 +5,7 @@
 // On crash recovery the completed do:/undo: steps replay from the oplog, so the
 // rollback is reproduced without re-invoking anything.
 //
-//   zigttp serve examples/workflow/saga-orchestrator.ts \
+//   zttp serve examples/workflow/saga-orchestrator.ts \
 //     --system examples/workflow/system.json --durable ./.durable
 //
 //   GET /                  -> every step succeeds -> { ok: true }
@@ -19,12 +19,12 @@
 //                              which side effects were actually undone.
 //
 // Notes: the handler is left without explicit return-type annotations because
-// the step thunks return zigttp:workflow.call results (typed `object`), which
+// the step thunks return zttp:workflow.call results (typed `object`), which
 // the strict Response-return check would reject (strict-ZigTS is advisory). The
 // three branches inline literal charge paths rather than capturing a variable
 // in the step thunks, sidestepping a deep-closure upvalue limitation.
-import { run } from "zigttp:durable";
-import { call, saga } from "zigttp:workflow";
+import { run } from "zttp:durable";
+import { call, saga } from "zttp:workflow";
 
 function handler(req) {
   const key = req.headers.get("idempotency-key") ?? "saga-demo";

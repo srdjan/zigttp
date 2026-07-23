@@ -37,7 +37,7 @@ test_rand
 test_time
 build_link.log
 
-# Scratch projects scaffolded by `zigttp init` at repo root during ad-hoc
+# Scratch projects scaffolded by `zttp init` at repo root during ad-hoc
 # CLI testing. Real example apps live under examples/.
 /my-app/
 .codex/skills/
@@ -59,11 +59,11 @@ codedb.snapshot
 /????????????????/
 docs/pi-tui-demo.gif
 docs/pi-tui-demo.tape
-.zigttp/
+.zttp/
 
-# Generator output from `zigts check --types`. Regenerated on demand;
+# Generator output from `zts check --types`. Regenerated on demand;
 # never commit.
-/zigttp.d.ts
+/zttp.d.ts
 demos/
 .playwright-mcp/
 brag-output/

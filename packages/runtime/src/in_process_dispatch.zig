@@ -7,12 +7,12 @@
 //! quarantines only its own pool slot and surfaces an error to the
 //! orchestrator (a different Runtime instance), never corrupting it.
 //!
-//! This is the substrate the `zigttp:workflow` combinators build on. Route
+//! This is the substrate the `zttp:workflow` combinators build on. Route
 //! (href) based resolution for HATEOAS link-following is layered on top
 //! separately; this module is the name-keyed core.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const runtime_pool = @import("runtime_pool.zig");
 const runtime_config = @import("runtime_config.zig");
 const http_types = @import("http_types.zig");
@@ -124,7 +124,7 @@ pub const SystemRuntime = struct {
             // A workflow-enabled `--system` bundle is local and fail-fast: every
             // handler with a `path` must be readable before the server starts.
             // Path resolution mirrors the proof tooling (cwd first, then
-            // manifest directory) so runtime and `zigts link` agree.
+            // manifest directory) so runtime and `zts link` agree.
             const entry_path = try resolveSystemHandlerPath(allocator, system_dir, entry.path);
             defer allocator.free(entry_path);
 
@@ -230,9 +230,9 @@ test "SystemRuntime dispatches a request to a named co-located handler in-proces
     try std.testing.expectError(error.UnknownHandler, sys.dispatch("nope", view));
 }
 
-// The remaining tests exercise the full `zigttp:workflow.call` path end to end:
+// The remaining tests exercise the full `zttp:workflow.call` path end to end:
 // an orchestrator handler (its own HandlerPool, with `config.system_registry`
-// pointing at a SystemRuntime) imports `zigttp:workflow` and dispatches to a
+// pointing at a SystemRuntime) imports `zttp:workflow` and dispatches to a
 // co-located sub-handler in-process via `workflowCallCallback`.
 
 test "workflow.call dispatches to a co-located sub-handler and copies out its response" {
@@ -251,7 +251,7 @@ test "workflow.call dispatches to a co-located sub-handler and copies out its re
     // The orchestrator returns the sub-handler's Response verbatim; asserting on
     // it proves the borrowed bytes were copied out before `handle.deinit()`.
     const orchestrator_src =
-        \\import { call } from "zigttp:workflow";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  return call("greeter", { method: "POST", path: "/hi" });
         \\}
@@ -301,7 +301,7 @@ test "workflow.call to an unknown handler fails soft as a 599 error response" {
     // turned into a 599 error Response (same catch arm `error.HandlerPanicked`
     // takes, so this also covers panic isolation surfacing).
     const orchestrator_src =
-        \\import { call } from "zigttp:workflow";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  return call("nope", { path: "/x" });
         \\}
@@ -366,7 +366,7 @@ test "workflow.follow routes a resolved affordance href to a co-located handler 
     // The orchestrator builds a resource() and follows its `pay` affordance;
     // follow resolves href "/payments/charge" -> the "payments" mount, in-process.
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, {
         \\    pay: { href: "/payments/charge", method: "POST" },
@@ -410,7 +410,7 @@ test "workflow.follow routes hrefs by path while preserving parsed query" {
     );
 
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, {
         \\    hello: { href: "/greet?lang=en#ignored", method: "GET" },
@@ -448,7 +448,7 @@ test "workflow.follow to an unmounted href fails soft as a 599" {
     );
 
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, { gone: { href: "/nope/x", method: "GET" } });
         \\  return follow(r, "gone");
@@ -488,7 +488,7 @@ test "workflow.follow on a missing affordance rel fails soft as a 599" {
     );
 
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, { pay: { href: "/payments/x", method: "POST" } });
         \\  return follow(r, "nonexistent");
@@ -530,7 +530,7 @@ test "workflow.follow substitutes {param} from init.params before dispatch" {
     // A templated affordance href; follow fills {id} from init.params, so the
     // orders handler receives the substituted path (not a literal "/orders/{id}").
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
         \\  return follow(r, "item", { params: { id: "42" } });
@@ -565,7 +565,7 @@ test "workflow.follow percent-encodes templated params before dispatch" {
     );
 
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
         \\  return follow(r, "item", { params: { id: "42/refund?admin=1#frag" } });
@@ -600,7 +600,7 @@ test "workflow.follow on a templated href with no params fails soft as a 599" {
     );
 
     const orchestrator_src =
-        \\import { follow } from "zigttp:workflow";
+        \\import { follow } from "zttp:workflow";
         \\function handler(req) {
         \\  const r = resource({ id: 1 }, { item: { href: "/orders/{id}", method: "GET" } });
         \\  return follow(r, "item");

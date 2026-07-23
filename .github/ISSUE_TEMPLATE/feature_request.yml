@@ -6,7 +6,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What are you trying to do that zigttp does not support today?
+      description: What are you trying to do that zttp does not support today?
     validations:
       required: true
   - type: textarea

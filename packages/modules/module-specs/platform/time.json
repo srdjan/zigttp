@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:time",
+  "specifier": "zttp:time",
   "source": "packages/modules/src/platform/time.zig",
   "requiredCapabilities": [],
   "exports": [

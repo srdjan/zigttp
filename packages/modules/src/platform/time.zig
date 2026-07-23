@@ -1,12 +1,12 @@
-//! zigttp:time - Date/time formatting and arithmetic
+//! zttp:time - Date/time formatting and arithmetic
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 const epoch = std.time.epoch;
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:time",
+    .specifier = "zttp:time",
     .name = "time",
     .exports = &.{
         .{ .name = "formatIso", .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
@@ -201,7 +201,7 @@ fn isLeapYear(year: u16) bool {
 }
 
 /// Number of days in `month` (1-12) of `year`, accounting for leap February.
-/// Source of truth for date range validation; also used by `zigttp:validate`.
+/// Source of truth for date range validation; also used by `zttp:validate`.
 pub fn daysInMonth(year: u16, month: u8) u8 {
     return switch (month) {
         1, 3, 5, 7, 8, 10, 12 => 31,

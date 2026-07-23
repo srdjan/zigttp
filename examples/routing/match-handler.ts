@@ -2,7 +2,7 @@
 //
 // Demonstrates using match for HTTP routing.
 
-import { env } from "zigttp:env";
+import { env } from "zttp:env";
 
 function handler(req: Request): Response {
     return match (req) {

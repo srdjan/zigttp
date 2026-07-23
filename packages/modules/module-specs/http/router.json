@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:router",
+  "specifier": "zttp:router",
   "source": "packages/modules/src/http/router.zig",
   "requiredCapabilities": [],
   "exports": [

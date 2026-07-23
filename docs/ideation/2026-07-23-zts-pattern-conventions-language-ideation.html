@@ -1,0 +1,505 @@
+<title>Ideation: zts Patterns, Conventions & Language Capabilities</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#fbfaf8; --surface:#ffffff; --surface-2:#f4f2ee; --ink:#1c1a17; --ink-2:#4d4842;
+    --muted:#726b62; --line:#e4e0d8; --accent:#9a5b2c; --accent-text:#7a4620;
+    --accent-soft:#f7ecdd; --ok:#2f6d4f; --ok-soft:#e6f1ea; --warn:#8a6d1f; --warn-soft:#f5eed6;
+    --info:#3a5a8a; --info-soft:#e8eef7; --danger:#8f3a34; --danger-soft:#f6e6e4;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#16140f; --surface:#1e1b16; --surface-2:#252118; --ink:#efe9df; --ink-2:#cabfae;
+      --muted:#9c917f; --line:#332e25; --accent:#e0a35f; --accent-text:#e9b877; --accent-soft:#2c2216;
+      --ok:#7fc39c; --ok-soft:#182620; --warn:#d8bd6b; --warn-soft:#2a2413; --info:#8fb0dd; --info-soft:#161f2c;
+      --danger:#e0928a; --danger-soft:#2a1816;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#16140f; --surface:#1e1b16; --surface-2:#252118; --ink:#efe9df; --ink-2:#cabfae;
+    --muted:#9c917f; --line:#332e25; --accent:#e0a35f; --accent-text:#e9b877; --accent-soft:#2c2216;
+    --ok:#7fc39c; --ok-soft:#182620; --warn:#d8bd6b; --warn-soft:#2a2413; --info:#8fb0dd; --info-soft:#161f2c;
+    --danger:#e0928a; --danger-soft:#2a1816;
+  }
+  :root[data-theme="light"]{
+    --bg:#fbfaf8; --surface:#ffffff; --surface-2:#f4f2ee; --ink:#1c1a17; --ink-2:#4d4842;
+    --muted:#726b62; --line:#e4e0d8; --accent:#9a5b2c; --accent-text:#7a4620; --accent-soft:#f7ecdd;
+    --ok:#2f6d4f; --ok-soft:#e6f1ea; --warn:#8a6d1f; --warn-soft:#f5eed6; --info:#3a5a8a; --info-soft:#e8eef7;
+    --danger:#8f3a34; --danger-soft:#f6e6e4;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.6;font-size:16px;
+    margin:0;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;font-feature-settings:"kern","liga","cv05";}
+  .wrap{max-width:900px;margin-inline:auto;padding:2.2rem 1.4rem 5rem;}
+  p,li{max-width:72ch}
+  a{color:var(--accent-text);text-underline-offset:2px}
+  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:.08em .36em;border-radius:4px;
+    border:1px solid var(--line)}
+  h1{font-size:2rem;line-height:1.18;letter-spacing:-.02em;margin:.2rem 0 .5rem;font-weight:700}
+  h2{font-size:1.35rem;letter-spacing:-.01em;margin:2.6rem 0 .8rem;padding-bottom:.35rem;
+    border-bottom:2px solid var(--line);font-weight:650}
+  h3{font-size:1.12rem;margin:0 0 .1rem;font-weight:640}
+  .eyebrow{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent-text);font-weight:640}
+  .lede{font-size:1.08rem;color:var(--ink-2);max-width:74ch}
+  .meta{display:flex;flex-wrap:wrap;gap:.5rem .9rem;margin:1rem 0 .4rem;font-size:.82rem;color:var(--muted)}
+  .meta b{color:var(--ink-2);font-weight:600}
+  .themebtn{position:fixed;top:.8rem;right:.9rem;z-index:10;background:var(--surface);border:1px solid var(--line);
+    color:var(--ink-2);border-radius:999px;padding:.35rem .7rem;font-size:.72rem;cursor:pointer;font-family:var(--sans)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.7rem;margin:1.4rem 0 .5rem}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:.8rem .9rem}
+  .stat .n{font-size:1.5rem;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+  .stat .l{font-size:.74rem;color:var(--muted);margin-top:.1rem}
+  section{margin-top:.5rem}
+  .axes{display:grid;gap:.55rem;margin:.6rem 0}
+  .axis-row{display:flex;gap:.7rem;align-items:baseline;background:var(--surface);border:1px solid var(--line);
+    border-radius:10px;padding:.6rem .8rem}
+  .axis-row .k{font-family:var(--mono);font-size:.76rem;color:var(--accent-text);font-weight:600;white-space:nowrap}
+  .jump{background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:.9rem 1.1rem;margin:1rem 0 1.6rem}
+  .jump ol{margin:.3rem 0 0;padding-left:1.2rem}
+  .jump li{margin:.24rem 0;font-size:.94rem}
+  .jump a{text-decoration:none}
+  .jump a:hover{text-decoration:underline}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:1.3rem 1.4rem;margin:1.3rem 0;
+    scroll-margin-top:1rem}
+  .card-head{display:flex;gap:.7rem;align-items:flex-start;flex-wrap:wrap}
+  .rank{font-family:var(--mono);font-weight:700;font-size:.9rem;background:var(--accent-soft);color:var(--accent-text);
+    border:1px solid var(--line);border-radius:8px;padding:.15rem .5rem;line-height:1.5}
+  .chips{display:flex;gap:.4rem;flex-wrap:wrap;margin:.5rem 0 .3rem}
+  .chip{font-size:.7rem;font-weight:600;border-radius:999px;padding:.18rem .6rem;border:1px solid var(--line);
+    background:var(--surface-2);color:var(--ink-2);white-space:nowrap}
+  .chip.axis{background:var(--accent-soft);color:var(--accent-text)}
+  .chip.hi{background:var(--ok-soft);color:var(--ok)}
+  .chip.med{background:var(--warn-soft);color:var(--warn)}
+  .chip.cx-l{background:var(--ok-soft);color:var(--ok)}
+  .chip.cx-m{background:var(--warn-soft);color:var(--warn)}
+  .chip.cx-h{background:var(--danger-soft);color:var(--danger)}
+  .field{margin:.75rem 0}
+  .field .lbl{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:640;margin-bottom:.12rem}
+  .basis{border-left:3px solid var(--accent);background:var(--accent-soft);padding:.55rem .8rem;border-radius:0 8px 8px 0;
+    font-size:.92rem}
+  .basis .tag{font-family:var(--mono);font-size:.74rem;font-weight:700;color:var(--accent-text)}
+  figure{margin:1rem 0;background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:1rem;overflow-x:auto}
+  figure svg{display:block;max-width:100%;height:auto;margin-inline:auto}
+  figcaption{font-size:.8rem;color:var(--muted);margin-top:.5rem;text-align:center}
+  table{border-collapse:collapse;width:100%;font-size:.9rem;margin:.6rem 0}
+  th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  td .r{font-family:var(--mono);color:var(--accent-text)}
+  .combos{display:grid;gap:.6rem}
+  .combo{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:.65rem .85rem;font-size:.92rem}
+  .combo b{color:var(--accent-text)}
+  footer.composition-signal{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.76rem;color:var(--muted)}
+  .svg-txt{font-family:var(--sans);fill:var(--ink)}
+  .svg-mut{font-family:var(--sans);fill:var(--muted)}
+  .svg-mono{font-family:var(--mono);fill:var(--ink-2)}
+</style>
+
+<button class="themebtn" onclick="(function(){var r=document.documentElement;var d=(r.getAttribute('data-theme')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));r.setAttribute('data-theme',d==='dark'?'light':'dark');})()">◐ theme</button>
+
+<div class="wrap">
+
+<span class="eyebrow">Compound Engineering · Ideation</span>
+<h1>A pattern &amp; convention layer for the zts subset — and the language moves that make it possible</h1>
+<p class="lede">How to give zttp a layer of repeatable, reusable higher-layer functions and components on top of the composable, type-safe zts TypeScript subset — plus novel ways to widen the language's usability and capabilities without ever crossing the proof boundary.</p>
+
+<div class="meta">
+  <span><b>Date</b> 2026-07-23</span>
+  <span><b>Topic</b> zts-pattern-conventions-language</span>
+  <span><b>Focus</b> repeatable patterns + reusable functions/components + language usability &amp; capabilities</span>
+  <span><b>Mode</b> repo-grounded</span>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="n">40</div><div class="l">raw ideas (5 frames)</div></div>
+  <div class="stat"><div class="n">7</div><div class="l">survivors</div></div>
+  <div class="stat"><div class="n">11</div><div class="l">cut / folded</div></div>
+  <div class="stat"><div class="n">5 / 5</div><div class="l">axes covered</div></div>
+</div>
+
+<section>
+<h2>Grounding Context</h2>
+<p><b>The thesis this must serve.</b> <code>STRATEGY.md</code>: developers let AI write serverless handlers but cannot know the generated code is correct before shipping. zttp restricts the JS surface on purpose so correctness becomes <em>decidable</em>, puts the AI agent <em>inside</em> the proof boundary, and the compiler vouches for what the agent writes. Persona: a solo developer with no PM, QA, or SRE. North-star metrics: expert success rate, round-trips to first green proof, proven-path ratio, cold-start p50. One-liner: "The AI writes your handler. The compiler proves it's safe." Every idea below is judged against that loop.</p>
+
+<p><b>The language today.</b> zts is ES5 plus arrow functions, template literals, destructuring, spread, finite <code>for-of</code>, optional chaining, nullish coalescing, a <code>match</code> expression, an <code>assert</code> statement with <code>x is T</code> guards, and a pipe operator. It bans classes, <code>this</code>, <code>new</code>, <code>async/await</code>, Promises, <code>var</code>, <code>while</code>, <code>switch</code>, <code>try/catch</code>, <code>null</code>, regex, <code>==</code>, and <code>++</code> — each ban rejected at parse time with a suggestion, and each traded for a proof it unlocks.</p>
+
+<p><b>The composition base to build on.</b> <code>zttp:compose</code> ships <code>guard()</code> and <code>pipe()</code> as <em>comptime-only</em> constructs: the parser desugars <code>a |&gt; b</code> and guard chains into a flat arrow function the verifier fully understands (<code>parser/parse.zig</code> ~3320-3355). <code>zttp:scope</code> handles lifecycle; <code>zttp:io</code> gives bounded <code>parallel</code>/<code>race</code>; <code>Result&lt;T&gt;</code> is enforced (<code>.ok</code> before <code>.value</code>); the router matches flat <code>"METHOD /path"</code> keys with no groups, coercion, or nesting. Twenty-three virtual modules register at comptime (a Zig file plus a JSON spec each); third-party extensions ride the <code>zttp-sdk</code> C-ABI into a <code>zttp-ext:</code> namespace whose distribution and versioning story is <em>unspecified</em>.</p>
+
+<p><b>The proof machinery already in place.</b> Type capsules <code>Spec&lt;S&gt;</code>, <code>Proof&lt;T,S&gt;</code>, <code>Effects&lt;T,S&gt;</code> are phantom intersection markers stripped before value type-checking — the house rule is to encode every compiler primitive as a TS type, <em>never</em> a new keyword. Canonical normal form (<code>normalize</code> auto-fixer, ZTS612-620) yields an attestable <code>canonical</code> property. Every compile/build/deploy signs contract, bytecode, and rule hashes with a persistent Ed25519 identity and embeds the receipt. The rule registry is comptime-derived so it cannot drift from the checkers; typed <code>RepairIntent</code>s already cover ~44 of 71 registry entries. A <code>Law</code> union (<code>pure</code>/<code>idempotent_call</code>/<code>inverse_of</code>/<code>absorbing</code>) exists on Zig module bindings and is discharged by a z3 SMT layer over value-level IR nodes. <code>fault_coverage.zig</code> already enumerates every success/failure fork. Relative TS imports already resolve (<code>file_resolver.zig</code>).</p>
+
+<p><b>External prior art that shaped the survivors.</b> Roc platforms, Go stdlib minimalism, Deno std, Elm's cohesion-by-refusal, and Unison's content-addressed code all converge on "small core plus capability-scoped modules beats a big stdlib." Composability without classes is a solved problem via higher-order combinators and explicit effects (parser-combinator taxonomies, the Elm Architecture, algebraic effects, Railway-Oriented Programming). Ur/Web is the deepest match for the whole thesis: a type system that <em>proves</em> the absence of whole bug classes, with metaprogramming that generates typed sub-apps inheriting those proofs. Hazel — and the 2024 Blinn et al. work on statically contextualizing LLM completion with typed holes — is the direct precedent for the agent-inside-the-boundary loop.</p>
+</section>
+
+<section>
+<h2>Topic Axes</h2>
+<div class="axes">
+  <div class="axis-row"><span class="k">pattern-stdlib-layer</span><span>Packaging, distribution, and discovery of reusable higher-layer functions and components.</span></div>
+  <div class="axis-row"><span class="k">composition-ergonomics</span><span>guard / pipe / match / compose, middleware stacks, higher-order wrappers, route groups.</span></div>
+  <div class="axis-row"><span class="k">type-proof-encoding</span><span>Spec / Effects / Proof / Result; patterns that carry proofs; refinement and branded types without new keywords.</span></div>
+  <div class="axis-row"><span class="k">language-dx</span><span>Error messages, learnable idioms, canonical profile, restrictions-as-features, discovery.</span></div>
+  <div class="axis-row"><span class="k">novel-capabilities</span><span>Extending the subset itself while preserving decidability and the proof boundary.</span></div>
+</div>
+</section>
+
+<section>
+<h2>Ranked Ideas</h2>
+<div class="jump">
+  <b style="font-size:.8rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Jump to</b>
+  <ol>
+    <li><a href="#i1">Typed holes — the compiler writes the agent's prompt</a> · <span style="color:var(--muted)">language-dx</span></li>
+    <li><a href="#i2">Unforgeable <code>Validated&lt;T&gt;</code> brands — parse, don't validate, enforced by type</a> · <span style="color:var(--muted)">type-proof-encoding</span></li>
+    <li><a href="#i3">Combinator algebra — named guard stacks, route groups, provable coverage</a> · <span style="color:var(--muted)">composition-ergonomics</span></li>
+    <li><a href="#i4">Route-table determinism proof — interlocking for routes</a> · <span style="color:var(--muted)">type-proof-encoding</span></li>
+    <li><a href="#i5">Proof-carrying pattern capsules — content-addressed, re-verified on import</a> · <span style="color:var(--muted)">pattern-stdlib-layer</span></li>
+    <li><a href="#i6">Certified handler forms — comptime generators that inherit proofs</a> · <span style="color:var(--muted)">novel-capabilities</span></li>
+    <li><a href="#i7">Compositional proof provenance — receipts that name the parts</a> · <span style="color:var(--muted)">type-proof-encoding</span></li>
+  </ol>
+</div>
+
+<!-- IDEA 1 -->
+<article class="card" id="i1">
+  <div class="card-head"><span class="rank">1</span><h3>Typed holes — the compiler writes the agent's prompt</h3></div>
+  <div class="chips"><span class="chip axis">language-dx</span><span class="chip hi">Confidence High · 80%</span><span class="chip cx-m">Complexity Medium</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Add a <code>hole()</code> (or <code>todo("desc")</code>) builtin — a function call, not a keyword, in the same family as <code>range()</code> and <code>comptime()</code>. A hole parses, type-checks against its expected type, and lets the rest of the program verify normally; at runtime it compiles to a <code>501</code> so partial handlers still run under <code>dev</code>. <code>zttp check --holes --json</code> emits, per hole: the expected type, the in-scope bindings with their types, the remaining capability budget from the <code>Effects</code> ceiling, the undischarged <code>Spec</code> obligations flowing through it, and the module exports whose signatures fit. That JSON block <em>is</em> a statically contextualized prompt for the expert agent — it fills one hole at a time instead of regenerating a whole file.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 720 200" role="img" aria-label="Before: whole-file regeneration loop. After: per-hole fill with compiler-supplied context.">
+      <text x="12" y="20" class="svg-mut" font-size="11" font-weight="700">TODAY — batch loop</text>
+      <rect x="12" y="32" width="150" height="34" rx="7" fill="var(--danger-soft)" stroke="var(--line)"/>
+      <text x="87" y="53" text-anchor="middle" class="svg-txt" font-size="12">agent writes whole file</text>
+      <line x1="162" y1="49" x2="212" y2="49" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="212" y="32" width="120" height="34" rx="7" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="272" y="53" text-anchor="middle" class="svg-txt" font-size="12">check (all-or-none)</text>
+      <line x1="332" y1="49" x2="382" y2="49" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="382" y="32" width="150" height="34" rx="7" fill="var(--danger-soft)" stroke="var(--line)"/>
+      <text x="457" y="53" text-anchor="middle" class="svg-txt" font-size="12">9 errors → full rewrite</text>
+      <path d="M457 66 C457 92, 87 92, 87 68" fill="none" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+      <text x="272" y="88" text-anchor="middle" class="svg-mut" font-size="10.5">round-trip: whole file</text>
+
+      <text x="12" y="128" class="svg-mut" font-size="11" font-weight="700">WITH HOLES — incremental</text>
+      <rect x="12" y="140" width="150" height="34" rx="7" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="87" y="161" text-anchor="middle" class="svg-txt" font-size="12">skeleton + hole()s</text>
+      <line x1="162" y1="157" x2="212" y2="157" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="212" y="140" width="150" height="34" rx="7" fill="var(--accent-soft)" stroke="var(--line)"/>
+      <text x="287" y="157" text-anchor="middle" class="svg-txt" font-size="12">check --holes emits</text>
+      <text x="287" y="170" text-anchor="middle" class="svg-mut" font-size="10">type + scope + obligations</text>
+      <line x1="362" y1="157" x2="412" y2="157" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <rect x="412" y="140" width="130" height="34" rx="7" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="477" y="161" text-anchor="middle" class="svg-txt" font-size="12">agent fills 1 hole</text>
+      <path d="M477 174 C477 194, 287 194, 287 176" fill="none" stroke="var(--ok)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+      <text x="382" y="192" text-anchor="middle" class="svg-mut" font-size="10.5">round-trip: one expression</text>
+      <defs>
+        <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>The iteration unit shrinks from the file to a single expression, and the compiler — not the model's guesswork — supplies the fill context.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">external:</span> Hazel typed holes and Blinn et al., "Statically Contextualizing Large Language Models with Typed Holes" (OOPSLA 2024) — the exact architecture of feeding a hole's type and context to an LLM. <span class="tag">direct:</span> verification is a tree walk, not a fixpoint (<code>docs/verification.md:26-27</code>), so a typed hole is a leaf that adds no back-edge and stays sound to skip-and-oblige; <code>range()</code> in <code>builtins/number.zig</code> shows the exact builtin-add path; a hole is a call, so the "encode as types/builtins, never keywords" rule holds.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>Every north-star metric moves at once. Round-trips to first green proof drop because the agent's prompt is exact instead of inferred (project memory records that the real cause of one expert budget-exhaustion was missing module signatures — precisely the context a hole report carries). Expert success rate rises because the expected type constrains generation. And no competing AI-codegen product can hand its model a machine-checked completion contract, because none owns the whole analyzer.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>The hole report is only as good as the type checker's contextual precision; a hole in a deeply generic position may under-specify. Runtime <code>501</code> semantics need a clear "holes present" signal so a holey handler never silently deploys. The IDE/agent JSON schema becomes a stability surface to maintain.</p></div>
+</article>
+
+<!-- IDEA 2 -->
+<article class="card" id="i2">
+  <div class="card-head"><span class="rank">2</span><h3>Unforgeable <code>Validated&lt;T&gt;</code> brands — parse, don't validate, enforced by type</h3></div>
+  <div class="chips"><span class="chip axis">type-proof-encoding</span><span class="chip hi">Confidence High · 80%</span><span class="chip cx-m">Complexity Medium</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Connect three systems that already exist but never talk: nominal branding, <code>validateJson</code> schemas, and flow-analysis labels. Define <code>Validated&lt;T, "schema"&gt;</code> as a nominal phantom capsule (same encoding as <code>Spec</code>/<code>Effects</code>) that <em>only</em> the <code>zttp:validate</code> return path can construct — unforgeable because nominal types reject structural forgery. Egress sinks (<code>sqlExec</code>, <code>fetch</code>, <code>Response.json</code> on outbound paths) then require the brand in their signatures. Optionally, derive the record type itself from the schema literal the way <code>Pick</code>/<code>Omit</code> already compute types from literals, so one schema definition yields both the shape and the brand. The taint rule ZTS407 stops being a post-hoc flow diagnostic and becomes a local type obligation the agent satisfies incrementally.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 700 210" role="img" aria-label="Only validateJson mints the Validated brand; every egress sink demands it; raw input cannot reach a sink.">
+      <rect x="14" y="30" width="130" height="40" rx="9" fill="var(--warn-soft)" stroke="var(--line)"/>
+      <text x="79" y="47" text-anchor="middle" class="svg-txt" font-size="12">req.body / params</text>
+      <text x="79" y="62" text-anchor="middle" class="svg-mut" font-size="10">label: user_input</text>
+
+      <line x1="144" y1="50" x2="214" y2="50" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a2)"/>
+      <rect x="214" y="26" width="150" height="48" rx="9" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+      <text x="289" y="45" text-anchor="middle" class="svg-txt" font-size="12" font-weight="650">validateJson("todo")</text>
+      <text x="289" y="61" text-anchor="middle" class="svg-mut" font-size="10">the ONLY minter</text>
+
+      <line x1="364" y1="50" x2="434" y2="50" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#a2ok)"/>
+      <text x="399" y="42" text-anchor="middle" class="svg-mono" font-size="10">Validated&lt;Todo&gt;</text>
+      <rect x="434" y="30" width="120" height="40" rx="9" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="494" y="47" text-anchor="middle" class="svg-txt" font-size="12">sqlExec / fetch</text>
+      <text x="494" y="62" text-anchor="middle" class="svg-mut" font-size="10">demands the brand</text>
+
+      <path d="M79 70 C79 150, 494 150, 494 72" fill="none" stroke="var(--danger)" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a2no)"/>
+      <rect x="250" y="132" width="200" height="26" rx="13" fill="var(--danger-soft)" stroke="var(--danger)"/>
+      <text x="350" y="149" text-anchor="middle" class="svg-txt" font-size="11" font-weight="600">raw → sink : type error (ZTS407)</text>
+      <defs>
+        <marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker>
+        <marker id="a2ok" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--ok)"/></marker>
+        <marker id="a2no" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--danger)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>The brand is a key only <code>validateJson</code> holds; a sink that demands it is structurally unreachable by unvalidated data.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> <code>addNominalAlias</code> at <code>type_pool.zig:294</code> with the comment "prevents structural forgery" (:119); <code>.return_labels = .{ .validated = true }</code> on the validate binding (<code>security/validate.zig:25/38/51</code>); the <code>unvalidated_input_in_egress</code> → ZTS407 rule (<code>flow_checker.zig:64/1396</code>). Project memory records the taint-laundering fail-open CRIT is still open after many review passes. <span class="tag">external:</span> Refinement Types for TypeScript (Vekris/Cosman/Jhala, PLDI 2016) layer refinements via intersections with no new syntax; the object-capability model treats capabilities as unforgeable values.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>"Parse, don't validate" is the strongest known convention for correct handler code; this makes it <em>enforced</em>, not aspirational. It gives the pattern layer (idea 5) a way to demand safe inputs by signature, and it is a second, independent line of defense against exactly the taint-laundering class that a single flow pass has repeatedly failed to close. The agent gets an unambiguous target: the type error names the validator to insert.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>Retrofitting sink signatures to demand the brand is a breaking change to module surfaces that needs a migration. Schema-to-record-type derivation is a real type-checker feature, not free. A "phase/typestate" generalization (branding a <code>Request</code> as it advances through guards) is tempting but the checker has no flow-sensitive rebinding today — treat that as a later, harder extension, not part of the first cut.</p></div>
+</article>
+
+<!-- IDEA 3 -->
+<article class="card" id="i3">
+  <div class="card-head"><span class="rank">3</span><h3>Combinator algebra — named guard stacks, route groups, provable coverage</h3></div>
+  <div class="chips"><span class="chip axis">composition-ergonomics</span><span class="chip hi">Confidence High · 82%</span><span class="chip cx-m">Complexity Medium</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Generalize the one trick the repo already proves — that <code>guard()</code>/<code>pipe()</code> are parser-desugared, not runtime values — into a deliberate combinator taxonomy. Add <code>stack(name, ...guards)</code> for named, reusable chains that inline at use sites; support route groups (<code>{ "/api": { use: [guard(auth)], "GET /todos": list } }</code>) that flatten at parse time into the existing <code>"METHOD /path"</code> table with the guard chain woven into every handler in the group; and fold in a <code>rail(f1, f2, f3)</code> combinator that desugars a Result-returning sequence into the <code>.ok</code>-check early-return chain the verifier already demands. Because the desugar sees the whole group, the verifier can discharge a new <code>Spec&lt;"guarded"&gt;</code>: "every route under <code>/admin</code> passes <code>requireAuth</code> before its body." Runtime shape is byte-identical to hand-written code.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 700 220" role="img" aria-label="A nested route group with a shared guard stack desugars at parse time into flat route keys, each with the guard woven in.">
+      <text x="14" y="18" class="svg-mut" font-size="11" font-weight="700">AUTHORED (grouped)</text>
+      <rect x="14" y="28" width="250" height="150" rx="10" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="30" y="50" class="svg-mono" font-size="11">"/admin": {</text>
+      <text x="46" y="70" class="svg-mono" font-size="11">use: [guard(auth)],</text>
+      <text x="46" y="92" class="svg-mono" font-size="11">"GET /users": listUsers,</text>
+      <text x="46" y="114" class="svg-mono" font-size="11">"POST /ban": banUser,</text>
+      <text x="46" y="136" class="svg-mono" font-size="11">"GET /logs": showLogs</text>
+      <text x="30" y="158" class="svg-mono" font-size="11">}</text>
+
+      <line x1="270" y1="103" x2="322" y2="103" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#a3)"/>
+      <text x="296" y="95" text-anchor="middle" class="svg-mut" font-size="9.5">parse-time</text>
+      <text x="296" y="118" text-anchor="middle" class="svg-mut" font-size="9.5">desugar</text>
+
+      <text x="332" y="18" class="svg-mut" font-size="11" font-weight="700">FLAT TABLE (proven)</text>
+      <rect x="332" y="28" width="354" height="46" rx="8" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="346" y="47" class="svg-mono" font-size="10.5">"GET /admin/users" → auth |&gt; listUsers</text>
+      <text x="346" y="65" class="svg-mut" font-size="9.5">guard woven in</text>
+      <rect x="332" y="80" width="354" height="46" rx="8" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="346" y="99" class="svg-mono" font-size="10.5">"POST /admin/ban" → auth |&gt; banUser</text>
+      <text x="346" y="117" class="svg-mut" font-size="9.5">guard woven in</text>
+      <rect x="332" y="132" width="354" height="46" rx="8" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="346" y="151" class="svg-mono" font-size="10.5">"GET /admin/logs" → auth |&gt; showLogs</text>
+      <text x="346" y="169" class="svg-mut" font-size="9.5">guard woven in</text>
+      <rect x="332" y="188" width="354" height="26" rx="13" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="509" y="205" text-anchor="middle" class="svg-txt" font-size="11" font-weight="600">verifier discharges Spec&lt;"guarded"&gt;</text>
+      <defs><marker id="a3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--accent)"/></marker></defs>
+    </svg>
+    <figcaption>One <code>use</code> stack, three routes — the compiler proves not one of them can skip auth. Forgetting a guard becomes impossible, not merely reviewable.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> the desugar site already synthesizes the flat arrow and enforces "guard composition allows exactly one handler" (<code>parser/parse.zig</code> ~3320-3355); the router is confirmed flat <code>"METHOD /path"</code> with up to 8 params and no groups (<code>modules/src/http/router.zig:73-105</code>); the composition dossier's friction list names "no named middleware stacks, no route groups, no parameterized guards." <span class="tag">external:</span> parser-combinator design-pattern taxonomies and Railway-Oriented Programming as the established vocabulary for the <code>rail</code> half.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>The most-repeated boilerplate in a multi-route handler is re-declaring the same guard chain per route — and the highest-severity bug an AI can generate is the one route that forgot the auth guard. No mainstream framework can prove middleware coverage; zttp's comptime desugar plus verifier can, with zero new keywords and zero runtime cost. It also gives the agent one canonical spelling to learn, which is where convention actually forms.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>Desugaring nested groups into the flat table must keep the contract extractor's route list exact, or attestation drifts. Parameterized guards like <code>guard(requireRole("admin"))</code> desugar to a per-request call, not true partial application — fine, but do not oversell it. Group semantics (ordering, override, nested groups) need a spec before they sprawl.</p></div>
+</article>
+
+<!-- IDEA 4 -->
+<article class="card" id="i4">
+  <div class="card-head"><span class="rank">4</span><h3>Route-table determinism proof — interlocking for routes</h3></div>
+  <div class="chips"><span class="chip axis">type-proof-encoding</span><span class="chip hi">Confidence High · 85%</span><span class="chip cx-l">Complexity Low</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Railway interlocking proves, at design time over a finite table, that no two conflicting routes can be set at once. The zts route grammar is finite and regex-free — literal segments, <code>:param</code>, a terminal <code>*</code>, no nesting — so pairwise overlap, wildcard shadowing, and method-pin completeness are all decidable by construction. Add a compiler pass that proves the route table deterministic (no request matches two routes, no route is dead behind a wildcard, every declared method is reachable) and emit a <code>routes_deterministic</code> contract property, dischargeable as <code>Spec&lt;"routes_total"&gt;</code> and visible in the contract diff.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 680 150" role="img" aria-label="Two route patterns that both match the same incoming request are detected as an overlap at build time.">
+      <rect x="14" y="24" width="220" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="28" y="46" class="svg-mono" font-size="11">GET /users/:id</text>
+      <rect x="14" y="66" width="220" height="34" rx="8" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="28" y="88" class="svg-mono" font-size="11">GET /users/*</text>
+      <line x1="234" y1="41" x2="300" y2="60" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#a4)"/>
+      <line x1="234" y1="83" x2="300" y2="64" stroke="var(--danger)" stroke-width="1.5" marker-end="url(#a4)"/>
+      <rect x="300" y="46" width="150" height="34" rx="8" fill="var(--warn-soft)" stroke="var(--line)"/>
+      <text x="375" y="68" text-anchor="middle" class="svg-mono" font-size="11">GET /users/42</text>
+      <line x1="450" y1="63" x2="510" y2="63" stroke="var(--danger)" stroke-width="1.6" marker-end="url(#a4d)"/>
+      <rect x="510" y="42" width="156" height="42" rx="10" fill="var(--danger-soft)" stroke="var(--danger)"/>
+      <text x="588" y="60" text-anchor="middle" class="svg-txt" font-size="11" font-weight="600">build error:</text>
+      <text x="588" y="75" text-anchor="middle" class="svg-mut" font-size="10">route 1 shadows route 2</text>
+      <defs>
+        <marker id="a4" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--danger)"/></marker>
+        <marker id="a4d" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--danger)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>A finite, regex-free grammar makes overlap a decidable question — the pass answers it before the request ever arrives.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> <code>matchRoute</code> (<code>modules/src/http/router.zig:73-105</code>) splits on <code>/</code>, matches <code>:</code> params and a terminal <code>*</code>, no regex — a grammar small enough for exact pairwise intersection. Project memory records a shipped AOT method-dispatch bug (2026-07-03) where a match arm dropped the method pin — exactly the conflict class this pass catches. <span class="tag">external:</span> railway interlocking / control tables: finite enumerable routes, conflicts fatal, runtime discipline insufficient, so safety moves to a design-time proven table.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>The proven-route-table pre-filter already exists at runtime; this makes its correctness a proof rather than an assumption, and it catches a defect class the project has already shipped once. It is the smallest sound idea here — a bounded pass over a finite table — and it produces a clean, demo-able attestable property.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>Low ceiling: it proves one property and does not compound much on its own. Overlap semantics need a decision on whether some overlaps are intentional (a specific route plus a catch-all) and should be allowed with an explicit precedence declaration rather than rejected.</p></div>
+</article>
+
+<!-- IDEA 5 -->
+<article class="card" id="i5">
+  <div class="card-head"><span class="rank">5</span><h3>Proof-carrying pattern capsules — content-addressed, re-verified on import</h3></div>
+  <div class="chips"><span class="chip axis">pattern-stdlib-layer</span><span class="chip med">Confidence Medium · 65%</span><span class="chip cx-h">Complexity High</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Create a distribution format for higher-layer patterns written <em>in the subset itself</em>: a pattern file exports functions plus their declared <code>Spec</code>/<code>Effects</code> capsules. Its identity is the SHA-256 of its <em>canonical normal form</em> — because <code>normalize</code> produces one stable spelling per operation, two authors who write the same pattern get the same hash, Unison-style, with no registry server. A handler imports it (a <code>zttp-pat:</code> specifier tier or a local path); at compile time the pattern source is inlined pre-parse and <em>re-verified</em>, so proofs are inherited by re-checking, not by trust — the Ed25519 receipt exists to make the pattern auditable and shareable, not to skip verification. Start with the cheap, shippable-in-days first step: a local <code>zttp patterns [--json]</code> catalog (the seven <code>examples/patterns/</code> files promoted to versioned entries, folded into the policy hash) that the expert agent can cite in veto messages. The full self-mining "distill patterns from a corpus of green handlers" idea is a natural sequel once distribution exists.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 700 180" role="img" aria-label="A pattern is normalized, hashed for identity, and signed; importing it re-verifies the hash and the proofs locally, needing no registry server.">
+      <rect x="14" y="30" width="120" height="40" rx="9" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="74" y="47" text-anchor="middle" class="svg-txt" font-size="12">pattern.ts</text>
+      <text x="74" y="62" text-anchor="middle" class="svg-mut" font-size="10">+ Spec/Effects</text>
+      <line x1="134" y1="50" x2="184" y2="50" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a5)"/>
+      <rect x="184" y="30" width="120" height="40" rx="9" fill="var(--accent-soft)" stroke="var(--line)"/>
+      <text x="244" y="47" text-anchor="middle" class="svg-txt" font-size="12">normalize</text>
+      <text x="244" y="62" text-anchor="middle" class="svg-mut" font-size="10">stable spelling</text>
+      <line x1="304" y1="50" x2="354" y2="50" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a5)"/>
+      <rect x="354" y="30" width="140" height="40" rx="9" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="424" y="47" text-anchor="middle" class="svg-mono" font-size="11">sha256(canon)</text>
+      <text x="424" y="62" text-anchor="middle" class="svg-mut" font-size="10">= identity</text>
+      <line x1="494" y1="50" x2="544" y2="50" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a5)"/>
+      <rect x="544" y="30" width="140" height="40" rx="9" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="614" y="47" text-anchor="middle" class="svg-txt" font-size="12">Ed25519 receipt</text>
+      <text x="614" y="62" text-anchor="middle" class="svg-mut" font-size="10">audit, not trust</text>
+
+      <path d="M614 70 C614 118, 300 118, 300 118" fill="none" stroke="var(--accent)" stroke-width="1.5" marker-end="url(#a5)"/>
+      <rect x="150" y="104" width="300" height="42" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="300" y="122" text-anchor="middle" class="svg-txt" font-size="11" font-weight="600">import → inline pre-parse → RE-VERIFY locally</text>
+      <text x="300" y="138" text-anchor="middle" class="svg-mut" font-size="10">hash + proofs re-checked in the handler's context; no registry server</text>
+      <defs><marker id="a5" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker></defs>
+    </svg>
+    <figcaption>The compiler is the trust infrastructure: identity is a hash, trust is a re-check. npm and Deno cannot do this because they lack a canonical form and an in-tree prover.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> <code>extension_bindings.zig</code> is literally an empty binding list (no third-party distribution story); the <code>canonical</code> proof property exists (<code>docs/canonical-profile.md:44-46</code>); Ed25519 receipts ship default-on; relative TS imports already resolve (<code>modules/internal/file_resolver.zig</code> probes <code>.ts/.tsx/.js/.jsx</code>), so "import re-verifies locally" has a real substrate. <span class="tag">external:</span> Unison's content-addressed code (identity over a canonicalized form) and Deno std's per-module audit + uniform namespace.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>This is the strategic bet: it extends the whole thesis from "the compiler proves your handler" to "the compiler proves the shared code your handler stands on," and it does so without a registry, a package manager, or any trust infrastructure — which the solo-dev persona and the zero-dependency constraint both demand. It also turns the expert agent into a pattern <em>author</em>: successful handlers become minted, verified, shareable capsules, which is the compounding flywheel behind the entire ask.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>The largest surface here by far — specifier tier, hash resolution, receipt verification, catalog tooling. Hash-to-source resolution must stay offline-first (vendored source verified against the pinned hash at compile time); if it ever needs a network fetch it violates the constraints. The flat global module namespace is not uniqueness-enforced, so capsule naming needs a collision story. Sequence it: local catalog first, full content-addressed distribution later.</p></div>
+</article>
+
+<!-- IDEA 6 -->
+<article class="card" id="i6">
+  <div class="card-head"><span class="rank">6</span><h3>Certified handler forms — comptime generators that inherit proofs</h3></div>
+  <div class="chips"><span class="chip axis">novel-capabilities</span><span class="chip med">Confidence Medium · 60%</span><span class="chip cx-h">Complexity High</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Form-based zoning permits any building conforming to a certified form "by right," with no case-by-case review. Ship a small set of certified handler <em>forms</em> — <code>resource({...})</code>, <code>webhook({...})</code>, <code>proxy({...})</code> — as comptime-only desugars (the exact mechanism <code>guard</code>/<code>pipe</code> use today). The parser expands a declarative literal into canonical handler source — routes, validation calls that mint <code>Validated</code> brands (idea 2), Result rails, and for <code>webhook</code> an unforgettable signature-verify step — and that generated source flows through the ordinary stripper → parser → type-checker → verifier → flow-checker → normalize pipeline. Every generated line is proven exactly like hand-written code because it never bypasses the pipeline; the expansion is committed to a visible file by <code>normalize --write</code> so there is no hidden code.</p></div>
+
+  <figure>
+    <svg viewBox="0 0 690 150" role="img" aria-label="A declarative form literal expands before parsing into canonical handler source, which then flows through the full unchanged proof pipeline.">
+      <rect x="14" y="46" width="130" height="52" rx="10" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="79" y="68" text-anchor="middle" class="svg-mono" font-size="11">resource({...})</text>
+      <text x="79" y="84" text-anchor="middle" class="svg-mut" font-size="10">declarative literal</text>
+      <line x1="144" y1="72" x2="196" y2="72" stroke="var(--accent)" stroke-width="1.6" marker-end="url(#a6)"/>
+      <text x="170" y="64" text-anchor="middle" class="svg-mut" font-size="9">pre-parse</text>
+      <rect x="196" y="46" width="150" height="52" rx="10" fill="var(--accent-soft)" stroke="var(--line)"/>
+      <text x="271" y="68" text-anchor="middle" class="svg-txt" font-size="11">expand → canonical</text>
+      <text x="271" y="84" text-anchor="middle" class="svg-mut" font-size="10">ordinary subset source</text>
+      <line x1="346" y1="72" x2="398" y2="72" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#a6m)"/>
+      <rect x="398" y="40" width="150" height="64" rx="10" fill="var(--surface)" stroke="var(--line)"/>
+      <text x="473" y="60" text-anchor="middle" class="svg-txt" font-size="11">full pipeline</text>
+      <text x="473" y="76" text-anchor="middle" class="svg-mut" font-size="9.5">strip · parse · types</text>
+      <text x="473" y="90" text-anchor="middle" class="svg-mut" font-size="9.5">verify · flow · normalize</text>
+      <line x1="548" y1="72" x2="600" y2="72" stroke="var(--ok)" stroke-width="1.6" marker-end="url(#a6ok)"/>
+      <rect x="600" y="46" width="76" height="52" rx="10" fill="var(--ok-soft)" stroke="var(--line)"/>
+      <text x="638" y="68" text-anchor="middle" class="svg-txt" font-size="11">proven</text>
+      <text x="638" y="84" text-anchor="middle" class="svg-mut" font-size="9.5">envelope</text>
+      <defs>
+        <marker id="a6" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--accent)"/></marker>
+        <marker id="a6m" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--muted)"/></marker>
+        <marker id="a6ok" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--ok)"/></marker>
+      </defs>
+    </svg>
+    <figcaption>A form is a generator whose every instantiation is re-proven. <code>zttp check</code> on the output is bit-identical to checking hand-written source.</figcaption>
+  </figure>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> <code>compose.zig</code> is <code>.comptime_only = true</code> with stub implementations the parser replaces — the desugar-then-re-prove mechanism is proven in-tree; prior <code>resource()</code> HAL/HTMX work (project memory) shows demand for the declarative shape. <span class="tag">external:</span> Ur/Web — metaprogramming that generates whole typed sub-apps inheriting the framework's proofs, named as the deepest match for zttp's thesis; form-based zoning codes as the "certified form permitted by right" structural analogy.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>This answers the "reusable <em>components</em>" half of the ask at full strength: a component is not a snippet, it is a generator whose every instantiation is re-proven. For the ~80% of handlers that are CRUD, webhook, or proxy, the AI fills a form instead of free-writing, and green proof becomes near-instant because the envelope was proven once. Because the output is canonical by construction, its hash lands in the receipt — attestable codegen, which no runtime offers.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>Highest cost and highest ceiling. The form catalog is a design surface that can sprawl; each form's proof envelope must be specified and defended. It naturally sequences <em>after</em> idea 3 (route groups/stacks are its substrate) and idea 2 (brands are what its validation steps mint). Note: this is the buildable, pre-parse form of generation — the tempting "let comptime call user functions gated on a totality proof" version is infeasible because comptime runs before parse/verification exist.</p></div>
+</article>
+
+<!-- IDEA 7 -->
+<article class="card" id="i7">
+  <div class="card-head"><span class="rank">7</span><h3>Compositional proof provenance — receipts that name the parts</h3></div>
+  <div class="chips"><span class="chip axis">type-proof-encoding</span><span class="chip med">Confidence Medium · 65%</span><span class="chip cx-m">Complexity Medium</span></div>
+
+  <div class="field"><div class="lbl">Description</div>
+  <p>Function-level capsules already compose — a helper typed <code>digest(s): Effects&lt;string, "crypto"&gt;</code> lifts into <code>handler(req): Effects&lt;Response, "crypto"&gt;</code>, and the type env keeps spec and effect extractions separate so both stack. What is missing is <em>surfacing</em> the composition: today the receipt attests the handler's final properties as a flat list, discarding the fact that they were discharged by named, reusable functions. Record the discharge tree — "handler is <code>deterministic</code> because <code>paginate</code> is <code>Proof&lt;_, "total"&gt;</code> and <code>formatIso</code> is <code>pure</code>" — into the contract and the JWS receipt, and render it in proof traces. On a failure, the tree localizes which callee broke the chain instead of pointing at the whole handler.</p></div>
+
+  <div class="field"><div class="lbl">Basis</div>
+  <div class="basis"><span class="tag">direct:</span> the two-capsule composition is real — <code>type_env.zig:44-47</code>: "Distinct marker fields let a return type carry both capsules and have each extraction recover only its own," and the <code>effects-capsule.ts</code> example shows two-level composition working today. <span class="tag">reasoned:</span> the discharge tree is information the type checker already computes while resolving capsules; persisting it into the existing contract + receipt is a serialization extension, not a new analysis, and it compounds the shipped "proof-explained failures" investment.</div></div>
+
+  <div class="field"><div class="lbl">Rationale</div>
+  <p>This turns the pattern layer into <em>visible</em> proof leverage: a user who adopts a proven pattern sees their receipt strengthened by name — "the compiler proves it's safe, and here are the proven parts it stands on," which is the marketing loop for the whole thesis. It also gives the agent a repair heuristic: when a spec fails to discharge, the provenance tree names the callee that broke it rather than emitting a whole-handler error.</p></div>
+
+  <div class="field"><div class="lbl">Downsides</div>
+  <p>Modest standalone value — it is most compelling once ideas 5 and 6 exist to produce named, reusable parts worth citing. The receipt schema grows and must stay stable. Provenance depth needs a cap so a deeply nested handler does not produce an unreadable tree.</p></div>
+</article>
+</section>
+
+<section>
+<h2>Cross-cutting combinations</h2>
+<div class="combos">
+  <div class="combo"><b>The AI authoring loop, rebuilt</b> — idea 6 gives skeletons (certified forms), idea 1 gives a per-gap completion contract (typed holes), and route/guard coverage from idea 3 is proven as the form expands. Together they attack "round-trips to first green proof" from three sides at once: fewer things to write, exact context for each gap, and coverage guaranteed by construction.</div>
+  <div class="combo"><b>Type capsules as the universal proof carrier</b> — ideas 2 and 7 make the phantom-intersection encoding do double duty: <code>Validated&lt;T&gt;</code> brands carry taint proofs into signatures, and provenance records which branded/proven parts discharged the handler claim. Patterns become safe-by-signature, and the receipt shows why.</div>
+  <div class="combo"><b>A self-strengthening pattern layer</b> — idea 5's content-addressed capsules, once they exist, make idea 7's provenance citations portable across projects (a pattern proven once is cached by content hash), and the "distill patterns from proven handlers" sequel turns every shipped handler into catalog input. Each pattern shipped becomes a reusable proof.</div>
+</div>
+</section>
+
+<section>
+<h2>Rejection Summary</h2>
+<table>
+  <thead><tr><th>Idea</th><th>Axis</th><th>Reason cut</th></tr></thead>
+  <tbody>
+    <tr><td>Total repair coverage 48/48</td><td>language-dx</td><td>Premise stale: typed repairs already cover ~44 of 71 registry entries (~62%), not 9/48; the remaining nulls are partly by-design ("no single canonical repair"). Real nugget — retiring the <code>splitSuggestion</code> prose-parsing coupling — is too small to be a flagship.</td></tr>
+    <tr><td>Comptime LAMBDA (user pure fns at build time)</td><td>novel-capabilities</td><td>Refuted as pitched: <code>comptime()</code> is a pre-parse stripper transformation; gating it on <code>Proof&lt;T,"total"&gt;</code> needs parse + type-check + verification results that only exist after the phase comptime runs. Needs a different post-parse partial-eval architecture.</td></tr>
+    <tr><td>Poka-yoke <code>Phase&lt;S&gt;</code> request brands</td><td>composition-ergonomics</td><td>Duplicate of idea 2's mechanism with weaker feasibility — the checker has no flow-sensitive typestate/rebinding, so what is buildable is a chain-order check inside the desugar, not a phase advancing in the type. Folded into idea 2 as a later extension.</td></tr>
+    <tr><td>Userland algebraic laws via z3</td><td>type-proof-encoding</td><td>Discharge story breaks: mechanism-5's SMT encoder proves value-level IR-node denotations, not arbitrary user TS bodies, and can never reach native <code>zttp-ext</code> Zig — "refute a false <code>replay_pure</code>" is not z3-decidable for native code.</td></tr>
+    <tr><td>Spec ratchet <code>--pin</code></td><td>type-proof-encoding</td><td>Mostly shipped: <code>ratchet check</code> already compiles, diffs declared vs proven specs, and exits non-zero on a dropped property. Residual delta is only an auto-pin annotation rewrite — a convenience flag, not a direction.</td></tr>
+    <tr><td>House Profile / convention rule packs</td><td>pattern-stdlib-layer</td><td>Self-undermining basis: the rule registry is comptime-derived precisely so it cannot drift; project-local runtime-configured rules break that design and the policy-hash story, and a convention DSL is large surface for a solo-dev persona.</td></tr>
+    <tr><td>MEL dispatch-relief / fault-coverage gate</td><td>type-proof-encoding</td><td>Largely redundant: the verifier + ZTS303 already force every failure fork to return a proven Response. The genuine content is the degradation "placard" report; the gate itself adds little over existing guarantees.</td></tr>
+    <tr><td><code>zttp distill</code> (self-mining pattern lib)</td><td>pattern-stdlib-layer</td><td>Needs a corpus a solo dev does not have and depends on idea 5's distribution layer to land. Kept as a noted sequel to idea 5, not a standalone survivor.</td></tr>
+    <tr><td>Kernel-zts + certified desugaring architecture</td><td>novel-capabilities</td><td>Overstates the basis: mechanism 5 proves <code>denote == exec(lower)</code> for value nodes; match/guard/destructuring desugarings are statement/control-flow level, outside the current SMT model. A research program, not an extension of shipped machinery.</td></tr>
+    <tr><td>Rail() Result composition (standalone)</td><td>composition-ergonomics</td><td>Sound mechanism but same comptime-desugar family as idea 3 — folded in as one agenda item rather than its own card.</td></tr>
+    <tr><td>Local pattern catalog (standalone)</td><td>pattern-stdlib-layer</td><td>Not rejected — absorbed into idea 5 as its cheap, shippable-first step.</td></tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+<h2>Source anchors</h2>
+<p style="font-size:.9rem">Load-bearing citations, verified against the repo during the critique pass:</p>
+<ul style="font-size:.9rem">
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/zts/src/parser/parse.zig">parser/parse.zig</a> — guard/pipe comptime desugar (~3320-3355)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/modules/src/http/router.zig">modules/src/http/router.zig</a> — flat route matching (73-105)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/zts/src/type_pool.zig">zts/src/type_pool.zig</a> — <code>addNominalAlias</code> (294), forgery comment (119)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/modules/src/security/validate.zig">modules/src/security/validate.zig</a> — <code>.validated</code> return label (25/38/51)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/zts/src/flow_checker.zig">zts/src/flow_checker.zig</a> — ZTS407 unvalidated-input-in-egress (64/1396)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/verification.md">docs/verification.md</a> — tree-walk verification (26-27)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/docs/canonical-profile.md">docs/canonical-profile.md</a> — <code>canonical</code> proof property (44-46)</li>
+  <li><a href="https://github.com/srdjan/zigttp/blob/main/packages/modules/src/workflow/compose.zig">modules/src/workflow/compose.zig</a> — <code>comptime_only</code> module template</li>
+</ul>
+</section>
+
+<footer class="composition-signal">Composed 2026-07-23 by compound-engineering ce-ideate · repo-grounded · 5 Fable ideation frames + fresh-context basis verification · from the prompt "repeatable patterns &amp; conventions on the zts subset + language usability/capabilities."</footer>
+
+</div>

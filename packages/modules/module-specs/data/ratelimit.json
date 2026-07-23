@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:ratelimit",
+  "specifier": "zttp:ratelimit",
   "source": "packages/modules/src/data/ratelimit.zig",
   "requiredCapabilities": [
     "clock"

@@ -1,10 +1,10 @@
-//! zigttp:id - ID generation (UUID v4, ULID, nanoid)
+//! zttp:id - ID generation (UUID v4, ULID, nanoid)
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:id",
+    .specifier = "zttp:id",
     .name = "id",
     .required_capabilities = &.{ .clock, .random },
     .exports = &.{

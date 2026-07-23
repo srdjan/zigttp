@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
@@ -150,7 +150,7 @@ fn runOneTest(
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = null };
     };
 
-    // Each test case gets its own zigttp:queue ActorQueue, matching the
+    // Each test case gets its own zttp:queue ActorQueue, matching the
     // fresh Runtime and ReplayState below: sharing one queue across test
     // cases in the same file would leak mailbox/lease/dead-letter state
     // (e.g. a message left un-received by one test would be visible to
@@ -551,7 +551,7 @@ test "run: actor queue flag installs queue runtime for declarative tests" {
     });
 
     const handler_code =
-        \\import { send, receive, ack } from "zigttp:queue";
+        \\import { send, receive, ack } from "zttp:queue";
         \\function handler(req) {
         \\  const sent = send("worker", { ok: true });
         \\  if (!sent.ok) return Response.text(sent.error, { status: 500 });
@@ -580,7 +580,7 @@ test "runOneTest: request url with query string yields path without query (CLI-1
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Handler matches req.path === "/" (mirrors the default `zigttp init` basic scaffold).
+    // Handler matches req.path === "/" (mirrors the default `zttp init` basic scaffold).
     const handler_code =
         \\function handler(req) {
         \\  if (req.method === "GET" && req.path === "/") {

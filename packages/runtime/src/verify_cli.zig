@@ -1,6 +1,6 @@
-//! `zigttp verify <url>` - slice 1 of proof receipts. Third-party verifier
+//! `zttp verify <url>` - slice 1 of proof receipts. Third-party verifier
 //! that anyone (CI, security scanner, partner integration, MCP host) can run
-//! against any deployed zigttp endpoint to confirm the contract claims it
+//! against any deployed zttp endpoint to confirm the contract claims it
 //! returns are signed by whoever holds the build's private key.
 //!
 //! Trust posture for slice 1: the JWS protected header carries the full
@@ -69,9 +69,9 @@ pub fn parseArgs(argv: []const []const u8) !Options {
 
 pub fn printHelp() void {
     const help =
-        \\zigttp verify <url> [--trust-key <hex>] [--json]
+        \\zttp verify <url> [--trust-key <hex>] [--json]
         \\
-        \\Fetches the URL, reads the Zigttp-Attest response header, and validates
+        \\Fetches the URL, reads the Zttp-Attest response header, and validates
         \\its Ed25519 signature against the embedded public key. Prints the proven
         \\contract claims on success.
         \\
@@ -83,7 +83,7 @@ pub fn printHelp() void {
         \\Exit codes:
         \\  0  verified
         \\  1  argument error
-        \\  2  endpoint did not return Zigttp-Attest header
+        \\  2  endpoint did not return Zttp-Attest header
         \\  3  signature does not validate
         \\  4  key fingerprint does not match --trust-key
         \\  5  HTTP-level error (DNS, connect, status >= 400)
@@ -99,7 +99,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     const attest_jws = fetchAttestHeader(allocator, io_backend.io(), opts.url) catch |err| {
         switch (err) {
             error.UnsupportedScheme => writeStderr("verify: only http and https URLs are supported\n"),
-            error.NotAttested => writeStderr("verify: endpoint did not return Zigttp-Attest header\n"),
+            error.NotAttested => writeStderr("verify: endpoint did not return Zttp-Attest header\n"),
             error.HttpStatus => writeStderr("verify: HTTP request returned non-2xx status\n"),
             else => writeStderrFmt("verify: request failed: {t}\n", .{err}),
         }
@@ -145,7 +145,7 @@ const FetchError = error{
     OutOfMemory,
 };
 
-/// Fetch the URL, extract the Zigttp-Attest header value, return an owned
+/// Fetch the URL, extract the Zttp-Attest header value, return an owned
 /// copy. The response body is discarded; only headers matter for slice 1.
 fn fetchAttestHeader(
     allocator: std.mem.Allocator,
@@ -338,7 +338,7 @@ test "renderClaimsJson uses JSON string escaping" {
             .bytecode_sha256 = "b" ** 64,
             .policy_sha256 = "c" ** 64,
             .capability_hash = "d" ** 64,
-            .compiler_version = "zigttp\"dev\\test",
+            .compiler_version = "zttp\"dev\\test",
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
             .routes_count = 2,
@@ -361,7 +361,7 @@ test "renderClaimsJson uses JSON string escaping" {
     const root = parsed.value.object;
 
     try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
-    try testing.expectEqualStrings("zigttp\"dev\\test", root.get("compilerVersion").?.string);
+    try testing.expectEqualStrings("zttp\"dev\\test", root.get("compilerVersion").?.string);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
     try testing.expectEqualStrings("partial", root.get("durableWorkflowProofLevel").?.string);
     try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);

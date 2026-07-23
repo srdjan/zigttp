@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
@@ -309,7 +309,7 @@ fn grepFile(
 ) !void {
     // 16 MiB matches the spirit of ripgrep's defaults and keeps a single huge
     // file from exhausting memory; oversized or unreadable files are skipped.
-    const contents = zigts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024) catch return;
+    const contents = zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024) catch return;
     defer allocator.free(contents);
     if (std.mem.indexOfScalar(u8, contents, 0) != null) return; // skip binary files
 

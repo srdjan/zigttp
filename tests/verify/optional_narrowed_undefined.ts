@@ -1,6 +1,6 @@
 // Should pass: if (val !== undefined) narrows optional
-import { env } from "zigttp:env";
-import type { Spec } from "zigttp:types";
+import { env } from "zttp:env";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"optional_safe">;
 

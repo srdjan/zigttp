@@ -1,26 +1,26 @@
 # Architecture
 
-zigttp is a Zig monorepo with three runtime-facing binaries:
+zttp is a Zig monorepo with three runtime-facing binaries:
 
-- `zigttp`: developer CLI, local server, proof tools, expert mode, deploy.
-- `zigttp-runtime`: minimal runtime template used by self-contained deploy
+- `zttp`: developer CLI, local server, proof tools, expert mode, deploy.
+- `zttp-runtime`: minimal runtime template used by self-contained deploy
   artifacts.
-- `zigts`: analyzer/compiler CLI for IDEs, CI, and machine integrations.
+- `zts`: analyzer/compiler CLI for IDEs, CI, and machine integrations.
 
 The deployed runtime does not link the expert agent. The analyzer and runtime
-share the same `zigts` engine and contract logic.
+share the same `zts` engine and contract logic.
 
 ## Packages
 
 | Path | Role |
 |---|---|
 | `packages/runtime/` | HTTP server, runtime adapter, CLI, local deploy, proof ledger, Studio, edge runtime. |
-| `packages/zigts/` | Parser, type checker, verifier, bytecode, interpreter, JIT, contracts, virtual-module registry. |
-| `packages/tools/` | Precompile pipeline and analyzer command registry shared by `zigttp` and `zigts`. |
+| `packages/zts/` | Parser, type checker, verifier, bytecode, interpreter, JIT, contracts, virtual-module registry. |
+| `packages/tools/` | Precompile pipeline and analyzer command registry shared by `zttp` and `zts`. |
 | `packages/modules/` | SDK-pure virtual modules and module spec JSON. |
-| `packages/zigttp-sdk/` | Extension SDK types and helpers for native modules. |
+| `packages/zttp-sdk/` | Extension SDK types and helpers for native modules. |
 | `packages/proof-review/` | Proof-review verdict types and rendering helpers. |
-| `packages/pi/` | Compiler-in-the-loop expert agent linked into `zigttp` only. |
+| `packages/pi/` | Compiler-in-the-loop expert agent linked into `zttp` only. |
 
 `build.zig` wires the packages, build options, tests, smoke checks, and release
 steps.
@@ -40,18 +40,18 @@ Each request runs with isolated runtime state. Request isolation is
 arena-based: request-scoped allocations are bulk-reset between requests. The
 engine includes a garbage collector, but the default serving configuration
 uses the hybrid arena allocator, which disables collection on the serving path
-(`Context.setHybridAllocator` in `packages/zigts/src/context.zig`).
+(`Context.setHybridAllocator` in `packages/zts/src/context.zig`).
 
 Actor-style handler communication is opt-in. With `--actor-queue`, the server
 creates a process-owned `ActorQueue` and passes it through `RuntimeConfig` to
-each pooled runtime. `zigttp:queue` serializes payloads to queue-owned JSON,
+each pooled runtime. `zttp:queue` serializes payloads to queue-owned JSON,
 `receive()` moves a message into an in-flight table, and `ack()`/`nack()`
 complete or retry delivery. This keeps queued messages outside the JS heap, so
 handler reset, timeout invalidation, and panic quarantine do not drop retained
 messages. Pending and leased messages count against the actor mailbox capacity;
 dead-lettered messages are retained separately and release their mailbox slot.
 Normal HTTP ingress still uses the direct `handler(req)` path unless a handler
-explicitly imports and uses `zigttp:queue`.
+explicitly imports and uses `zttp:queue`.
 
 ## Compiler Pipeline
 
@@ -59,7 +59,7 @@ For a handler source file:
 
 1. Strip supported TypeScript syntax.
 2. Parse the restricted JS/TS/TSX grammar.
-3. Resolve imports, including `zigttp:*` virtual modules.
+3. Resolve imports, including `zttp:*` virtual modules.
 4. Run type, path, Result/optional, state-isolation, flow, and spec checks.
 5. Extract a handler contract and module capability surface.
 6. Emit bytecode and optional artifacts such as contract JSON, OpenAPI, SDK,
@@ -92,11 +92,11 @@ intentionally not attempted: the traversals are not the same traversal.
 
 The native module registry is the source of truth:
 
-- `packages/zigts/src/builtin_modules.zig` lists all built-ins and governance
+- `packages/zts/src/builtin_modules.zig` lists all built-ins and governance
   entries.
 - `packages/modules/module-specs/` stores public module specs.
 - `packages/modules/src/root.zig` exposes SDK-pure module bindings.
-- Engine-coupled modules stay under `packages/zigts/src/modules/`.
+- Engine-coupled modules stay under `packages/zts/src/modules/`.
 
 Every export carries effect and capability metadata used by contract
 extraction, runtime sandboxing, and handler property classification. The
@@ -113,14 +113,14 @@ The same contract feeds:
 
 - proof card rendering;
 - proof ledger entries;
-- `zigttp proofs gate`;
+- `zttp proofs gate`;
 - upgrade checks;
 - OpenAPI and SDK output;
 - runtime sandbox policy.
 
 ## Live Reload
 
-`zigttp dev` watches handler and config files. On a valid save it recompiles
+`zttp dev` watches handler and config files. On a valid save it recompiles
 the handler. With `--prove`, the new contract is diffed against the previous
 contract before the handler pool is swapped. Compilation failures keep the
 currently serving handler active. Accepted swaps rederive the runtime
@@ -129,14 +129,14 @@ before new runtime generations are acquired.
 
 ## Deploy Artifact
 
-`zigttp deploy` builds a self-contained local binary under
-`.zigttp/deploy/<project-name>`. The output starts with the `zigttp-runtime`
+`zttp deploy` builds a self-contained local binary under
+`.zttp/deploy/<project-name>`. The output starts with the `zttp-runtime`
 template and appends a payload containing bytecode, contract JSON, runtime
 policy, and optional JWS attestation. `self_extract.zig` validates the trailer,
 loads the payload, and starts the runtime.
 
 Attestation signs bytecode, contract, and policy hashes. The running server
-emits proof headers and serves `/.well-known/zigttp-attest`; `zigttp verify
+emits proof headers and serves `/.well-known/zttp-attest`; `zttp verify
 <url>` validates the receipt.
 
 ## Testing And Governance
@@ -146,7 +146,7 @@ Important gates (`bash scripts/verify.sh` runs the CI `test`-job set in one comm
 ```bash
 bash scripts/verify.sh             # full local gate, mirrors CI
 zig build test
-zig build test-zigts
+zig build test-zts
 zig build test-zruntime
 zig build test-module-governance
 zig build test-capability-audit

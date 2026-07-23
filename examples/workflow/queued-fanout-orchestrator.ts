@@ -6,10 +6,10 @@
 // fanout-orchestrator.ts, always dispatches directly regardless of
 // --workflow-queue.
 //
-//   zigttp serve examples/workflow/queued-fanout-orchestrator.ts \
+//   zttp serve examples/workflow/queued-fanout-orchestrator.ts \
 //     --system examples/workflow/system.json --durable ./.durable --workflow-queue
-import { run } from "zigttp:durable";
-import { fanout } from "zigttp:workflow";
+import { run } from "zttp:durable";
+import { fanout } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "queued-fanout-demo";

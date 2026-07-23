@@ -8,8 +8,8 @@ const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const ui_payload_mod = @import("ui_payload.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
-const zigts = @import("zigts");
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const file_io = zts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
 const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
@@ -121,14 +121,14 @@ pub fn autoReject(preview: ApprovalPreview) anyerror!bool {
 /// than a dead end.
 pub const budget_exhausted_next_step =
     "Next: re-run the request, narrow it to one change at a time, or run " ++
-    "`zigttp check <handler>` to see the remaining diagnostics directly.";
+    "`zttp check <handler>` to see the remaining diagnostics directly.";
 
 /// Appended to the veto-exhaustion diagnostic box so a turn that burns every
 /// verification attempt ends with a recoverable next step rather than a silent
 /// dead end. Mirrors `budget_exhausted_next_step`.
 pub const veto_exhausted_next_step =
     "Next: narrow the ask to one change, fix it directly " ++
-    "(`zigttp check <handler>` shows the full diagnostic), or rephrase the goal. " ++
+    "(`zttp check <handler>` shows the full diagnostic), or rephrase the goal. " ++
     "The attempts are saved in your session ledger (/ledger).";
 
 /// One-line, actionable remediation for a model-backend error, or null for
@@ -138,7 +138,7 @@ pub const veto_exhausted_next_step =
 /// to do instead of a bare CamelCase error name.
 pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.AuthFailed => "Authentication failed. Check your key with `zigttp auth status`, or re-run `zigttp auth claude`.",
+        error.AuthFailed => "Authentication failed. Check your key with `zttp auth status`, or re-run `zttp auth claude`.",
         error.InsufficientCredit => "The provider rejected the request for insufficient credit. Check your account credit balance.",
         error.RateLimited => "Rate limited by the provider. Wait a moment and try again.",
         error.ModelNotFound => "The configured model was not found. Switch with `/model <id>` or check the model name.",
@@ -340,8 +340,8 @@ const sql_escalation_hint =
     "\n\nYou have failed the SQL check twice. Common causes: " ++
     "(a) the query references a table or column not in the schema, " ++
     "(b) you used a non-supported SQL statement (only SELECT/INSERT/UPDATE/DELETE with named parameters). " ++
-    "Use the zigts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
-    "or ask the user to verify the schema path in zigttp.json.";
+    "Use the zts_expert_describe_rule tool to look up ZTS3xx SQL rules, " ++
+    "or ask the user to verify the schema path in zttp.json.";
 
 pub fn runTurnWith(
     allocator: std.mem.Allocator,
@@ -388,7 +388,7 @@ pub fn runTurnWith(
     var auto_repair_block: ?[]const u8 = null;
     // Project SQL schema for the veto, discovered lazily on the first edit
     // attempt and reused for every retry in the turn (the discovery walks the
-    // filesystem for zigttp.json; once per turn is enough). Arena-owned.
+    // filesystem for zttp.json; once per turn is enough). Arena-owned.
     var sql_schema_resolved = false;
     var sql_schema_path: ?[]u8 = null;
     // How many times a SQL veto has failed in this turn. When it reaches 2, an
@@ -804,10 +804,10 @@ fn finishTurn(
     };
 }
 
-/// Monotonic time in milliseconds. Delegates to zigts.compat.monotonicNowNs
+/// Monotonic time in milliseconds. Delegates to zts.compat.monotonicNowNs
 /// which reads CLOCK_MONOTONIC directly and is safe for interval checks.
 fn nowMonotonicMs() i64 {
-    return @intCast((zigts.compat.monotonicNowNs() catch 0) / 1_000_000);
+    return @intCast((zts.compat.monotonicNowNs() catch 0) / 1_000_000);
 }
 
 fn invokeToolRecovering(
@@ -1077,7 +1077,7 @@ fn postApplyCheck(
         break :blk buf.items;
     };
     runPostApplyTool(allocator, arena, registry, transcript, &report, .{
-        .tool_name = "zigts_expert_verify_paths",
+        .tool_name = "zts_expert_verify_paths",
         .args_json = verify_paths_args,
         .note_prefix = "post-apply regression: verify_paths found violations\n",
         .summary = "verify_paths regressed",
@@ -1103,7 +1103,7 @@ fn postApplyCheck(
             break :blk buf.items;
         };
         runPostApplyTool(allocator, arena, registry, transcript, &report, .{
-            .tool_name = "zigts_expert_review_patch",
+            .tool_name = "zts_expert_review_patch",
             .args_json = review_args,
             .note_prefix = "post-apply diff review: new violations found\n",
             .summary = "review_patch flagged new violations",
@@ -1341,7 +1341,7 @@ const clean_handler =
 // Accesses result.value without checking result.ok: a HandlerVerifier error
 // (ZTS303 unchecked_result_value) that the repair lane can author a fix for.
 const unchecked_result_handler =
-    "import { validateJson } from \"zigttp:validate\";\n" ++
+    "import { validateJson } from \"zttp:validate\";\n" ++
     "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
     "  const result = validateJson(\"item\", req.body);\n" ++
     "  const data = result.value;\n" ++
@@ -2224,5 +2224,5 @@ test "providerErrorRemediation: SSE parse errors map to a non-empty actionable h
 test "budget-exhausted prompt carries a concrete next step" {
     // EXP-9: the bare "budget exhausted" line must end with an actionable step.
     try testing.expect(budget_exhausted_next_step.len > 0);
-    try testing.expect(std.mem.indexOf(u8, budget_exhausted_next_step, "zigttp check") != null);
+    try testing.expect(std.mem.indexOf(u8, budget_exhausted_next_step, "zttp check") != null);
 }

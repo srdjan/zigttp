@@ -1,4 +1,4 @@
-//! `zigts prove-behavior <before.ts> <after.ts> [--json]` subcommand.
+//! `zts prove-behavior <before.ts> <after.ts> [--json]` subcommand.
 //!
 //! Proof-carrying changes: compiles two handler versions, runs the same
 //! contract-diff the expert loop computes on every edit, and reports the
@@ -15,12 +15,12 @@
 //! additive (safe), 1 = breaking, 2 = usage or compile error.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const edit_simulate = @import("edit_simulate.zig");
 const precompile = @import("precompile.zig");
 
-const contract_diff = zigts.contract_diff;
-const file_io = zigts.file_io;
+const contract_diff = zts.contract_diff;
+const file_io = zts.file_io;
 
 const max_source_bytes = 4 * 1024 * 1024;
 
@@ -206,9 +206,9 @@ fn writeJson(
 
 fn printHelp() void {
     const help =
-        \\zigts prove-behavior - behavioral-equivalence verdict between two handler versions
+        \\zts prove-behavior - behavioral-equivalence verdict between two handler versions
         \\
-        \\Usage: zigts prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
+        \\Usage: zts prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
         \\
         \\Compiles both versions, runs the contract diff, and reports whether the
         \\edit is behaviorally equivalent / equivalent-modulo-laws / additive /

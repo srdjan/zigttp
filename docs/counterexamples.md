@@ -1,6 +1,6 @@
 # Counterexamples in the Live HUD
 
-When `zigttp dev --watch --prove` recompiles your handler and a proven
+When `zttp dev --watch --prove` recompiles your handler and a proven
 property regresses between the previous build and the new one, the proof
 card surfaces a Counterexample block. The block is the compiler's way of
 saying not just "you broke it" but "here is the construct that broke it,
@@ -8,7 +8,7 @@ here is what to do, and here is what fails."
 
 Counterexamples land in two places at once. The terminal HUD writes them
 into the proof card frame stderr already streams. The studio at
-`http://localhost:3000/_zigttp/studio` carries the same payload as a
+`http://localhost:3000/_zttp/studio` carries the same payload as a
 `counterexample` object in the SSE state, so a browser tab open beside
 your editor reflects the same regression without a refresh.
 
@@ -56,7 +56,7 @@ counterexample.
 
 The flow-driven set (`no_secret_leakage`, `no_credential_leakage`,
 `input_validated`, `pii_contained`, `injection_safe`) has executable
-witnesses. The witness solver in `zigts.counterexample.solve` turns a
+witnesses. The witness solver in `zts.counterexample.solve` turns a
 flow violation's constraint chain into a concrete `Request` plus the
 virtual-module stub sequence needed to drive the handler down the
 witnessing path. When the live-reload pipeline produces a witness for a
@@ -88,7 +88,7 @@ that re-introduces the same construct demotes the property again with
 the original counterexample call-out. Pinning is the moment a one-time
 catch becomes durable evidence.
 
-`[a]` hands the Counterexample to the `zigttp expert` agent through the
+`[a]` hands the Counterexample to the `zttp expert` agent through the
 `pi_counterexample_current` tool. The agent's `proof_enrichment` and
 `property_goals` channels consume it, so its first response is a fix
 proposal grounded in the exact construct the verifier flagged, not a

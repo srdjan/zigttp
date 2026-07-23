@@ -1,12 +1,12 @@
 // Prefer `unknown` over `any`, and narrow before use.
 //
-// zigts rejects `any` outright, so a value of unknown shape is typed
+// zts rejects `any` outright, so a value of unknown shape is typed
 // `unknown`. The only way to use it is to narrow it first: a `typeof`
 // check narrows `unknown` to a concrete type inside the then-branch, and
 // the value is unusable until then. This covers tips 1 (prefer `unknown`)
 // and 8 (narrowing an unknown value before use).
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "deterministic"

@@ -2,7 +2,7 @@
 //! spawns a polling thread; `deinit` joins and flushes before close.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const security_events = zq.security_events;
 
 const drain_batch_size: usize = 32;
@@ -102,9 +102,9 @@ test "SecurityLogger flushes events to file" {
     try security_events.initGlobal(allocator, 64);
     defer security_events.deinitGlobal();
 
-    const seed = @import("zigts").compat.realtimeNowNs() catch 0;
+    const seed = @import("zts").compat.realtimeNowNs() catch 0;
     var tmp_buf: [128]u8 = undefined;
-    const path = try std.fmt.bufPrint(&tmp_buf, "/tmp/zigttp-secevt-test-{d}.jsonl", .{seed});
+    const path = try std.fmt.bufPrint(&tmp_buf, "/tmp/zttp-secevt-test-{d}.jsonl", .{seed});
 
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -117,7 +117,7 @@ test "SecurityLogger flushes events to file" {
 
     security_events.emitGlobal(security_events.SecurityEvent.init(
         .policy_denied_env,
-        "zigttp:env",
+        "zttp:env",
         "SECRET_KEY",
     ));
     security_events.emitGlobal(security_events.SecurityEvent.init(

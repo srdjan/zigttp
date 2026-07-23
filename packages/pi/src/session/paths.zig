@@ -1,6 +1,6 @@
 //! Pure path plumbing for the lockdown session layout.
 //!
-//! Sessions live under `$HOME/.zigttp/sessions/<cwd_hash>/<session_id>/`,
+//! Sessions live under `$HOME/.zttp/sessions/<cwd_hash>/<session_id>/`,
 //! where `cwd_hash` is the lowercase hex SHA-256 of the resolved workspace
 //! realpath. Each session directory carries a `workspace.txt` pointer back
 //! to the originating workspace so the folder is self-describing on disk.
@@ -11,8 +11,8 @@
 
 const std = @import("std");
 
-const zigts = @import("zigts");
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const file_io = zts.file_io;
 
 const events_mod = @import("events.zig");
 
@@ -39,16 +39,16 @@ pub fn validateSessionId(session_id: []const u8) SessionPathError!void {
     if (!isSafeSessionId(session_id)) return error.InvalidSessionId;
 }
 
-/// Absolute path to `$HOME/.zigttp/sessions`. Honors `$ZIGTTP_SESSIONS_DIR`
+/// Absolute path to `$HOME/.zttp/sessions`. Honors `$ZTTP_SESSIONS_DIR`
 /// when set (used by tests to redirect under /tmp). Caller owns the slice.
 /// Does not create the directory.
 pub fn sessionRoot(allocator: std.mem.Allocator) ![]u8 {
-    if (envVar("ZIGTTP_SESSIONS_DIR")) |override| {
+    if (envVar("ZTTP_SESSIONS_DIR")) |override| {
         if (override.len > 0) return try allocator.dupe(u8, override);
     }
     const home = envVar("HOME") orelse return error.HomeNotSet;
     if (home.len == 0) return error.HomeNotSet;
-    return try std.fs.path.join(allocator, &.{ home, ".zigttp", "sessions" });
+    return try std.fs.path.join(allocator, &.{ home, ".zttp", "sessions" });
 }
 
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
@@ -266,12 +266,12 @@ test "cwdHashFull returns stable 64-char lowercase hex" {
     }
 }
 
-test "sessionRoot honors ZIGTTP_SESSIONS_DIR" {
+test "sessionRoot honors ZTTP_SESSIONS_DIR" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
-    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    var override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", tmp.abs_path);
     defer override.restore(allocator);
 
     const root = try sessionRoot(allocator);
@@ -284,7 +284,7 @@ test "sessionDir concatenates root, cwd_hash, and session_id" {
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
-    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    var override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", tmp.abs_path);
     defer override.restore(allocator);
 
     const hash = try cwdHashFull(allocator);
@@ -301,7 +301,7 @@ test "sessionDir rejects path-like session ids" {
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
-    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    var override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", tmp.abs_path);
     defer override.restore(allocator);
 
     try testing.expectError(error.InvalidSessionId, sessionDir(allocator, ""));
@@ -318,7 +318,7 @@ test "sessionDirForWorkspace matches sessionDir after chdir" {
 
     const sessions_root = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_root);
-    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_root);
+    var override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_root);
     defer override.restore(allocator);
 
     const workspace = try tmp.childPath(allocator, "workspace");
@@ -346,7 +346,7 @@ test "writeWorkspacePointer round-trips with trailing newline" {
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
-    var override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", tmp.abs_path);
+    var override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", tmp.abs_path);
     defer override.restore(allocator);
 
     const dir = try sessionDir(allocator, "sess-ptr");
@@ -401,7 +401,7 @@ fn freeSessionList(allocator: std.mem.Allocator, list: []SessionEntry) void {
 test "listSessions returns an empty slice when the root is missing" {
     const allocator = testing.allocator;
     const hash = try cwdHashFull(allocator);
-    const entries = try listSessions(allocator, "/tmp/zigttp-nonexistent-root-xyz", hash[0..]);
+    const entries = try listSessions(allocator, "/tmp/zttp-nonexistent-root-xyz", hash[0..]);
     defer freeSessionList(allocator, entries);
     try testing.expectEqual(@as(usize, 0), entries.len);
 }

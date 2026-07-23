@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:crypto",
+  "specifier": "zttp:crypto",
   "source": "packages/modules/src/security/crypto.zig",
   "requiredCapabilities": [
     "crypto"

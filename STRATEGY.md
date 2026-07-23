@@ -1,9 +1,9 @@
 ---
-name: zigttp
+name: zttp
 last_updated: 2026-06-28
 ---
 
-# zigttp Strategy
+# zttp Strategy
 
 ## Target problem
 
@@ -26,7 +26,7 @@ proofs intractable elsewhere.
 ## Who it's for
 
 **Primary:** Solo developer / indie builder shipping serverless or edge functions, with
-no PM, QA, or SRE to vouch for a deploy. They're hiring zigttp to let the AI write the
+no PM, QA, or SRE to vouch for a deploy. They're hiring zttp to let the AI write the
 handler and have the compiler vouch for it - shipping something they can trust in
 production without a review process they don't have and without becoming a verification
 expert themselves. Expert-first: the agent is the main interface, the compiler is the
@@ -36,7 +36,7 @@ proof underneath.
 
 - **Expert success rate** - share of `expert` sessions that end with a handler passing
   all proofs and the user keeping or deploying it. Measured from the session ledger /
-  `.zigttp/proofs.jsonl`. The core "did the agent produce provable code" signal.
+  `.zttp/proofs.jsonl`. The core "did the agent produce provable code" signal.
 - **Round-trips to first green proof** - median agent iterations to a fully-proven
   handler. Measured from the session ledger. Lower is better; regresses if the agent
   degrades.
@@ -47,7 +47,7 @@ proof underneath.
   author and ship a second proven handler within 14-30 days. A local OSS CLI doesn't
   phone home, so this has no honest signal today.
 - **Cold-start p50** (guardrail) - kept as a performance floor, not a headline; lives in
-  `zigttp-bench`.
+  `zttp-bench`.
 
 ## Tracks
 
@@ -83,7 +83,7 @@ nothing if the proven handler can't ship fast and small.
 ## Not working on
 
 - Portable trust artifacts as a headline (signed proof receipts, `verify <url>`,
-  `/.well-known/zigttp-attest`) - built, but deferred from this release; it serves the
+  `/.well-known/zttp-attest`) - built, but deferred from this release; it serves the
   team/platform-owner need, not the launch persona.
 - Hosted cloud deploy (`deploy --cloud` rejected; `studio` and `edge` compiled out).
 - The team / platform-owner persona - whoever has to vouch that a deploy is safe on

@@ -1,4 +1,4 @@
-import { run, step, waitSignal } from "zigttp:durable";
+import { run, step, waitSignal } from "zttp:durable";
 
 function handler(req: Request): unknown {
     if (req.path !== "/orders/42") {

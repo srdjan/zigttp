@@ -7,8 +7,8 @@
 // can deliver to it; the next /wait request after the due timestamp passes
 // observes the resumed result, the same way it does after /signal.
 //
-//   zigttp serve examples/workflow/wait-signal-orchestrator.ts --durable ./.durable
-import { run, signal, signalAt, waitSignal } from "zigttp:durable";
+//   zttp serve examples/workflow/wait-signal-orchestrator.ts --durable ./.durable
+import { run, signal, signalAt, waitSignal } from "zttp:durable";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "approval-demo";

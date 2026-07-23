@@ -20,7 +20,7 @@
 //! automatic destructive retention" convention.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const durable_store = @import("durable_store.zig");
 const atomic_file = @import("atomic_file.zig");
 

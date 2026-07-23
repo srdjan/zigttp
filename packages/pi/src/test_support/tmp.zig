@@ -17,7 +17,7 @@ pub const IsolatedTmp = struct {
         const counter = tmp_counter.fetchAdd(1, .seq_cst);
         const name = try std.fmt.allocPrint(
             allocator,
-            "zigttp-{s}-test-{d}-{d}-{d}",
+            "zttp-{s}-test-{d}-{d}-{d}",
             .{ label, @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
         );
         errdefer allocator.free(name);
@@ -77,7 +77,7 @@ pub const IsolatedTmp = struct {
             defer io_backend.deinit();
             try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
         }
-        const zigts = @import("zigts");
-        try zigts.file_io.writeFile(allocator, path, body);
+        const zts = @import("zts");
+        try zts.file_io.writeFile(allocator, path, body);
     }
 };

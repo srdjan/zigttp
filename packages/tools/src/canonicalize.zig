@@ -4,11 +4,11 @@
 //! through edit-simulate / compiler veto; this module never writes source.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
-const writeJsonString = zigts.handler_contract.writeJsonString;
-const RepairIntent = zigts.repair_intent.RepairIntent;
+const writeJsonString = zts.handler_contract.writeJsonString;
+const RepairIntent = zts.repair_intent.RepairIntent;
 
 pub const Refactor = struct {
     kind: []const u8,
@@ -38,7 +38,7 @@ pub const SimulationSummary = struct {
 };
 
 pub fn collect(allocator: std.mem.Allocator, file: []const u8) !Result {
-    const source = try zigts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
+    const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
     return collectFromSource(allocator, source, file);
 }
@@ -2127,7 +2127,7 @@ pub fn simulateRefactors(
     file: []const u8,
     result: *const Result,
 ) !SimulationSummary {
-    const source = try zigts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
+    const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
 
     const proposed = try applyRefactors(allocator, source, result.refactors.items);
@@ -2160,7 +2160,7 @@ pub fn simulateRefactors(
 pub const max_normalize_iterations: u32 = 64;
 
 fn isCanonicalBandCode(code: []const u8) bool {
-    return zigts.rule_registry.isCanonicalProfileCode(code);
+    return zts.rule_registry.isCanonicalProfileCode(code);
 }
 
 /// Map a `Refactor.kind` string to the typed `RepairIntent` it realizes, so a
@@ -2230,7 +2230,7 @@ pub const ResidualDiagnostic = struct {
 
 /// Normalize a handler file: read it, then drive `normalizeSource`.
 pub fn normalize(allocator: std.mem.Allocator, file: []const u8) !NormalizeResult {
-    const source = try zigts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
+    const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
     return normalizeSource(allocator, source, file);
 }
@@ -2402,7 +2402,7 @@ fn cloneResidualDiagnostic(
     allocator: std.mem.Allocator,
     diag: precompile.json_diag.JsonDiagnostic,
 ) !ResidualDiagnostic {
-    const rule = zigts.rule_registry.findByCode(diag.code);
+    const rule = zts.rule_registry.findByCode(diag.code);
     var out = ResidualDiagnostic{
         .code = try allocator.dupe(u8, diag.code),
         .severity = &.{},
@@ -2428,7 +2428,7 @@ pub fn writeNormalizeJson(
     nr: *const NormalizeResult,
     written: bool,
 ) !void {
-    const hash = zigts.rule_registry.policyHash();
+    const hash = zts.rule_registry.policyHash();
     try writer.writeAll("{\"ok\":true,\"file\":");
     try writeJsonString(writer, file);
     try writer.writeAll(",\"policy_hash\":");
@@ -2479,11 +2479,11 @@ fn writeResidualDiagnosticJson(writer: anytype, diag: *const ResidualDiagnostic)
     try writer.writeByte('}');
 }
 
-/// `zigts normalize <file> [--write] [--check] [--json]` — the gofmt-for-
+/// `zts normalize <file> [--write] [--check] [--json]` — the gofmt-for-
 /// semantics surface. Default prints canonical source; `--write` rewrites in
 /// place (refusing unless fully canonical); `--check` exits 1 when not yet
 /// canonical (CI gate); `--json` emits a structured envelope with the rewrite
-/// trace. Reachable as both `zigts normalize` and `zigttp normalize`.
+/// trace. Reachable as both `zts normalize` and `zttp normalize`.
 pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var file: ?[]const u8 = null;
     var write_mode = false;
@@ -2506,7 +2506,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         }
     }
     const path = file orelse {
-        const usage = "Usage: zigts normalize <file> [--write] [--check] [--json]\n";
+        const usage = "Usage: zts normalize <file> [--write] [--check] [--json]\n";
         _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
         std.process.exit(1);
     };
@@ -2545,12 +2545,12 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         // remains (an unrewritten construct from a not-yet-implemented phase).
         if (!nr.converged or !nr.fully_canonical) {
             if (!json_mode) {
-                const msg = "normalize: not fully canonical; refusing --write (run `zigts check` for residual)\n";
+                const msg = "normalize: not fully canonical; refusing --write (run `zts check` for residual)\n";
                 _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             }
             std.process.exit(1);
         }
-        try zigts.file_io.writeFile(allocator, path, nr.canonical_source);
+        try zts.file_io.writeFile(allocator, path, nr.canonical_source);
         return;
     }
 
@@ -2561,9 +2561,9 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
 
 fn printNormalizeHelp() void {
     const help =
-        \\zigts normalize - rewrite a handler into Canonical Normal Form
+        \\zts normalize - rewrite a handler into Canonical Normal Form
         \\
-        \\Usage: zigts normalize <file> [--write] [--check] [--json]
+        \\Usage: zts normalize <file> [--write] [--check] [--json]
         \\
         \\  (default)  print the canonical source to stdout
         \\  --write    rewrite the file in place (refuses unless fully canonical)
@@ -2583,7 +2583,7 @@ pub fn writeJsonWithSimulation(
     result: *const Result,
     simulation: ?SimulationSummary,
 ) !void {
-    const hash = zigts.rule_registry.policyHash();
+    const hash = zts.rule_registry.policyHash();
     try writer.writeAll("{\"ok\":true,\"file\":");
     try writeJsonString(writer, result.file);
     try writer.writeAll(",\"policy_hash\":");
@@ -2628,7 +2628,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
     }
     const path = file orelse {
-        const usage = "Usage: zigts canonicalize <file> --json [--simulate]\n";
+        const usage = "Usage: zts canonicalize <file> --json [--simulate]\n";
         _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
         std.process.exit(1);
     };
@@ -2651,9 +2651,9 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
 fn printHelp() void {
     const help =
-        \\zigts canonicalize - preview canonical local refactors
+        \\zts canonicalize - preview canonical local refactors
         \\
-        \\Usage: zigts canonicalize <file> --json [--simulate]
+        \\Usage: zts canonicalize <file> --json [--simulate]
         \\
         \\Emits rewrite intents only. --simulate applies previews in memory and
         \\runs edit-simulate; it never writes source.
@@ -2875,7 +2875,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
         .{
             .name = "capability alias",
             .source =
-            \\import { env } from "zigttp:env";
+            \\import { env } from "zttp:env";
             \\function handler(req: Request): Response {
             \\  let key = "API_KEY";
             \\  const value = env(key);
@@ -2936,7 +2936,7 @@ test "generic arrow helper preview is skipped, not malformed" {
 
 test "dynamic literal-prefix capability alias is not treated as static" {
     const source =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
         \\  let key = "API_" + req.headers["x"];
         \\  const value = env(key);
@@ -2955,7 +2955,7 @@ test "dynamic literal-prefix capability alias is not treated as static" {
 
 test "capability alias preview stays in enclosing scope" {
     const source =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function other(req: Request): Response {
         \\  let key = "API_KEY";
         \\  return Response.text(key);
@@ -3128,7 +3128,7 @@ test "collect output can clear canonical diagnostic through edit simulation" {
 
 test "collect output can clear capability alias diagnostic through edit simulation" {
     const source =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
         \\  let key = "API_KEY";
         \\  const value = env(key);
@@ -3141,7 +3141,7 @@ test "collect output can clear capability alias diagnostic through edit simulati
 
     var proposed = try std.ArrayList(u8).initCapacity(std.testing.allocator, source.len + 8);
     defer proposed.deinit(std.testing.allocator);
-    try proposed.appendSlice(std.testing.allocator, "import { env } from \"zigttp:env\";\n");
+    try proposed.appendSlice(std.testing.allocator, "import { env } from \"zttp:env\";\n");
     try proposed.appendSlice(std.testing.allocator, "function handler(req: Request): Response {\n");
     try proposed.appendSlice(std.testing.allocator, preview.refactors.items[0].replacement);
     try proposed.appendSlice(std.testing.allocator, "\n");
@@ -3259,7 +3259,7 @@ test "redundant-bool-compare rewrite is behavior-equivalent (contract diff)" {
     const lhs_contract = lhs.contract orelse return error.NoContractFromCanonicalOutput;
     const rhs_contract = rhs.contract orelse return error.NoContractFromReference;
 
-    var diff = try zigts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
+    var diff = try zts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
     defer diff.deinit(std.testing.allocator);
     try std.testing.expect(diff.behavioralVerdict().isSafeNoOp());
 }
@@ -3502,7 +3502,7 @@ test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
     const lhs_contract = lhs.contract orelse return error.NoContractFromCanonicalOutput;
     const rhs_contract = rhs.contract orelse return error.NoContractFromReference;
 
-    var diff = try zigts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
+    var diff = try zts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
     defer diff.deinit(std.testing.allocator);
     try std.testing.expect(diff.behavioralVerdict().isSafeNoOp());
 }
@@ -3704,7 +3704,7 @@ test "normalizeSource template hoist is behavior-equivalent (contract diff)" {
     const lhs_contract = lhs.contract orelse return error.NoContractFromCanonicalOutput;
     const rhs_contract = rhs.contract orelse return error.NoContractFromReference;
 
-    var diff = try zigts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
+    var diff = try zts.contract_diff.diffContracts(std.testing.allocator, &lhs_contract, &rhs_contract);
     defer diff.deinit(std.testing.allocator);
     try std.testing.expect(diff.behavioralVerdict().isSafeNoOp());
 }

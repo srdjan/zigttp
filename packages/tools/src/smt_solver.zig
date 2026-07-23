@@ -1,9 +1,9 @@
 //! smt_solver.zig - the native, I/O half of spec-check mechanism 5.
 //!
-//! semantics_smt.zig (in the zigts package) is pure: it turns an equivalence
+//! semantics_smt.zig (in the zts package) is pure: it turns an equivalence
 //! obligation into an SMT-LIB2 query string. This file runs that query through
 //! the `z3` binary and returns a verdict. It lives in the tools layer, never the
-//! zigts package, so `std.process.Child` / file I/O stay out of the freestanding
+//! zts package, so `std.process.Child` / file I/O stay out of the freestanding
 //! and wasm analyzer builds. The driver (`semantics_check.runSmt`) takes `solve`
 //! as an injected function pointer; the standalone keyless callers and any build
 //! without z3 simply pass null and the SMT mechanism is skipped.
@@ -26,22 +26,22 @@
 //! So a broken or missing solver can never manufacture a false "equivalent", and
 //! an environmental hiccup never masquerades as a missing-theory build failure.
 //!
-//! Resolution order, with ZIGTTP_Z3 authoritative so SMT can be turned off:
-//!   - ZIGTTP_Z3 = off / none / 0 / disable / "" -> SMT disabled (resolve null).
-//!   - ZIGTTP_Z3 = <path>  -> that path if executable, else null (NO PATH
+//! Resolution order, with ZTTP_Z3 authoritative so SMT can be turned off:
+//!   - ZTTP_Z3 = off / none / 0 / disable / "" -> SMT disabled (resolve null).
+//!   - ZTTP_Z3 = <path>  -> that path if executable, else null (NO PATH
 //!     fallback: an explicit choice that fails is honored, not silently masked).
-//!   - ZIGTTP_Z3 unset     -> search PATH, then a few well-known locations.
-//! This gives a real opt-out: `ZIGTTP_Z3=off` skips the mechanism even on a host
+//!   - ZTTP_Z3 unset     -> search PATH, then a few well-known locations.
+//! This gives a real opt-out: `ZTTP_Z3=off` skips the mechanism even on a host
 //! that has z3 installed (scrubbing PATH alone does not, because of the
 //! well-known fallbacks).
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-const Verdict = zigts.semantics_smt.Verdict;
-const file_io = zigts.file_io;
+const Verdict = zts.semantics_smt.Verdict;
+const file_io = zts.file_io;
 
-/// Well-known absolute locations checked only when ZIGTTP_Z3 is unset.
+/// Well-known absolute locations checked only when ZTTP_Z3 is unset.
 const candidates = [_][]const u8{
     "/opt/homebrew/bin/z3",
     "/usr/local/bin/z3",
@@ -55,7 +55,7 @@ fn isExecutable(alloc: std.mem.Allocator, path: []const u8) bool {
     return std.c.access(z.ptr, std.c.X_OK) == 0;
 }
 
-/// True if an explicit ZIGTTP_Z3 value means "disable the SMT mechanism".
+/// True if an explicit ZTTP_Z3 value means "disable the SMT mechanism".
 fn isDisableSentinel(v: []const u8) bool {
     return v.len == 0 or
         std.ascii.eqlIgnoreCase(v, "off") or
@@ -79,13 +79,13 @@ fn envSlice(name: [:0]const u8) ?[]const u8 {
 /// explicitly disabled. The returned slice is owned by the caller.
 pub fn resolveZ3(alloc: std.mem.Allocator) ?[]const u8 {
     return resolveZ3From(alloc, .{
-        .z3 = envSlice("ZIGTTP_Z3"),
+        .z3 = envSlice("ZTTP_Z3"),
         .path = envSlice("PATH"),
     }, &candidates);
 }
 
 fn resolveZ3From(alloc: std.mem.Allocator, env: ResolverEnv, fallback_candidates: []const []const u8) ?[]const u8 {
-    // ZIGTTP_Z3 is authoritative when set: it both pins the binary and provides
+    // ZTTP_Z3 is authoritative when set: it both pins the binary and provides
     // the opt-out, and it does NOT fall through to PATH/candidates.
     if (env.z3) |p| {
         if (isDisableSentinel(p)) return null;
@@ -125,7 +125,7 @@ fn tmpQueryPath(alloc: std.mem.Allocator) ![:0]u8 {
     const dir = if (std.c.getenv("TMPDIR")) |raw| std.mem.span(raw) else "/tmp";
     const trimmed = std.mem.trimEnd(u8, dir, "/");
     const seq = query_seq.fetchAdd(1, .monotonic);
-    return std.fmt.allocPrintSentinel(alloc, "{s}/zigttp-smt-{d}-{d}.smt2", .{ trimmed, std.c.getpid(), seq }, 0);
+    return std.fmt.allocPrintSentinel(alloc, "{s}/zttp-smt-{d}-{d}.smt2", .{ trimmed, std.c.getpid(), seq }, 0);
 }
 
 /// SolveFn-compatible: run `query` through z3 and return the verdict. The query
@@ -158,7 +158,7 @@ fn solveImpl(query: []const u8, alloc: std.mem.Allocator) !Verdict {
     defer alloc.free(res.stdout);
     defer alloc.free(res.stderr);
 
-    return zigts.semantics_smt.parseVerdict(res.stdout);
+    return zts.semantics_smt.parseVerdict(res.stdout);
 }
 
 // ---------------------------------------------------------------------------
@@ -222,9 +222,9 @@ test "solve proves a true equivalence when z3 is present" {
     const a = std.testing.allocator;
     if (!available(a)) return error.SkipZigTest;
     // (set-logic ALL)(declare-const x Int)(assert (not (= (* x 2) (+ x x))))(check-sat)
-    const lhs = [_]zigts.semantics.Term{ .{ .child = 0 }, .{ .child = 0 }, .{ .binop = .add } };
-    const rhs = [_]zigts.semantics.Term{ .{ .child = 0 }, .{ .child = 0 }, .{ .binop = .add } };
-    const q = try zigts.semantics_smt.encodeEquivalence(a, &lhs, &rhs, false);
+    const lhs = [_]zts.semantics.Term{ .{ .child = 0 }, .{ .child = 0 }, .{ .binop = .add } };
+    const rhs = [_]zts.semantics.Term{ .{ .child = 0 }, .{ .child = 0 }, .{ .binop = .add } };
+    const q = try zts.semantics_smt.encodeEquivalence(a, &lhs, &rhs, false);
     defer a.free(q);
     try std.testing.expectEqual(Verdict.equivalent, solve(q, a));
 }
@@ -236,9 +236,9 @@ test "solve refutes a faithful-model non-law when z3 is present" {
     // (string concat counterexample).
     const a = std.testing.allocator;
     if (!available(a)) return error.SkipZigTest;
-    const lhs = [_]zigts.semantics.Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
-    const rhs = [_]zigts.semantics.Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
-    const q = try zigts.semantics_audit.encodeRefutation(a, &lhs, &rhs);
+    const lhs = [_]zts.semantics.Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
+    const rhs = [_]zts.semantics.Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
+    const q = try zts.semantics_audit.encodeRefutation(a, &lhs, &rhs);
     defer a.free(q);
     try std.testing.expectEqual(Verdict.counterexample, solve(q, a));
 }

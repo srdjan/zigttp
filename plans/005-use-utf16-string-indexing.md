@@ -8,7 +8,7 @@ Planned on: 2026-06-20
 Before editing, verify the in-scope files have not changed since this plan was written:
 
 ```sh
-git diff --name-only f2c637d -- packages/zigts/src/builtins/string_builtins.zig packages/zigts/src/string.zig
+git diff --name-only f2c637d -- packages/zts/src/builtins/string_builtins.zig packages/zts/src/string.zig
 ```
 
 Expected output for direct execution from the planned commit is empty. If either path appears, re-open the string helpers and method implementations before editing.
@@ -28,7 +28,7 @@ JavaScript string indexes and `.length` are based on UTF-16 code units, not UTF-
 
 ## Current State
 
-Evidence from `packages/zigts/src/builtins/string_builtins.zig`:
+Evidence from `packages/zts/src/builtins/string_builtins.zig`:
 
 - `utf16CodeUnitAt` exists and powers `charCodeAt` at lines 14-34 and 71-89.
 - `stringLength` returns `data.len` bytes, or rope `total_len`, at lines 36-47.
@@ -36,7 +36,7 @@ Evidence from `packages/zigts/src/builtins/string_builtins.zig`:
 - `stringSlice` computes defaults and clamps against `data.len`, then slices bytes at lines 218-288.
 - `stringSubstring` also clamps and slices by bytes at lines 290-362.
 
-Evidence from `packages/zigts/src/string.zig`:
+Evidence from `packages/zts/src/string.zig`:
 
 - `JSString.length()` is documented as bytes at lines 44-46.
 - `codepointLength()` exists, but JavaScript needs UTF-16 code-unit length, not Unicode scalar count, at lines 62-68.
@@ -45,8 +45,8 @@ Evidence from `packages/zigts/src/string.zig`:
 
 In scope:
 
-- `packages/zigts/src/builtins/string_builtins.zig`
-- `packages/zigts/src/string.zig` only if a shared helper belongs there.
+- `packages/zts/src/builtins/string_builtins.zig`
+- `packages/zts/src/string.zig` only if a shared helper belongs there.
 - Regression tests for non-ASCII strings.
 
 Out of scope:
@@ -84,7 +84,7 @@ Out of scope:
 5. Run:
 
    ```sh
-   zig build test-zigts --summary all
+   zig build test-zts --summary all
    zig build test --summary all
    git diff --check
    ```

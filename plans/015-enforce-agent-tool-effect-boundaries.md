@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command. Touch only the in-scope files. Stop on a listed STOP condition instead of adding another tool-name special case. Update this plan's row in `plans/README.md` when complete.
 >
-> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/pi/src/registry packages/pi/src/app.zig packages/pi/src/loop.zig packages/pi/src/rpc_mode.zig packages/pi/src/tools/pi_apply_feature_plan.zig packages/pi/src/expert_persona.zig docs/internals/zigts-expert-contract.md`
+> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/pi/src/registry packages/pi/src/app.zig packages/pi/src/loop.zig packages/pi/src/rpc_mode.zig packages/pi/src/tools/pi_apply_feature_plan.zig packages/pi/src/expert_persona.zig docs/internals/zts-expert-contract.md`
 
 ## Status
 
@@ -22,12 +22,12 @@ Compiler validation is not authorization: it proves the candidate is acceptable 
 ## Current evidence
 
 - `packages/pi/src/app.zig:91-133` registers every full-mode tool in one registry, including `pi_apply_feature_plan` at line 121.
-- `packages/pi/src/tools/pi_apply_feature_plan.zig:56-79` resolves the path, reruns `edit_simulate`, and calls `zigts.file_io.writeFile` directly.
+- `packages/pi/src/tools/pi_apply_feature_plan.zig:56-79` resolves the path, reruns `edit_simulate`, and calls `zts.file_io.writeFile` directly.
 - `packages/pi/src/loop.zig:518-557,719-723` special-cases only the `apply_edit` event name; ordinary tool calls go to `invokeToolRecovering`.
 - `packages/pi/src/loop.zig:780-846` contains the actual approval preview and gate, but the feature-plan tool never reaches it.
 - `packages/pi/src/rpc_mode.zig:466-520` exposes direct `registry.invokeJson` with no invocation policy.
 - `packages/pi/src/registry/tool.zig:117-124` describes tools by strings and function pointers only; no effect or required capability is represented.
-- `docs/internals/zigts-expert-contract.md:113-137` says the tools run inside the vetoed loop and RPC analyzer tools cannot apply an edit out of band.
+- `docs/internals/zts-expert-contract.md:113-137` says the tools run inside the vetoed loop and RPC analyzer tools cannot apply an edit out of band.
 
 ## Scope
 
@@ -40,7 +40,7 @@ In scope:
 - `packages/pi/src/loop.zig`
 - `packages/pi/src/rpc_mode.zig`
 - `packages/pi/src/expert_persona.zig`
-- `docs/internals/zigts-expert-contract.md`
+- `docs/internals/zts-expert-contract.md`
 - Pi registry, loop, and RPC tests
 
 Out of scope:
@@ -93,13 +93,13 @@ Add tests proving:
 - all registered tools have an explicit valid effect;
 - docs and `tools.list` describe the live behavior.
 
-Update `expert_persona.zig` and `zigts-expert-contract.md` so they name `apply_edit` as the sole model-mediated workspace write path.
+Update `expert_persona.zig` and `zts-expert-contract.md` so they name `apply_edit` as the sole model-mediated workspace write path.
 
 ## Verification
 
 ```sh
 zig fmt --check build.zig packages/
-zig build test-expert-app test-expert test-cassette test-zigts-cli test-expert-golden
+zig build test-expert-app test-expert test-cassette test-zts-cli test-expert-golden
 bash scripts/verify.sh
 git diff --check
 git status --short

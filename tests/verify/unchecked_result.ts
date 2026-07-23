@@ -1,6 +1,6 @@
 // Should fail: result.value accessed without checking result.ok
-import { validateJson, schemaCompile } from "zigttp:validate";
-import type { Spec } from "zigttp:types";
+import { validateJson, schemaCompile } from "zttp:validate";
+import type { Spec } from "zttp:types";
 
 const ok = schemaCompile("test", JSON.stringify({ type: "object" }));
 

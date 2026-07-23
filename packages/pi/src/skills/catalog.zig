@@ -87,13 +87,13 @@ test "every skill body is non-empty and every description fits on one line" {
 
 test "handler-scaffold body preserves the conventions list verbatim" {
     const skill = findByName("handler-scaffold") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, skill.body, "zigttp:decode") != null);
+    try testing.expect(std.mem.indexOf(u8, skill.body, "zttp:decode") != null);
     try testing.expect(std.mem.indexOf(u8, skill.body, "No classes, no async/await") != null);
 }
 
 test "skills steer coding tasks through compiler-native expert tools" {
     const fix = findByName("fix-violations") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, fix.body, "zigts_expert_verify_paths") != null);
+    try testing.expect(std.mem.indexOf(u8, fix.body, "zts_expert_verify_paths") != null);
     try testing.expect(std.mem.indexOf(u8, fix.body, "pi_goal_candidate") != null);
     try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
 

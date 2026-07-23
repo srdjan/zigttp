@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:websocket",
+  "specifier": "zttp:websocket",
   "source": "packages/modules/src/net/websocket.zig",
   "requiredCapabilities": [
     "clock",

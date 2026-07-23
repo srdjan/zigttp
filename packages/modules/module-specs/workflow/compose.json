@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:compose",
+  "specifier": "zttp:compose",
   "source": "packages/modules/src/workflow/compose.zig",
   "requiredCapabilities": [],
   "exports": [

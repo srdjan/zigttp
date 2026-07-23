@@ -1,4 +1,4 @@
-//! `zigttp init` — scaffold a new project or partner extension. This module
+//! `zttp init` — scaffold a new project or partner extension. This module
 //! owns all scaffolding: the project templates, the extension templates, and
 //! the file writers. The studio/dev preflight reuses `scaffoldProject` to
 //! scaffold an empty cwd in place, so that helper is public. Dispatch and
@@ -7,22 +7,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const shared = @import("cli_shared.zig");
 const cli_templates = @import("cli_templates.zig");
 const Template = cli_templates.Template;
 const parseTemplate = cli_templates.parseTemplate;
 
 /// What `initCommand` decided after scaffolding. `enter_expert` asks the
-/// dispatcher to chdir into the new project and launch `zigttp expert` (the
+/// dispatcher to chdir into the new project and launch `zttp expert` (the
 /// `--expert` flag); `project_name` borrows from argv.
 pub const InitOutcome = struct {
     enter_expert: bool = false,
     project_name: ?[]const u8 = null,
 };
 
-/// Parsed `zigttp init` arguments, before any scaffolding side effect. Shared by
+/// Parsed `zttp init` arguments, before any scaffolding side effect. Shared by
 /// `initCommand` (which scaffolds) and `willEnterExpert` (which only inspects the
 /// decision) so the two can never diverge on what `--expert` means.
 const ParsedInitArgs = struct {
@@ -66,7 +66,7 @@ fn parseInitArgs(argv: []const []const u8) !ParsedInitArgs {
     return parsed;
 }
 
-/// Whether `zigttp init <argv>` would launch the expert agent after scaffolding.
+/// Whether `zttp init <argv>` would launch the expert agent after scaffolding.
 /// The dispatcher uses this to run the model-backend check before scaffolding,
 /// without re-deriving `--expert` from a raw token scan: this honors `--help`
 /// (returns false), ignores `--expert` when `--extension` wins or when
@@ -168,7 +168,7 @@ fn rollbackScaffoldFiles(io: std.Io, paths: []const []const u8, preserved_path: 
 
 fn reportScaffoldConflict(path: []const u8) void {
     std.debug.print(
-        "error: '{s}' already exists. Pick a different name or remove the conflicting file; zigttp init will not overwrite it.\n",
+        "error: '{s}' already exists. Pick a different name or remove the conflicting file; zttp init will not overwrite it.\n",
         .{path},
     );
 }
@@ -181,7 +181,7 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     // Named init scaffolds refuse every existing target before writing. The
     // in-place studio preflight preserves a caller-owned .gitignore.
     const relative_paths = [_][]const u8{
-        "zigttp.json",
+        "zttp.json",
         handlerPathForTemplate(template),
         "tests/handler.test.jsonl",
         ".gitignore",
@@ -254,7 +254,7 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
     const io = io_backend.io();
 
     const relative_paths = [_][]const u8{
-        "zigttp-module.json",
+        "zttp-module.json",
         "src/root.zig",
         "build.zig",
         "build.zig.zon",
@@ -332,7 +332,7 @@ fn renderExtensionTemplate(
 }
 
 fn extensionPackageName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    const prefix = "zigttp_ext_";
+    const prefix = "zttp_ext_";
     const max_package_name_len = 32;
 
     var out: std.ArrayList(u8) = .empty;
@@ -379,28 +379,28 @@ fn extensionPackageFingerprint(io: std.Io, package_name: []const u8) u64 {
 }
 
 fn printInitExtensionNextSteps(name: []const u8) void {
-    std.debug.print("Initialized zigttp extension in {s}\n", .{name});
+    std.debug.print("Initialized zttp extension in {s}\n", .{name});
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zigts verify-module-manifest zigttp-module.json\n", .{});
-    std.debug.print("  zigts extension-status --module-manifest zigttp-module.json\n", .{});
-    std.debug.print("  # adjust build.zig.zon to point at the version of zigttp-sdk you depend on,\n", .{});
+    std.debug.print("  zts verify-module-manifest zttp-module.json\n", .{});
+    std.debug.print("  zts extension-status --module-manifest zttp-module.json\n", .{});
+    std.debug.print("  # adjust build.zig.zon to point at the version of zttp-sdk you depend on,\n", .{});
     std.debug.print("  # then `zig build` to compile the native binding.\n", .{});
 }
 
-/// Print the post-init welcome panel. `zigttp dev` owns the first-run tour so
+/// Print the post-init welcome panel. `zttp dev` owns the first-run tour so
 /// the tour marker is written inside the project on the first real dev run.
 fn printInitNextSteps(name: []const u8, template: Template) void {
     const tty = shared.stderrIsTty();
     const c = shared.palette(tty);
 
     std.debug.print("\n", .{});
-    std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
+    std.debug.print("  {s}+{s} initialized zttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
     std.debug.print("  template: {s}\n", .{@tagName(template)});
     std.debug.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
     std.debug.print("\n", .{});
     std.debug.print("  created:\n", .{});
-    std.debug.print("    zigttp.json\n", .{});
+    std.debug.print("    zttp.json\n", .{});
     std.debug.print("    {s}\n", .{handlerPathForTemplate(template)});
     std.debug.print("    tests/handler.test.jsonl\n", .{});
     std.debug.print("    public/.keep\n", .{});
@@ -412,11 +412,11 @@ fn printInitNextSteps(name: []const u8, template: Template) void {
     std.debug.print("  try it:\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("    cd {s}\n", .{name});
-    std.debug.print("    {s}zigttp dev{s}          {s}# watch and prove on every save{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    {s}zttp dev{s}          {s}# watch and prove on every save{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
     std.debug.print("    curl http://127.0.0.1:3000{s}\n", .{starterPathForTemplate(template)});
     std.debug.print("\n", .{});
-    std.debug.print("    {s}zigttp test{s}         {s}# run tests/handler.test.jsonl{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
-    std.debug.print("    {s}zigttp deploy{s}       {s}# build, prove, and deploy to .zigttp/deploy/{s}{s}\n", .{ c.cyan, c.reset, c.dim, name, c.reset });
+    std.debug.print("    {s}zttp test{s}         {s}# run tests/handler.test.jsonl{s}\n", .{ c.cyan, c.reset, c.dim, c.reset });
+    std.debug.print("    {s}zttp deploy{s}       {s}# build, prove, and deploy to .zttp/deploy/{s}{s}\n", .{ c.cyan, c.reset, c.dim, name, c.reset });
     std.debug.print("\n", .{});
 }
 
@@ -426,24 +426,24 @@ fn printInitExpertHandoff(name: []const u8) void {
     const tty = shared.stderrIsTty();
     const c = shared.palette(tty);
     std.debug.print("\n", .{});
-    std.debug.print("  {s}+{s} initialized zigttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
+    std.debug.print("  {s}+{s} initialized zttp project in {s}{s}{s}\n", .{ c.green, c.reset, c.bold, name, c.reset });
     std.debug.print("  {s}entering expert mode - describe the handler you want{s}\n", .{ c.dim, c.reset });
     std.debug.print("\n", .{});
 }
 
 pub fn printInitHelp() void {
     const help =
-        \\zigttp init <name> [--template basic|api|htmx] [--expert]
-        \\zigttp init --extension <name>
+        \\zttp init <name> [--template basic|api|htmx] [--expert]
+        \\zttp init --extension <name>
         \\
-        \\Create a new zigttp project or extension directory.
-        \\With --expert, scaffold the project and then enter `zigttp expert`
+        \\Create a new zttp project or extension directory.
+        \\With --expert, scaffold the project and then enter `zttp expert`
         \\(the interactive compiler-in-the-loop agent) inside it.
         \\Names may contain letters, numbers, '-' and '_', and must start with
         \\a letter or number.
         \\
         \\Project files (default):
-        \\  zigttp.json
+        \\  zttp.json
         \\  src/handler.ts     (basic/api)
         \\  src/handler.tsx    (htmx)
         \\  tests/handler.test.jsonl
@@ -457,18 +457,18 @@ pub fn printInitHelp() void {
         \\  htmx    TSX page and HTMX fragment
         \\
         \\Extension files (--extension):
-        \\  zigttp-module.json     proof metadata for the partner module
-        \\  src/root.zig           native Zig binding against zigttp-sdk
+        \\  zttp-module.json     proof metadata for the partner module
+        \\  src/root.zig           native Zig binding against zttp-sdk
         \\  build.zig
         \\  build.zig.zon
-        \\  handler.ts             sample handler importing zigttp-ext:<name>
+        \\  handler.ts             sample handler importing zttp-ext:<name>
         \\  .gitignore
         \\  README.md
         \\
         \\Examples:
-        \\  zigttp init my-app
-        \\  zigttp init my-app --expert
-        \\  zigttp init --extension my-partner
+        \\  zttp init my-app
+        \\  zttp init my-app --expert
+        \\  zttp init --extension my-partner
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -489,7 +489,7 @@ fn starterPathForTemplate(template: Template) []const u8 {
 }
 
 fn writeProjectFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
-    zigts.file_io.writeFileCreateExclusive(allocator, path, data) catch |err| {
+    zts.file_io.writeFileCreateExclusive(allocator, path, data) catch |err| {
         if (err == error.PathAlreadyExists) {
             reportScaffoldConflict(path);
             return error.ScaffoldTargetExists;
@@ -513,15 +513,15 @@ const htmxManifest =
     \\}
 ;
 
-const basicHandler = zigts_cli.proof_quest_fixture.starter_source;
+const basicHandler = zts_cli.proof_quest_fixture.starter_source;
 
 const apiHandler =
-    \\import type { Spec } from "zigttp:types";
+    \\import type { Spec } from "zttp:types";
     \\
     \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
     \\// to these properties; without it every supported spec is active, and the
     \\// /echo route below (which reflects the request body) cannot discharge
-    \\// pii_contained. Run `zigttp check` to see them proven at compile time.
+    \\// pii_contained. Run `zttp check` to see them proven at compile time.
     \\type Guardrails = Spec<
     \\    | "deterministic"
     \\    | "no_secret_leakage"
@@ -545,11 +545,11 @@ const apiHandler =
 ;
 
 const htmxHandler =
-    \\import type { Spec } from "zigttp:types";
+    \\import type { Spec } from "zttp:types";
     \\
     \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
     \\// to these properties; without it every supported spec is active and the
-    \\// proof cannot be discharged. Run `zigttp check` to see them proven at
+    \\// proof cannot be discharged. Run `zttp check` to see them proven at
     \\// compile time.
     \\type Guardrails = Spec<
     \\    | "deterministic"
@@ -561,7 +561,7 @@ const htmxHandler =
     \\    return (
     \\        <html>
     \\            <body>
-    \\                <h1>zigttp</h1>
+    \\                <h1>zttp</h1>
     \\                <button hx-get="/fragment" hx-target="#slot" hx-swap="innerHTML">
     \\                    Load fragment
     \\                </button>
@@ -599,29 +599,29 @@ const apiTests =
 const htmxTests =
     \\{"type":"test","name":"root renders html"}
     \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
-    \\{"type":"expect","status":200,"bodyContains":"zigttp"}
+    \\{"type":"expect","status":200,"bodyContains":"zttp"}
 ;
 
 const gitignoreSource =
     \\.zig-cache/
     \\zig-cache/
     \\zig-out/
-    \\.zigttp/
+    \\.zttp/
     \\.DS_Store
 ;
 
 const basicReadme =
-    \\# zigttp app
+    \\# zttp app
     \\
     \\## Quick start
     \\
     \\1. Start the terminal proof loop:
     \\
-    \\       zigttp dev
+    \\       zttp dev
     \\
     \\   On a fresh scaffold, the Proof Quest runs once. Press `b` to preview
     \\   a tiny edit that breaks `deterministic`, `y` to apply it, then `r`
-    \\   and `y` to repair it. Use `zigttp dev --quest` to replay it later.
+    \\   and `y` to repair it. Use `zttp dev --quest` to replay it later.
     \\
     \\2. Edit `src/handler.ts` in your editor. The HUD re-verifies on save and
     \\   shows the verdict, proven surface, proof deltas, and spec diagnostics.
@@ -629,29 +629,29 @@ const basicReadme =
     \\
     \\3. Run the fixture:
     \\
-    \\       zigttp test
+    \\       zttp test
     \\
     \\4. When you are happy with the verdict, do a verified local deploy. It
     \\   builds a self-contained binary and records the proof in the ledger at
-    \\   `.zigttp/proofs.jsonl`:
+    \\   `.zttp/proofs.jsonl`:
     \\
-    \\       zigttp deploy
-    \\       ./.zigttp/deploy/<this-app-name>
+    \\       zttp deploy
+    \\       ./.zttp/deploy/<this-app-name>
     \\
     \\## More
     \\
-    \\- `zigttp expert` - interactive compiler-in-the-loop agent
-    \\- `zigttp help --all` - advanced commands
+    \\- `zttp expert` - interactive compiler-in-the-loop agent
+    \\- `zttp help --all` - advanced commands
 ;
 
 const apiReadme =
-    \\# zigttp API app
+    \\# zttp API app
     \\
     \\## Quick start
     \\
     \\1. Start the local dev loop:
     \\
-    \\       zigttp dev
+    \\       zttp dev
     \\
     \\2. Try the starter endpoints:
     \\
@@ -660,26 +660,26 @@ const apiReadme =
     \\
     \\3. Run the fixture:
     \\
-    \\       zigttp test
+    \\       zttp test
     \\
     \\4. Deploy locally (builds the binary and records the proof ledger entry):
     \\
-    \\       zigttp deploy
+    \\       zttp deploy
     \\
     \\## More
     \\
-    \\- `zigttp expert` - interactive compiler-in-the-loop agent
-    \\- `zigttp help --all` - advanced commands
+    \\- `zttp expert` - interactive compiler-in-the-loop agent
+    \\- `zttp help --all` - advanced commands
 ;
 
 const htmxReadme =
-    \\# zigttp HTMX app
+    \\# zttp HTMX app
     \\
     \\## Quick start
     \\
     \\1. Start the TSX/HTMX dev loop:
     \\
-    \\       zigttp dev
+    \\       zttp dev
     \\
     \\2. Edit `src/handler.tsx`, then open the page:
     \\
@@ -687,23 +687,23 @@ const htmxReadme =
     \\
     \\3. Run the fixture:
     \\
-    \\       zigttp test
+    \\       zttp test
     \\
     \\4. Deploy locally (builds the binary and records the proof ledger entry):
     \\
-    \\       zigttp deploy
+    \\       zttp deploy
     \\
     \\## More
     \\
-    \\- `zigttp expert` - interactive compiler-in-the-loop agent
-    \\- `zigttp help --all` - advanced commands
+    \\- `zttp expert` - interactive compiler-in-the-loop agent
+    \\- `zttp help --all` - advanced commands
 ;
 
 // `{{name}}` is replaced by the extension name at scaffold time.
 const extension_manifest_template =
     \\{
     \\  "schemaVersion": 1,
-    \\  "specifier": "zigttp-ext:{{name}}",
+    \\  "specifier": "zttp-ext:{{name}}",
     \\  "backend": "native-zig",
     \\  "stateModel": "none",
     \\  "requiredCapabilities": [],
@@ -721,10 +721,10 @@ const extension_manifest_template =
 ;
 
 const extension_root_zig_template =
-    \\const sdk = @import("zigttp-sdk");
+    \\const sdk = @import("zttp-sdk");
     \\
     \\pub const binding = sdk.ModuleBinding{
-    \\    .specifier = "zigttp-ext:{{name}}",
+    \\    .specifier = "zttp-ext:{{name}}",
     \\    .name = "ext_{{name}}",
     \\    .required_capabilities = &.{},
     \\    .exports = &.{
@@ -762,7 +762,7 @@ const extension_build_zig_template =
     \\pub fn build(b: *std.Build) void {
     \\    const target = b.standardTargetOptions(.{});
     \\    const optimize = b.standardOptimizeOption(.{});
-    \\    const sdk_dep = b.dependency("zigttp_sdk", .{
+    \\    const sdk_dep = b.dependency("zttp_sdk", .{
     \\        .target = target,
     \\        .optimize = optimize,
     \\    });
@@ -772,7 +772,7 @@ const extension_build_zig_template =
     \\        .target = target,
     \\        .optimize = optimize,
     \\        .imports = &.{
-    \\            .{ .name = "zigttp-sdk", .module = sdk_dep.module("zigttp-sdk") },
+    \\            .{ .name = "zttp-sdk", .module = sdk_dep.module("zttp-sdk") },
     \\        },
     \\    });
     \\}
@@ -786,29 +786,29 @@ const extension_build_zon_template =
     \\    .fingerprint = {{fingerprint}}, // Changing this has security and trust implications.
     \\    .minimum_zig_version = "0.16.0",
     \\    .dependencies = .{
-    \\        // Replace this placeholder with the version of zigttp-sdk you depend on.
-    \\        // For monorepo use, set `.path = "../zigttp-sdk"`. For external use,
+    \\        // Replace this placeholder with the version of zttp-sdk you depend on.
+    \\        // For monorepo use, set `.path = "../zttp-sdk"`. For external use,
     \\        // run `zig fetch --save <url>` to pin a release tarball.
-    \\        .zigttp_sdk = .{
-    \\            .path = "../zigttp-sdk",
+    \\        .zttp_sdk = .{
+    \\            .path = "../zttp-sdk",
     \\        },
     \\    },
     \\    .paths = .{
     \\        "build.zig",
     \\        "build.zig.zon",
     \\        "src",
-    \\        "zigttp-module.json",
+    \\        "zttp-module.json",
     \\    },
     \\}
     \\
 ;
 
 const extension_handler_ts_template =
-    \\import { greet } from "zigttp-ext:{{name}}";
+    \\import { greet } from "zttp-ext:{{name}}";
     \\
     \\function handler(req) {
     \\    if (req.method === "GET" && req.path === "/") {
-    \\        return Response.text(greet("zigttp"));
+    \\        return Response.text(greet("zttp"));
     \\    }
     \\    return Response.text("Not Found", { status: 404 });
     \\}
@@ -816,28 +816,28 @@ const extension_handler_ts_template =
 ;
 
 const extension_readme_template =
-    \\# zigttp-ext:{{name}}
+    \\# zttp-ext:{{name}}
     \\
-    \\A minimal zigttp extension scaffolded by `zigttp init --extension {{name}}`.
+    \\A minimal zttp extension scaffolded by `zttp init --extension {{name}}`.
     \\
     \\## Files
     \\
-    \\- `zigttp-module.json` - proof metadata for tools like
-    \\  `zigts verify-module-manifest` and `zigts extension-status`.
+    \\- `zttp-module.json` - proof metadata for tools like
+    \\  `zts verify-module-manifest` and `zts extension-status`.
     \\- `src/root.zig` - the native Zig binding that implements the export.
-    \\- `build.zig` / `build.zig.zon` - Zig build wiring against `zigttp-sdk`.
-    \\- `handler.ts` - a sibling handler that imports `zigttp-ext:{{name}}` so
-    \\  you can verify end-to-end with `zigts check` once the manifest is
+    \\- `build.zig` / `build.zig.zon` - Zig build wiring against `zttp-sdk`.
+    \\- `handler.ts` - a sibling handler that imports `zttp-ext:{{name}}` so
+    \\  you can verify end-to-end with `zts check` once the manifest is
     \\  registered via `--module-manifest`.
     \\
     \\## Validate the manifest
     \\
-    \\    zigts verify-module-manifest zigttp-module.json
-    \\    zigts extension-status --module-manifest zigttp-module.json
+    \\    zts verify-module-manifest zttp-module.json
+    \\    zts extension-status --module-manifest zttp-module.json
     \\
-    \\## Wire up `zigttp-sdk`
+    \\## Wire up `zttp-sdk`
     \\
-    \\`build.zig.zon` ships with a `path = "../zigttp-sdk"` placeholder. For
+    \\`build.zig.zon` ships with a `path = "../zttp-sdk"` placeholder. For
     \\external use, swap it for a `zig fetch --save <url>` line that pins a
     \\released tarball. Then run `zig build` to compile the binding.
     \\
@@ -892,7 +892,7 @@ test "init --extension scaffolds a manifest the parser accepts" {
     try scaffoldExtension(testing.allocator, "demoext");
 
     const expected = [_][]const u8{
-        "demoext/zigttp-module.json",
+        "demoext/zttp-module.json",
         "demoext/src/root.zig",
         "demoext/build.zig",
         "demoext/build.zig.zon",
@@ -904,11 +904,11 @@ test "init --extension scaffolds a manifest the parser accepts" {
         try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
     }
 
-    const manifest_bytes = try zigts.file_io.readFile(testing.allocator, "demoext/zigttp-module.json", 256 * 1024);
+    const manifest_bytes = try zts.file_io.readFile(testing.allocator, "demoext/zttp-module.json", 256 * 1024);
     defer testing.allocator.free(manifest_bytes);
-    var manifest = try zigts.module_manifest.parse(testing.allocator, manifest_bytes);
+    var manifest = try zts.module_manifest.parse(testing.allocator, manifest_bytes);
     defer manifest.deinit(testing.allocator);
-    try testing.expectEqualStrings("zigttp-ext:demoext", manifest.specifier);
+    try testing.expectEqualStrings("zttp-ext:demoext", manifest.specifier);
     try testing.expectEqual(@as(usize, 1), manifest.exports.items.len);
     try testing.expectEqualStrings("greet", manifest.exports.items[0].name);
 }
@@ -924,9 +924,9 @@ test "init --extension sanitizes build zon package name for hyphenated names" {
 
     try scaffoldExtension(testing.allocator, "demo-ext");
 
-    const build_zon = try zigts.file_io.readFile(testing.allocator, "demo-ext/build.zig.zon", 256 * 1024);
+    const build_zon = try zts.file_io.readFile(testing.allocator, "demo-ext/build.zig.zon", 256 * 1024);
     defer testing.allocator.free(build_zon);
-    try testing.expect(std.mem.indexOf(u8, build_zon, ".name = .zigttp_ext_demo_ext") != null);
+    try testing.expect(std.mem.indexOf(u8, build_zon, ".name = .zttp_ext_demo_ext") != null);
     try testing.expect(std.mem.indexOf(u8, build_zon, ".fingerprint = 0x") != null);
 }
 
@@ -939,7 +939,7 @@ test "init --extension package fingerprint uses package name checksum" {
     const package_name = try extensionPackageName(testing.allocator, "Demo-Ext");
     defer testing.allocator.free(package_name);
 
-    try testing.expectEqualStrings("zigttp_ext_demo_ext", package_name);
+    try testing.expectEqualStrings("zttp_ext_demo_ext", package_name);
     const fingerprint = extensionPackageFingerprint(io, package_name);
     try testing.expectEqual(std.hash.Crc32.hash(package_name), @as(u32, @truncate(fingerprint >> 32)));
     try testing.expect(@as(u32, @truncate(fingerprint)) != 0);
@@ -952,7 +952,7 @@ test "init --extension package name stays within Zig manifest limit" {
     defer testing.allocator.free(package_name);
 
     try testing.expect(package_name.len <= 32);
-    try testing.expect(std.mem.startsWith(u8, package_name, "zigttp_ext_very"));
+    try testing.expect(std.mem.startsWith(u8, package_name, "zttp_ext_very"));
     try testing.expect(std.mem.indexOfScalar(u8, package_name, '-') == null);
 }
 
@@ -970,13 +970,13 @@ test "init --extension preserves a pre-existing build.zig" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try std.Io.Dir.cwd().createDirPath(io, "alpha");
-    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "alpha/build.zig", "user build\n");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "alpha/build.zig", "user build\n");
 
     try testing.expectError(error.ScaffoldTargetExists, scaffoldExtension(testing.allocator, "alpha"));
-    const build_zig = try zigts.file_io.readFile(testing.allocator, "alpha/build.zig", 1024);
+    const build_zig = try zts.file_io.readFile(testing.allocator, "alpha/build.zig", 1024);
     defer testing.allocator.free(build_zig);
     try testing.expectEqualStrings("user build\n", build_zig);
-    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "alpha/zigttp-module.json", .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "alpha/zttp-module.json", .{}));
 }
 
 test "init preserves a pre-existing README" {
@@ -992,13 +992,13 @@ test "init preserves a pre-existing README" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try std.Io.Dir.cwd().createDirPath(io, "demo");
-    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/README.md", "user readme\n");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "demo/README.md", "user readme\n");
 
     try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
-    const readme = try zigts.file_io.readFile(testing.allocator, "demo/README.md", 1024);
+    const readme = try zts.file_io.readFile(testing.allocator, "demo/README.md", 1024);
     defer testing.allocator.free(readme);
     try testing.expectEqualStrings("user readme\n", readme);
-    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zttp.json", .{}));
 }
 
 test "studio scaffold preserves a pre-existing gitignore in a dotfile-only cwd" {
@@ -1014,13 +1014,13 @@ test "studio scaffold preserves a pre-existing gitignore in a dotfile-only cwd" 
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try zigts.file_io.writeFileCreateExclusive(testing.allocator, ".gitignore", "user rules\n");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, ".gitignore", "user rules\n");
     try scaffoldProject(testing.allocator, ".", .basic);
 
-    const contents = try zigts.file_io.readFile(testing.allocator, ".gitignore", 1024);
+    const contents = try zts.file_io.readFile(testing.allocator, ".gitignore", 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("user rules\n", contents);
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{});
 }
 
 test "init refuses a pre-existing gitignore in a named project" {
@@ -1037,10 +1037,10 @@ test "init refuses a pre-existing gitignore in a named project" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try std.Io.Dir.cwd().createDirPath(io, "demo");
-    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/.gitignore", "user rules\n");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "demo/.gitignore", "user rules\n");
     try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
 
-    const contents = try zigts.file_io.readFile(testing.allocator, "demo/.gitignore", 1024);
+    const contents = try zts.file_io.readFile(testing.allocator, "demo/.gitignore", 1024);
     defer testing.allocator.free(contents);
     try testing.expectEqualStrings("user rules\n", contents);
 }
@@ -1058,13 +1058,13 @@ test "init preserves a pre-existing handler" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try std.Io.Dir.cwd().createDirPath(io, "demo/src");
-    try zigts.file_io.writeFileCreateExclusive(testing.allocator, "demo/src/handler.ts", "user handler\n");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "demo/src/handler.ts", "user handler\n");
 
     try testing.expectError(error.ScaffoldTargetExists, scaffoldProject(testing.allocator, "demo", .basic));
-    const handler = try zigts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 1024);
+    const handler = try zts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 1024);
     defer testing.allocator.free(handler);
     try testing.expectEqualStrings("user handler\n", handler);
-    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{}));
+    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zttp.json", .{}));
 }
 
 test "init scaffolds into a clean existing directory" {
@@ -1082,7 +1082,7 @@ test "init scaffolds into a clean existing directory" {
     try std.Io.Dir.cwd().createDirPath(io, "demo");
     try scaffoldProject(testing.allocator, "demo", .basic);
 
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zttp.json", .{});
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/src/handler.ts", .{});
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/README.md", .{});
 }
@@ -1103,7 +1103,7 @@ test "initCommand scaffolds the v1 project layout" {
     try scaffoldProject(testing.allocator, "demo", .api);
 
     const expected = [_][]const u8{
-        "demo/zigttp.json",
+        "demo/zttp.json",
         "demo/src/handler.ts",
         "demo/tests/handler.test.jsonl",
         "demo/public/.keep",
@@ -1114,7 +1114,7 @@ test "initCommand scaffolds the v1 project layout" {
         try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
     }
 
-    const handler = try zigts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
+    const handler = try zts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
     defer testing.allocator.free(handler);
     try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Response") != null);
 }
@@ -1162,18 +1162,18 @@ test "initCommand writes template-specific starter README files" {
     try scaffoldProject(testing.allocator, "api-demo", .api);
     try scaffoldProject(testing.allocator, "htmx-demo", .htmx);
 
-    const api_readme = try zigts.file_io.readFile(testing.allocator, "api-demo/README.md", 64 * 1024);
+    const api_readme = try zts.file_io.readFile(testing.allocator, "api-demo/README.md", 64 * 1024);
     defer testing.allocator.free(api_readme);
-    const htmx_readme = try zigts.file_io.readFile(testing.allocator, "htmx-demo/README.md", 64 * 1024);
+    const htmx_readme = try zts.file_io.readFile(testing.allocator, "htmx-demo/README.md", 64 * 1024);
     defer testing.allocator.free(htmx_readme);
-    const htmx_manifest = try zigts.file_io.readFile(testing.allocator, "htmx-demo/zigttp.json", 64 * 1024);
+    const htmx_manifest = try zts.file_io.readFile(testing.allocator, "htmx-demo/zttp.json", 64 * 1024);
     defer testing.allocator.free(htmx_manifest);
 
-    try testing.expect(std.mem.indexOf(u8, api_readme, "# zigttp API app") != null);
+    try testing.expect(std.mem.indexOf(u8, api_readme, "# zttp API app") != null);
     try testing.expect(std.mem.indexOf(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_readme, "# zigttp HTMX app") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_readme, "# zttp HTMX app") != null);
     try testing.expect(std.mem.indexOf(u8, htmx_readme, "src/handler.tsx") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_readme, "zigttp test") != null);
+    try testing.expect(std.mem.indexOf(u8, htmx_readme, "zttp test") != null);
     try testing.expect(std.mem.indexOf(u8, htmx_manifest, "\"entry\": \"src/handler.tsx\"") != null);
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.tsx", .{});
     try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.ts", .{}));

@@ -1,4 +1,4 @@
-//! Oplog-step helper for `zigttp:fetch` with `durable: { key, retries,
+//! Oplog-step helper for `zttp:fetch` with `durable: { key, retries,
 //! backoff, ttl_s }`. Pure functions here: hashing, JSON
 //! serialization, filesystem round-trip. The driver that decides when
 //! to call these lives in `zruntime.zig` next to the HTTP path.
@@ -10,7 +10,7 @@
 //! caller-provided cap.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 
 pub const Backoff = enum { none, exponential };
 

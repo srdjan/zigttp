@@ -2,7 +2,7 @@
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command. This plan intentionally uses a direct beta cutover: remove an advertised export that has no semantics instead of keeping a permanent throwing stub. Ask the operator before execution if compatibility must be preserved. Update `plans/README.md` when complete.
 >
-> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/modules/src/net/websocket.zig packages/modules/module-specs/net/websocket.json packages/runtime/src/ws_runtime_callbacks.zig packages/runtime/src/websocket_pool.zig packages/runtime/src/ws_gateway.zig packages/zigts/src/builtin_modules.zig docs/virtual-modules/README.md examples/websocket/chat.ts`
+> **Drift check, run first**: `git diff --name-only b00eae29 -- packages/modules/src/net/websocket.zig packages/modules/module-specs/net/websocket.json packages/runtime/src/ws_runtime_callbacks.zig packages/runtime/src/websocket_pool.zig packages/runtime/src/ws_gateway.zig packages/zts/src/builtin_modules.zig docs/virtual-modules/README.md examples/websocket/chat.ts`
 
 ## Status
 
@@ -82,7 +82,7 @@ Add an integration test around `examples/websocket/chat.ts` (or a smaller fixtur
 ```sh
 zig fmt --check build.zig packages/
 zig build test-modules test-module-governance test-docs-drift test-doc-links
-zig build test-server test-zruntime test-zigts
+zig build test-server test-zruntime test-zts
 bash scripts/test-examples.sh
 bash scripts/verify.sh
 git diff --check

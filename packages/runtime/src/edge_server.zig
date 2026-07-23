@@ -1,8 +1,8 @@
 //! In-process edge runtime for routing one listener to many handler pools.
 
 const std = @import("std");
-const zq = @import("zigts");
-const compat = @import("zigts").compat;
+const zq = @import("zts");
+const compat = @import("zts").compat;
 const zruntime = @import("zruntime.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
@@ -291,7 +291,7 @@ pub const EdgeServer = struct {
         };
         defer handle.deinit();
 
-        handle.response.putHeaderBorrowed("X-Zigttp-Edge-Target", target.name) catch {};
+        handle.response.putHeaderBorrowed("X-Zttp-Edge-Target", target.name) catch {};
         sendResponse(fd, &handle.response) catch {};
         _ = self.request_count.fetchAdd(1, .monotonic);
     }

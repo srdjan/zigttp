@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:validate",
+  "specifier": "zttp:validate",
   "source": "packages/modules/src/security/validate.zig",
   "requiredCapabilities": [],
   "exports": [

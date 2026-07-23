@@ -6,7 +6,7 @@
 //! here as plain free functions with no back-import of `Runtime`.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 
 pub fn consoleLog(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     for (args, 0..) |arg, i| {

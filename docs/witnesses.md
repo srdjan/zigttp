@@ -15,15 +15,15 @@ All paths are relative to the project root (the cwd of the analyzer
 invocation):
 
 ```
-.zigttp/witnesses/<short_hash>/handler.path        # text, original handler path
-.zigttp/witnesses/<short_hash>/index.jsonl         # append-only event log
-.zigttp/witnesses/<short_hash>/<key>.witness.jsonl # one file per witness
-.zigttp/witnesses/<short_hash>/<key>.pinned        # marker file (presence = pinned)
+.zttp/witnesses/<short_hash>/handler.path        # text, original handler path
+.zttp/witnesses/<short_hash>/index.jsonl         # append-only event log
+.zttp/witnesses/<short_hash>/<key>.witness.jsonl # one file per witness
+.zttp/witnesses/<short_hash>/<key>.pinned        # marker file (presence = pinned)
 ```
 
 `<short_hash>` is the first sixteen hex characters of
 `sha256(handler_path)`. The original path is recorded in `handler.path`
-so the listing surfaces (`zigttp witnesses list`, `pi_witnesses`) can
+so the listing surfaces (`zttp witnesses list`, `pi_witnesses`) can
 present it without reversing the hash.
 
 `<key>` is `counterexample.CounterexampleWitness.stableKey()`: a sha256
@@ -34,7 +34,7 @@ reformatted.
 
 Witness files use `counterexample.writeJsonl` exactly. They use the
 same request and virtual-module stub shape consumed by the runtime
-witness-replay path. `zigttp mock` is for `.test.jsonl` fixtures and
+witness-replay path. `zttp mock` is for `.test.jsonl` fixtures and
 does not accept `--replay`.
 
 ## How the corpus grows
@@ -53,7 +53,7 @@ Once an agent runs them, the corpus begins populating immediately and
 stays in sync with the proof state.
 
 Build-time auto-population is wired into `precompile.runCheckOnly`, so
-every `zigts check` and `zig build -Dhandler=...` populates the corpus
+every `zts check` and `zig build -Dhandler=...` populates the corpus
 from any flow-property witness the analyzer produces. The `proof.witnesses`
 block in the JSON envelope reflects the corpus state after that
 population pass.
@@ -61,22 +61,22 @@ population pass.
 Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
 `idempotent`, `state_isolated`, `fault_covered`) do not have flow-style
 falsifying inputs - their classification is structural. Seed those
-entries explicitly with `zigttp witnesses synthesize <handler> <spec>`.
+entries explicitly with `zttp witnesses synthesize <handler> <spec>`.
 
 ## Surfaces
 
-### CLI: `zigttp witnesses`
+### CLI: `zttp witnesses`
 
 ```text
-zigttp witnesses list [<handler>]
-zigttp witnesses pin <handler> <key|prefix>
-zigttp witnesses unpin <handler> <key|prefix>
-zigttp witnesses prune <handler> [--older-than <seconds>]
-zigttp witnesses synthesize <handler> <spec>
+zttp witnesses list [<handler>]
+zttp witnesses pin <handler> <key|prefix>
+zttp witnesses unpin <handler> <key|prefix>
+zttp witnesses prune <handler> [--older-than <seconds>]
+zttp witnesses synthesize <handler> <spec>
 ```
 
 `list` with no handler argument summarises every corpus directory found
-under `.zigttp/witnesses/`. With a handler, it prints one line per
+under `.zttp/witnesses/`. With a handler, it prints one line per
 witness with key prefix, property, pinned status, and the
 natural-language summary the analyzer produced.
 
@@ -95,7 +95,7 @@ analyzer-driven path already covers them.
 
 ### JSON envelope
 
-`zigts check --json` includes a `proof.witnesses` block:
+`zts check --json` includes a `proof.witnesses` block:
 
 ```json
 {
@@ -112,20 +112,20 @@ analyzer-driven path already covers them.
 }
 ```
 
-The block is read directly from `.zigttp/witnesses/<short_hash>/` for
+The block is read directly from `.zttp/witnesses/<short_hash>/` for
 the handler under check. A missing or empty corpus reports
 `{"total":0,"by_property":{}}`.
 
-### Studio: `/_zigttp/studio/witness/<key>.json`
+### Studio: `/_zttp/studio/witness/<key>.json`
 
-While the studio is running (`zigttp studio <handler.ts>` or
-`zigttp serve --studio --watch --prove`), each row in the Witnesses
+While the studio is running (`zttp studio <handler.ts>` or
+`zttp serve --studio --watch --prove`), each row in the Witnesses
 tile is clickable. Clicking fetches the on-disk witness file and
 renders the falsifying request, IO stubs, summary, source location,
 and pinned status inline. The endpoint is read-only:
 
 ```text
-GET /_zigttp/studio/witness/<key>.json
+GET /_zttp/studio/witness/<key>.json
 => {"key":"<hex>", "pinned":<bool>, "events":[<witness>, <request>, <io>...]}
 ```
 
@@ -171,7 +171,7 @@ expert REPL.
 
 ## Versioning
 
-The corpus is per-project state. Commit `.zigttp/witnesses/` to your
+The corpus is per-project state. Commit `.zttp/witnesses/` to your
 repository so every contributor's build sees the same defending
 evidence and CI fails on the same regressions. Pinned entries should
 in particular be treated as part of the source of truth.
@@ -179,7 +179,7 @@ in particular be treated as part of the source of truth.
 ## See also
 
 - [verification.md - Author-Declared Spec Discharge](verification.md#8-author-declared-spec-discharge)
-- `packages/zigts/src/witness_corpus.zig` - persistence library
-- `packages/zigts/src/counterexample.zig` - solver and JSONL wire format
-- `packages/runtime/src/witnesses_cli.zig` - `zigttp witnesses` subcommand
+- `packages/zts/src/witness_corpus.zig` - persistence library
+- `packages/zts/src/counterexample.zig` - solver and JSONL wire format
+- `packages/runtime/src/witnesses_cli.zig` - `zttp witnesses` subcommand
 - `packages/pi/src/tools/pi_witnesses.zig` - agent tool

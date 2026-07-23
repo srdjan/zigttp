@@ -1,21 +1,21 @@
 <p align="center">
-  <img src="docs/zigttp-logo.jpg" alt="zigttp" width="600">
-  <p align="center"><a href="https://zigttp.timok.deno.net/">Website</a> - <a href="docs/README.md">Documentation</a></p>
+  <img src="docs/zttp-logo.jpg" alt="zttp" width="600">
+  <p align="center"><a href="https://zttp.timok.deno.net/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
-# zigttp
+# zttp
 
 **The AI writes your handler. The compiler proves it's safe.**
 
-zigttp is a pure-Zig JavaScript/TypeScript runtime for HTTP handlers. Describe
+zttp is a pure-Zig JavaScript/TypeScript runtime for HTTP handlers. Describe
 the handler you want in plain English: the built-in agent writes it, and the
 compiler proves it before it ships - every path returns a Response, no secret
-leaks, declared egress only. zigttp ships as one binary, runs without npm or
+leaks, declared egress only. zttp ships as one binary, runs without npm or
 Node, and uses a restricted language profile so those proofs are cheap and
 automatic.
 
 ```bash
-zigttp init my-app --expert
+zttp init my-app --expert
 # then: "add a GET /health route and a POST /echo that validates JSON"
 ```
 
@@ -25,9 +25,9 @@ passes. When your intent is ambiguous, it asks one question instead of guessing.
 Prefer to write the handler yourself? The same compiler runs the watch loop:
 
 ```bash
-zigttp dev      # recompile and print a proof card on every save
-zigttp test
-zigttp deploy   # self-contained binary, proof ledger entry, signed receipt
+zttp dev      # recompile and print a proof card on every save
+zttp test
+zttp deploy   # self-contained binary, proof ledger entry, signed receipt
 ```
 
 ## Install
@@ -42,14 +42,14 @@ Or build from source with Zig `0.16.0`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git
-cd zigttp
+cd zttp
 zig build -Doptimize=ReleaseFast
 ```
 
 ## First Handler
 
 ```tsx
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "deterministic"
@@ -61,7 +61,7 @@ function HomePage(): JSX.Element {
     return (
         <html>
             <head><title>Hello</title></head>
-            <body><h1>Hello from zigttp</h1></body>
+            <body><h1>Hello from zttp</h1></body>
         </html>
     );
 }
@@ -83,7 +83,7 @@ workflows, WebSocket, and proof examples.
 ## Current Surface
 
 - Five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Advanced
-  commands are listed by `zigttp help --all`.
+  commands are listed by `zttp help --all`.
 - Handler API: `function handler(req): Response`, plus `Response.text`,
   `Response.json`, and `Response.html`, and `resource(data, affordances)` for
   content-negotiated HAL-JSON and HTMX from one declaration.
@@ -93,11 +93,11 @@ workflows, WebSocket, and proof examples.
   checks, active `Spec<...>` obligations, flow checks, proof traces, witnesses,
   and proof receipts. A runtime fault that slips through names the proof chip
   that guards it and the faulting source line, instead of a bare 500.
-- Virtual modules: native modules under `zigttp:*` for env, crypto, auth,
+- Virtual modules: native modules under `zttp:*` for env, crypto, auth,
   validation, cache, SQL, fetch, service calls, WebSocket, routing, durable and
   multi-handler workflows, structured I/O, logging, IDs, time, text, and more.
 - Local deploy: self-contained binary output under
-  `.zigttp/deploy/<project-name>` with default-on attestation.
+  `.zttp/deploy/<project-name>` with default-on attestation.
 
 ## Security model
 
@@ -113,7 +113,7 @@ exposing a binary publicly. Two boundaries are easy to miss:
   deployed binary to public traffic.
 - `expert` sends your handler source to the configured model provider
   (Anthropic or OpenAI). Attestation is on by default and publishes a stable
-  per-user public-key fingerprint at `/.well-known/zigttp-attest`.
+  per-user public-key fingerprint at `/.well-known/zttp-attest`.
 
 ## Numbers
 

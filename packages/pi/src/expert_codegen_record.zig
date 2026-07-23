@@ -1,7 +1,7 @@
 //! expert_codegen_record - live baseline recorder for the codegen eval.
 //!
 //! Recording spends real tokens, so everything here is gated behind
-//! `ZIGTTP_CODEGEN_RECORD=1` and a live ANTHROPIC_API_KEY; without both, every
+//! `ZTTP_CODEGEN_RECORD=1` and a live ANTHROPIC_API_KEY; without both, every
 //! test skips and the default `zig build test-expert-app` never touches the
 //! network. The recorder drives real expert turns (full persona + tool
 //! registry) through the live Anthropic client, which tees each roundtrip's SSE
@@ -10,7 +10,7 @@
 //! forever.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const anthropic = @import("providers/anthropic/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
 const transcript_mod = @import("transcript.zig");
@@ -77,7 +77,7 @@ fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
         defer allocator.free(path);
         // An absent step ends the sequence (and an absent step_0 means no
         // cassette); any other read error must surface, not masquerade as "missing".
-        const bytes = zigts.file_io.readFile(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
+        const bytes = zts.file_io.readFile(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => break,
             else => return err,
         };
@@ -99,13 +99,13 @@ fn envValue(name_z: [:0]const u8) ?[]const u8 {
 }
 
 fn recordingRequested() bool {
-    const flag = envValue("ZIGTTP_CODEGEN_RECORD") orelse return false;
+    const flag = envValue("ZTTP_CODEGEN_RECORD") orelse return false;
     return std.mem.eql(u8, flag, "1");
 }
 
 // Smoke test: prove the live record-tee writes a cassette that replays to the
 // same reply, with a single cheap call, before spending tokens on the full
-// corpus. Skipped unless ZIGTTP_CODEGEN_RECORD=1 and a key is present.
+// corpus. Skipped unless ZTTP_CODEGEN_RECORD=1 and a key is present.
 test "record-tee captures a faithful anthropic cassette (live, gated)" {
     const allocator = testing.allocator;
     if (!recordingRequested()) return error.SkipZigTest;
@@ -166,7 +166,7 @@ const record_corpus = [_]RecordCase{
     .{
         .name = "validate-body",
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
-            "zigttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
+            "zttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
         // Was `true`, but only because the type checker could not see local
         // annotations. The recorded draft declares `errors: string[]` while
@@ -181,7 +181,7 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "jwt-auth",
-        .prompt = "Create a handler in handler.ts that requires a bearer JWT using zigttp:auth " ++
+        .prompt = "Create a handler in handler.ts that requires a bearer JWT using zttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
         // Was ZTS401 (credential in response). The recorded handler had
@@ -200,20 +200,20 @@ const record_corpus = [_]RecordCase{
         .name = "weather-egress",
         .prompt = "Create a handler in handler.ts that reads a `city` query parameter and " ++
             "fetches the current weather for that city from https://api.open-meteo.com/v1/forecast " ++
-            "using zigttp:fetch, returning the JSON response.",
+            "using zttp:fetch, returning the JSON response.",
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching.
         .expect_first_draft_pass = true,
     },
     .{
         .name = "websocket-echo",
-        .prompt = "Create a WebSocket echo handler in handler.ts using zigttp:websocket that " ++
+        .prompt = "Create a WebSocket echo handler in handler.ts using zttp:websocket that " ++
             "echoes every received message back to the sending client.",
         .expect_first_draft_pass = true,
     },
     .{
         .name = "durable-order",
-        .prompt = "Create a durable handler in handler.ts using zigttp:durable that runs a " ++
+        .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
         // Was ZTS042/narrowing death-spiral (never converged); closed by the
         // "use untyped values directly, never narrow with as/guards" teaching.
@@ -221,8 +221,8 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-queued-call",
-        .prompt = "Create a durable workflow handler in handler.ts using zigttp:durable and " ++
-            "zigttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
+        .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
+            "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
             "and dispatch a greet child handler with workflow.call at durable depth 0.",
         .expect_first_draft_pass = true,
     },
@@ -235,7 +235,7 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-saga-compensation",
-        .prompt = "Create a handler in handler.ts using zigttp:workflow saga() for reserve, " ++
+        .prompt = "Create a handler in handler.ts using zttp:workflow saga() for reserve, " ++
             "charge, and ship steps. Include compensate functions for every non-last static " ++
             "saga step so the saga compensation proof can pass.",
         .expect_first_draft_pass = true,
@@ -250,12 +250,12 @@ const record_corpus = [_]RecordCase{
     .{
         .name = "sql-users",
         .prompt = "Create a handler in handler.ts that returns all users (id and name) from " ++
-            "the sqlite database using zigttp:sql. The users table has columns id (integer) " ++
+            "the sqlite database using zttp:sql. The users table has columns id (integer) " ++
             "and name (text).",
-        // Seeds the project SQL schema the veto discovers via zigttp.json's
+        // Seeds the project SQL schema the veto discovers via zttp.json's
         // `sqlite` key (resolved relative to the workspace).
         .seed_files = &.{
-            .{ .path = "zigttp.json", .bytes = "{\n  \"sqlite\": \"schema.sql\"\n}\n" },
+            .{ .path = "zttp.json", .bytes = "{\n  \"sqlite\": \"schema.sql\"\n}\n" },
             .{ .path = "schema.sql", .bytes = "CREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  name TEXT NOT NULL\n);\n" },
         },
         // Recorded with the best model (Sonnet): writes correct SQL, self-checks
@@ -269,10 +269,10 @@ const record_corpus = [_]RecordCase{
 };
 
 // Record the real expert agent against the corpus and report the live baseline.
-// Gated: ZIGTTP_CODEGEN_RECORD=1 + a live key. Each case runs in its own tmp
+// Gated: ZTTP_CODEGEN_RECORD=1 + a live key. Each case runs in its own tmp
 // workspace with cwd switched to it, so the agent's tools and the edit veto
 // resolve the same files; cassettes are written to an absolute repo path so the
-// chdir does not misplace them. ZIGTTP_CODEGEN_LIMIT caps the case count for a
+// chdir does not misplace them. ZTTP_CODEGEN_LIMIT caps the case count for a
 // cheap small-scale validation before the full run.
 test "record codegen baseline corpus (live, gated)" {
     if (!recordingRequested()) return error.SkipZigTest;
@@ -288,10 +288,10 @@ test "record codegen baseline corpus (live, gated)" {
     defer registry.deinit(allocator);
     // The codegen corpus measures the QUALITY users actually get, and users run
     // the best models - so the corpus defaults to a strong model regardless of
-    // the product's default_model (which may be a cheaper model). ZIGTTP_CODEGEN
+    // the product's default_model (which may be a cheaper model). ZTTP_CODEGEN
     // _MODEL overrides it (e.g. Haiku) for cheap harness testing. Env strings
     // live for the process, so the borrowed slice is safe for the session.
-    const corpus_model = envValue("ZIGTTP_CODEGEN_MODEL") orelse "claude-sonnet-4-6";
+    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse "claude-sonnet-4-6";
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
@@ -299,9 +299,9 @@ test "record codegen baseline corpus (live, gated)" {
     });
     defer session.deinit(allocator);
     if (session.authKind() != .anthropic_api_key) return error.SkipZigTest;
-    // ZIGTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
+    // ZTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
     // committed cassettes untouched.
-    const only_case = envValue("ZIGTTP_CODEGEN_ONLY");
+    const only_case = envValue("ZTTP_CODEGEN_ONLY");
 
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
@@ -309,7 +309,7 @@ test "record codegen baseline corpus (live, gated)" {
     defer allocator.free(out_dir);
 
     var limit: usize = record_corpus.len;
-    if (envValue("ZIGTTP_CODEGEN_LIMIT")) |lim| {
+    if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
         limit = std.fmt.parseInt(usize, lim, 10) catch limit;
     }
 
@@ -454,7 +454,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         std.debug.print("[codegen-replay] missing committed cassette(s) for {d} case(s):\n", .{missing.items.len});
         for (missing.items) |name| std.debug.print("  - {s}\n", .{name});
         std.debug.print(
-            "  record with: ZIGTTP_CODEGEN_RECORD=1 zig build test-expert-app -- --test-filter \"record codegen baseline corpus\"\n",
+            "  record with: ZTTP_CODEGEN_RECORD=1 zig build test-expert-app -- --test-filter \"record codegen baseline corpus\"\n",
             .{},
         );
         return error.MissingCodegenCassette;

@@ -1,7 +1,7 @@
 //! fault_explain.zig — turns a runtime handler fault into a proof-explained
 //! message.
 //!
-//! When a handler faults at runtime, zigttp does not just return a bare 500: it
+//! When a handler faults at runtime, zttp does not just return a bare 500: it
 //! names the proof chip(s) that guard the fault's class and checks them against
 //! what the handler actually proved. The precise attribution uses the *unproven*
 //! guarding chip as the predicted cause; only when every guarding chip was proven

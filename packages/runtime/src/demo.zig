@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const pi_app = @import("pi_app");
 const proof_ledger = @import("proof_ledger.zig");
 const self_extract = @import("self_extract.zig");
@@ -8,9 +8,9 @@ const shared = @import("cli_shared.zig");
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
-pub const action_path = "/_zigttp/studio/demo/action";
-pub const state_path = "/_zigttp/studio/demo/state.json";
-const deploy_marker_path = ".zigttp/demo-deployed";
+pub const action_path = "/_zttp/studio/demo/action";
+pub const state_path = "/_zttp/studio/demo/state.json";
+const deploy_marker_path = ".zttp/demo-deployed";
 
 pub const Action = enum {
     introduce_bug,
@@ -132,7 +132,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, root: []const u8, port: u
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, root);
     try createChildDir(allocator, io, root, "src");
     try createChildDir(allocator, io, root, "tests");
-    try createChildDir(allocator, io, root, ".zigttp");
+    try createChildDir(allocator, io, root, ".zttp");
 
     const manifest = try std.fmt.allocPrint(
         allocator,
@@ -141,7 +141,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, root: []const u8, port: u
     );
     defer allocator.free(manifest);
 
-    try writeRelativeFile(allocator, root, "zigttp.json", manifest);
+    try writeRelativeFile(allocator, root, "zttp.json", manifest);
     try writeRelativeFile(allocator, root, "src/handler.tsx", baseline_source);
     try writeRelativeFile(allocator, root, "tests/handler.test.jsonl", demo_tests);
     try writeRelativeFile(allocator, root, "README.md", demo_readme);
@@ -151,7 +151,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, root: []const u8, port: u
 pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action) !Step {
     switch (action) {
         .introduce_bug => {
-            try zigts.file_io.writeFile(allocator, config.handler_path, bug_source);
+            try zts.file_io.writeFile(allocator, config.handler_path, bug_source);
             var info = try pi_app.demo_passport.appendStep(allocator, .{
                 .workspace_root = config.workspace_root,
                 .handler_path = config.handler_path,
@@ -161,9 +161,9 @@ pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action)
             return .witness;
         },
         .repair_bug => {
-            const before = zigts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch try allocator.dupe(u8, bug_source);
+            const before = zts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch try allocator.dupe(u8, bug_source);
             defer allocator.free(before);
-            try zigts.file_io.writeFile(allocator, config.handler_path, repaired_source);
+            try zts.file_io.writeFile(allocator, config.handler_path, repaired_source);
             var info = try pi_app.demo_passport.appendStep(allocator, .{
                 .workspace_root = config.workspace_root,
                 .handler_path = config.handler_path,
@@ -175,7 +175,7 @@ pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action)
             return .repaired;
         },
         .reset => {
-            try zigts.file_io.writeFile(allocator, config.handler_path, baseline_source);
+            try zts.file_io.writeFile(allocator, config.handler_path, baseline_source);
             deleteLedger(allocator);
             var info = try pi_app.demo_passport.resetToBaseline(allocator, config.workspace_root);
             info.deinit(allocator);
@@ -201,7 +201,7 @@ pub fn applyAction(allocator: std.mem.Allocator, config: Config, action: Action)
 
 pub fn detectStep(allocator: std.mem.Allocator, config: Config) !Step {
     if (deployMarkerExists(allocator)) return .deployed;
-    const source = zigts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch return .baseline;
+    const source = zts.file_io.readFile(allocator, config.handler_path, 1024 * 1024) catch return .baseline;
     defer allocator.free(source);
     if (std.mem.indexOf(u8, source, "SECRET_KEY") != null) return .witness;
     if (std.mem.indexOf(u8, source, "repair marker") != null) return .repaired;
@@ -326,7 +326,7 @@ fn tempWorkspacePath(allocator: std.mem.Allocator) ![]u8 {
     _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
     return try std.fmt.allocPrint(
         allocator,
-        "/tmp/zigttp-proof-theater-{d}-{d}-{d}",
+        "/tmp/zttp-proof-theater-{d}-{d}-{d}",
         .{ std.c.getpid(), @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)) },
     );
 }
@@ -347,16 +347,16 @@ fn createChildDir(allocator: std.mem.Allocator, io: std.Io, root: []const u8, ch
 fn writeRelativeFile(allocator: std.mem.Allocator, root: []const u8, rel: []const u8, data: []const u8) !void {
     const path = try std.fs.path.join(allocator, &.{ root, rel });
     defer allocator.free(path);
-    try zigts.file_io.writeFile(allocator, path, data);
+    try zts.file_io.writeFile(allocator, path, data);
 }
 
 fn copyOptionalFile(allocator: std.mem.Allocator, source: []const u8, dest: []const u8, fallback: []const u8) !void {
-    const bytes = zigts.file_io.readFile(allocator, source, 16 * 1024 * 1024) catch |err| switch (err) {
-        error.FileNotFound => return zigts.file_io.writeFile(allocator, dest, fallback),
+    const bytes = zts.file_io.readFile(allocator, source, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return zts.file_io.writeFile(allocator, dest, fallback),
         else => return err,
     };
     defer allocator.free(bytes);
-    try zigts.file_io.writeFile(allocator, dest, bytes);
+    try zts.file_io.writeFile(allocator, dest, bytes);
 }
 
 fn deleteLedger(allocator: std.mem.Allocator) void {
@@ -391,11 +391,11 @@ fn runLocalDeploy(allocator: std.mem.Allocator) !void {
 
     const cwd = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd);
-    const artifact = try std.fs.path.join(allocator, &.{ ".zigttp", "deploy", std.fs.path.basename(cwd) });
+    const artifact = try std.fs.path.join(allocator, &.{ ".zttp", "deploy", std.fs.path.basename(cwd) });
     defer allocator.free(artifact);
     std.Io.Dir.access(std.Io.Dir.cwd(), io, artifact, .{}) catch return error.DemoDeployFailed;
 
-    try zigts.file_io.writeFile(allocator, deploy_marker_path, "ok\n");
+    try zts.file_io.writeFile(allocator, deploy_marker_path, "ok\n");
 }
 
 fn stepTitle(step: Step) []const u8 {
@@ -478,7 +478,7 @@ fn writeProofPassport(
         try json.write(null);
     }
     try json.objectField("handoff");
-    try json.write("Open the seeded session with zigttp expert or inspect it with zigttp ledger.");
+    try json.write("Open the seeded session with zttp expert or inspect it with zttp ledger.");
     try json.endObject();
 }
 
@@ -500,7 +500,7 @@ fn objectString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 }
 
 fn deployArtifactPath(allocator: std.mem.Allocator, workspace_root: []const u8) ![]u8 {
-    return try std.fs.path.join(allocator, &.{ ".zigttp", "deploy", std.fs.path.basename(workspace_root) });
+    return try std.fs.path.join(allocator, &.{ ".zttp", "deploy", std.fs.path.basename(workspace_root) });
 }
 
 const LedgerSummary = struct {
@@ -529,7 +529,7 @@ fn renderPassportJson(
     const latest = try latestLedgerSummary(allocator);
     defer if (latest.contract_sha) |sha| allocator.free(sha);
 
-    const policy_hash = zigts.rule_registry.policyHash();
+    const policy_hash = zts.rule_registry.policyHash();
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };
@@ -538,7 +538,7 @@ fn renderPassportJson(
     try json.objectField("schemaVersion");
     try json.write(@as(u8, 1));
     try json.objectField("kind");
-    try json.write("zigttp-proof-passport");
+    try json.write("zttp-proof-passport");
     try json.objectField("step");
     try json.write(step.toString());
     try json.objectField("title");
@@ -599,7 +599,7 @@ fn writeStepJson(json: *std.json.Stringify, step: Step, complete: bool) !void {
 }
 
 fn renderVerifyText(allocator: std.mem.Allocator, config: Config, step: Step) ![]u8 {
-    const artifact = try std.fs.path.join(allocator, &.{ config.workspace_root, ".zigttp", "deploy", std.fs.path.basename(config.workspace_root) });
+    const artifact = try std.fs.path.join(allocator, &.{ config.workspace_root, ".zttp", "deploy", std.fs.path.basename(config.workspace_root) });
     defer allocator.free(artifact);
     return try std.fmt.allocPrint(allocator,
         \\Proof Passport verification
@@ -608,10 +608,10 @@ fn renderVerifyText(allocator: std.mem.Allocator, config: Config, step: Step) ![
         \\  cd {s}
         \\
         \\Checks:
-        \\  zigttp check
-        \\  zigttp test
-        \\  zigttp deploy
-        \\  zigttp proofs show HEAD
+        \\  zttp check
+        \\  zttp test
+        \\  zttp deploy
+        \\  zttp proofs show HEAD
         \\
         \\Run deployed artifact:
         \\  {s} -p 3001
@@ -636,9 +636,9 @@ fn renderPassportHtml(
     const w = &aw.writer;
     try w.writeAll(
         \\<!doctype html><html lang="en"><meta charset="utf-8">
-        \\<title>zigttp Proof Passport</title>
+        \\<title>zttp Proof Passport</title>
         \\<style>body{font:16px/1.5 system-ui,-apple-system,BlinkMacSystemFont,sans-serif;margin:40px;max-width:880px;color:#18202a}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.ok{color:#116329}.pending{color:#7a4b00}.box{border:1px solid #d9dee7;border-radius:8px;padding:16px;margin:16px 0}li{margin:8px 0}</style>
-        \\<body><h1>zigttp Proof Passport</h1>
+        \\<body><h1>zttp Proof Passport</h1>
     );
     try w.print("<p class=\"box\">Step: <strong>{s}</strong> - ", .{step.toString()});
     try writeHtmlEscaped(w, stepTitle(step));
@@ -691,11 +691,11 @@ fn writeHtmlEscaped(writer: anytype, value: []const u8) !void {
 }
 
 pub const baseline_source =
-    \\import type { Spec } from "zigttp:types";
-    \\import { routerMatch } from "zigttp:router";
-    \\import { schemaCompile, validateJson } from "zigttp:validate";
-    \\import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
-    \\import { env } from "zigttp:env";
+    \\import type { Spec } from "zttp:types";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
+    \\import { env } from "zttp:env";
     \\
     \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
@@ -745,11 +745,11 @@ pub const baseline_source =
 ;
 
 pub const bug_source =
-    \\import type { Spec } from "zigttp:types";
-    \\import { routerMatch } from "zigttp:router";
-    \\import { schemaCompile, validateJson } from "zigttp:validate";
-    \\import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
-    \\import { env } from "zigttp:env";
+    \\import type { Spec } from "zttp:types";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
+    \\import { env } from "zttp:env";
     \\
     \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
@@ -801,11 +801,11 @@ pub const bug_source =
 
 pub const repaired_source =
     \\// repair marker: the status route now proves no_secret_leakage again.
-    \\import type { Spec } from "zigttp:types";
-    \\import { routerMatch } from "zigttp:router";
-    \\import { schemaCompile, validateJson } from "zigttp:validate";
-    \\import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
-    \\import { env } from "zigttp:env";
+    \\import type { Spec } from "zttp:types";
+    \\import { routerMatch } from "zttp:router";
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
+    \\import { env } from "zttp:env";
     \\
     \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
@@ -864,13 +864,13 @@ const demo_gitignore =
     \\.zig-cache/
     \\zig-cache/
     \\zig-out/
-    \\.zigttp/deploy/
+    \\.zttp/deploy/
 ;
 
 const demo_readme =
     \\# Proof Inbox
     \\
-    \\Generated by `zigttp demo`.
+    \\Generated by `zttp demo`.
     \\
     \\The Studio demo controls apply deterministic edits to `src/handler.tsx`.
     \\No cloud credentials, API keys, or network access are required.
@@ -900,7 +900,7 @@ test "demo workspace creation and overwrite refusal" {
     var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "proof-demo/zigttp.json", .{});
+    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "proof-demo/zttp.json", .{});
     try std.Io.Dir.access(std.Io.Dir.cwd(), io, "proof-demo/src/handler.tsx", .{});
     try std.testing.expectError(error.OutputExists, createWorkspace(allocator, "proof-demo", 4567));
 }
@@ -939,8 +939,8 @@ test "demo passport export writes offline files" {
     defer allocator.free(sessions_dir);
     const sessions_z = try allocator.dupeZ(u8, sessions_dir);
     defer allocator.free(sessions_z);
-    _ = setenv("ZIGTTP_SESSIONS_DIR", sessions_z.ptr, 1);
-    defer _ = unsetenv("ZIGTTP_SESSIONS_DIR");
+    _ = setenv("ZTTP_SESSIONS_DIR", sessions_z.ptr, 1);
+    defer _ = unsetenv("ZTTP_SESSIONS_DIR");
 
     var ws = try createWorkspace(allocator, "proof-demo", 4567);
     defer ws.deinit(allocator);
@@ -963,21 +963,21 @@ test "demo passport export writes offline files" {
 
     const passport_json_path = try std.fs.path.join(allocator, &.{ passport_dir, "passport.json" });
     defer allocator.free(passport_json_path);
-    const passport_json = try zigts.file_io.readFile(allocator, passport_json_path, 64 * 1024);
+    const passport_json = try zts.file_io.readFile(allocator, passport_json_path, 64 * 1024);
     defer allocator.free(passport_json);
-    try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"kind\":\"zigttp-proof-passport\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"kind\":\"zttp-proof-passport\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"step\":\"baseline\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, passport_json, "\"contractHash\":null") != null);
 
     const index_path = try std.fs.path.join(allocator, &.{ passport_dir, "index.html" });
     defer allocator.free(index_path);
-    const index_html = try zigts.file_io.readFile(allocator, index_path, 64 * 1024);
+    const index_html = try zts.file_io.readFile(allocator, index_path, 64 * 1024);
     defer allocator.free(index_html);
-    try std.testing.expect(std.mem.indexOf(u8, index_html, "zigttp Proof Passport") != null);
+    try std.testing.expect(std.mem.indexOf(u8, index_html, "zttp Proof Passport") != null);
 
     const verify_path = try std.fs.path.join(allocator, &.{ passport_dir, "verify.txt" });
     defer allocator.free(verify_path);
-    const verify_text = try zigts.file_io.readFile(allocator, verify_path, 64 * 1024);
+    const verify_text = try zts.file_io.readFile(allocator, verify_path, 64 * 1024);
     defer allocator.free(verify_text);
-    try std.testing.expect(std.mem.indexOf(u8, verify_text, "zigttp proofs show HEAD") != null);
+    try std.testing.expect(std.mem.indexOf(u8, verify_text, "zttp proofs show HEAD") != null);
 }

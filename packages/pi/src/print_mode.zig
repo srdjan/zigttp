@@ -1,4 +1,4 @@
-//! Non-interactive `--print` mode for `zigttp expert`.
+//! Non-interactive `--print` mode for `zttp expert`.
 //!
 //! Runs exactly one turn through the agent, emits either the rendered text
 //! or an NDJSON event stream, and returns. Bypasses the interactive REPL.
@@ -346,7 +346,7 @@ const CannedClient = struct {
     }
 };
 
-const meta_tool = @import("tools/zigts_expert_meta.zig");
+const meta_tool = @import("tools/zts_expert_meta.zig");
 
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
@@ -450,7 +450,7 @@ test "emitErrorEvent: known provider error carries name and remediation in-band"
     const d = obj.get("d").?.object;
     try testing.expectEqualStrings("AuthFailed", d.get("error").?.string);
     try testing.expect(d.get("remediation").? == .string);
-    try testing.expect(std.mem.indexOf(u8, d.get("remediation").?.string, "zigttp auth") != null);
+    try testing.expect(std.mem.indexOf(u8, d.get("remediation").?.string, "zttp auth") != null);
 }
 
 test "emitErrorEvent: non-provider error emits null remediation" {

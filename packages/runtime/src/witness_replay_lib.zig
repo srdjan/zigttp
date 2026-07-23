@@ -4,13 +4,13 @@
 //!
 //! The agent host (`pi_app`) registers the replay implementation via a
 //! function pointer at startup; the binary that ships pi together with
-//! the runtime stack (`zigts` / `zigttp`) provides this wrapper. The
+//! the runtime stack (`zts` / `zttp`) provides this wrapper. The
 //! protocol on the wire is JSONL - the same shape the engine already
 //! consumes via `--test` - so neither side has to share a Zig type
 //! beyond a tiny `Verdict` struct.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const pi_app = @import("pi_app");
 const replay_runner = @import("replay_runner.zig");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
@@ -22,7 +22,7 @@ const Verdict = pi_app.witness_replay.Verdict;
 /// loaded from disk. The JSONL must contain at least one `{type:"request"}`
 /// line and zero or more `{type:"io"}` lines; the parser ignores the
 /// optional `{type:"witness"}` header line so callers can pass output
-/// from `zigts.counterexample.writeJsonl` straight through.
+/// from `zts.counterexample.writeJsonl` straight through.
 pub fn replayWitnessJsonl(
     allocator: std.mem.Allocator,
     handler_path: []const u8,

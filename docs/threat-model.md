@@ -10,7 +10,7 @@ repository is in scope.
   receipts.
 - Request data crossing the HTTP boundary: method, path, headers, query, and
   body.
-- Runtime capabilities exposed through `zigttp:*` modules: env, outbound HTTP,
+- Runtime capabilities exposed through `zttp:*` modules: env, outbound HTTP,
   cache namespaces, SQLite queries, filesystem-backed durable state, WebSocket
   state, clock/random/stderr, and runtime callbacks.
 - Local credentials used by hosted deploy commands when those commands are
@@ -54,7 +54,7 @@ repository is in scope.
 - Runtime policy denies must emit security events.
 - Dev-mode execution is not treated as sandboxed; precompiled and deploy paths
   are the sandboxed surfaces.
-- Only bytecode that passes `packages/zigts/src/bytecode_verifier.zig`
+- Only bytecode that passes `packages/zts/src/bytecode_verifier.zig`
   (opcode legality, operand bounds, constant pool, stack discipline, jump
   targets) is dispatched into the VM. Rejected bytecode is dropped before
   any VM state is allocated.
@@ -63,5 +63,5 @@ repository is in scope.
 
 - `multipart/form-data` request bodies cross the HTTP boundary as raw bytes.
   The runtime enforces `Content-Length` and total body size (default 1 MiB).
-  Use `decodeFormMultipart` from `zigttp:decode` or handler-owned parsing, and
+  Use `decodeFormMultipart` from `zttp:decode` or handler-owned parsing, and
   treat multipart boundaries and quoted-string handling as untrusted input.

@@ -1,9 +1,9 @@
 # Canonical ZigTS Profile
 
-The canonical profile gives common operations one spelling. `zigttp check` and
-`zigttp verify-paths` enforce these rules as ZTS6xx diagnostics. Use
-`zigttp normalize <file> --write` for rules that can be rewritten safely, and
-`zigttp describe-rule <code>` for the live rule record.
+The canonical profile gives common operations one spelling. `zttp check` and
+`zttp verify-paths` enforce these rules as ZTS6xx diagnostics. Use
+`zttp normalize <file> --write` for rules that can be rewritten safely, and
+`zttp describe-rule <code>` for the live rule record.
 
 ## Rules
 
@@ -28,11 +28,11 @@ The canonical profile gives common operations one spelling. `zigttp check` and
 ## Commands
 
 ```bash
-zigttp check --json examples/handler/handler.ts
-zigttp normalize src/handler.ts --check
-zigttp normalize src/handler.ts --write
-zigttp describe-rule ZTS604 --json
-zigttp describe-rule --hash
+zttp check --json examples/handler/handler.ts
+zttp normalize src/handler.ts --check
+zttp normalize src/handler.ts --write
+zttp describe-rule ZTS604 --json
+zttp describe-rule --hash
 ```
 
 `normalize --check` exits non-zero when the file is not already canonical. It

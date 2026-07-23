@@ -16,7 +16,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const version_tag: []const u8 = "zigttp-attest-v1";
+pub const version_tag: []const u8 = "zttp-attest-v1";
 pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
 
 /// Forty-byte payload caller assembles; sign() embeds it into the JWS.
@@ -231,7 +231,7 @@ fn buildHeaderJson(
 ) ![]u8 {
     return std.fmt.allocPrint(
         allocator,
-        "{{\"alg\":\"EdDSA\",\"typ\":\"zigttp-attest+jws\",\"kid\":\"{s}\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
+        "{{\"alg\":\"EdDSA\",\"typ\":\"zttp-attest+jws\",\"kid\":\"{s}\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
         .{ fingerprint, pubkey_b64 },
     );
 }
@@ -466,7 +466,7 @@ fn signPayloadJsonForTest(
 test "verify defaults a missing runtime policy claim to unpinned" {
     const allocator = std.testing.allocator;
     const payload =
-        "{\"v\":\"zigttp-attest-v1\"," ++
+        "{\"v\":\"zttp-attest-v1\"," ++
         "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
         "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
         "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
@@ -491,7 +491,7 @@ test "verify defaults a missing runtime policy claim to unpinned" {
 test "parseClaims defaults missing durable workflow fields" {
     const allocator = std.testing.allocator;
     const payload =
-        "{\"v\":\"zigttp-attest-v1\"," ++
+        "{\"v\":\"zttp-attest-v1\"," ++
         "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
         "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
         "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++

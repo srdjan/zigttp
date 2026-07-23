@@ -173,7 +173,7 @@ test "buildRetryBlock surfaces compiler templates and smallest witness" {
         \\],"witnesses":[
         \\{"id":"wit_001","property":"injection_safe","summary":"tainted body reaches sql",
         \\"request":{"method":"POST","url":"/items","has_auth_header":false},
-        \\"io_stubs":[{"seq":0,"module":"zigttp:sql","fn":"sqlExec","result":{"rowsAffected":1}}]}
+        \\"io_stubs":[{"seq":0,"module":"zttp:sql","fn":"sqlExec","result":{"rowsAffected":1}}]}
         \\]}
     ;
     const block = (try buildRetryBlock(testing.allocator, plan_json)) orelse return error.ExpectedBlock;
@@ -183,7 +183,7 @@ test "buildRetryBlock surfaces compiler templates and smallest witness" {
     try testing.expect(std.mem.indexOf(u8, block, "if (!result.ok)") != null);
     try testing.expect(std.mem.indexOf(u8, block, "FAILING INPUT") != null);
     try testing.expect(std.mem.indexOf(u8, block, "POST /items") != null);
-    try testing.expect(std.mem.indexOf(u8, block, "zigttp:sql.sqlExec") != null);
+    try testing.expect(std.mem.indexOf(u8, block, "zttp:sql.sqlExec") != null);
 }
 
 test "buildRetryBlock returns null when there are no plans" {

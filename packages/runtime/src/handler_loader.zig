@@ -5,7 +5,7 @@
 //! Callers own their diagnostics on the error path.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const server = @import("server.zig");
 
 pub const LoadedHandler = struct {

@@ -192,7 +192,7 @@ test "writeRequestBody: first turn emits one user message array" {
     try transcript.append(testing.allocator, .{ .user_text = "add a GET route" });
 
     const out = try serialize(testing.allocator, .{
-        .system_prompt = "you are a zigts expert",
+        .system_prompt = "you are a zts expert",
         .transcript = &transcript,
     });
     defer testing.allocator.free(out);
@@ -214,7 +214,7 @@ test "writeRequestBody: tool-use and tool-result transcript entries serialize st
     defer transcript.deinit(testing.allocator);
 
     const calls = [_]@import("../../turn.zig").ToolCall{
-        .{ .id = "toolu_meta", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_meta", .name = "zts_expert_meta", .args_json = "{}" },
         .{ .id = "toolu_search", .name = "workspace_search_text", .args_json = "{\"query\":\"handler\"}" },
     };
     try transcript.append(testing.allocator, .{ .user_text = "inspect the workspace" });
@@ -222,7 +222,7 @@ test "writeRequestBody: tool-use and tool-result transcript entries serialize st
     try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
     try transcript.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "toolu_meta",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } });

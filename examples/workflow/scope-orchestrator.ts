@@ -5,11 +5,11 @@
 // returns, so a group of resources can close early instead of waiting for
 // the whole request to finish.
 //
-//   zigttp serve examples/workflow/scope-orchestrator.ts
+//   zttp serve examples/workflow/scope-orchestrator.ts
 //
 //   GET /  -> { ok: true, name: "primary", cached: "cache-entry" }
-import { scope, using, ensure } from "zigttp:scope";
-import { logInfo } from "zigttp:log";
+import { scope, using, ensure } from "zttp:scope";
+import { logInfo } from "zttp:log";
 
 function handler(req: Request): Response {
   const conn = using({ name: "primary" }, (resource) => {

@@ -12,7 +12,7 @@ symptoms:
 root_cause: logic_error
 resolution_type: code_fix
 severity: high
-tags: [zigts, builtins, teardown, use-after-free, ownership, guard-malloc, glibc]
+tags: [zts, builtins, teardown, use-after-free, ownership, guard-malloc, glibc]
 ---
 
 # Builtin Graph Teardown Dereferenced Freed Prototypes
@@ -30,7 +30,7 @@ usually left the stale read mapped and apparently harmless.
 
 ## Symptoms
 
-- Guard Malloc deterministically faulted at `packages/zigts/src/value.zig` in
+- Guard Malloc deterministically faulted at `packages/zts/src/value.zig` in
   `JSValue.isObject`, called from `Context.deinit`.
 - glibc reported `double free or corruption (fasttop)` or
   `malloc_consolidate(): unaligned fastbin chunk` after a stale tag was
@@ -58,7 +58,7 @@ usually left the stale read mapped and apparently harmless.
 
 Builtin cleanup is now two-phase and allocation-free.
 
-`packages/zigts/src/object.zig` separates function metadata destruction from
+`packages/zts/src/object.zig` separates function metadata destruction from
 object destruction. `scrubBuiltin` first releases the root's function metadata,
 then walks its property slots. Each slot is cleared to `undefined` before its
 old value is inspected. Untracked method functions are recursively scrubbed and
@@ -66,7 +66,7 @@ freed, and owned non-unique strings are freed exactly as before. The standalone
 `destroyBuiltin` API remains as a `scrubBuiltin` plus object-free wrapper for OOM
 `errdefer` paths.
 
-`packages/zigts/src/context.zig` applies that operation in two passes:
+`packages/zts/src/context.zig` applies that operation in two passes:
 
 1. Scrub all six prototype roots and every entry in `builtin_objects`.
 2. Free the prototype and builtin root objects only after every tracked slot is

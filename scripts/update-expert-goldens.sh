@@ -2,8 +2,8 @@
 # scripts/update-expert-goldens.sh
 #
 # Regenerate the byte-exact golden fixtures that `zig build test-expert-golden`
-# checks the `zigts` direct-command JSON/text contract against. Run this ONLY
-# after a deliberate contract change (see docs/zigts-expert-contract.md); it
+# checks the `zts` direct-command JSON/text contract against. Run this ONLY
+# after a deliberate contract change (see docs/zts-expert-contract.md); it
 # overwrites the fixtures in place with the current binary's output, so review
 # the diff before committing.
 #
@@ -19,9 +19,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 FIXTURES="packages/tools/tests/fixtures/expert"
-ZIGTS="./zig-out/bin/zigts"
+ZIGTS="./zig-out/bin/zts"
 
-echo ">> building zigts"
+echo ">> building zts"
 zig build
 
 # Redirect stdout into each fixture. The verify-paths *missing* commands exit 1

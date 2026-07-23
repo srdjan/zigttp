@@ -46,7 +46,7 @@ Other gates were checked during the advisory pass and passed:
 
 ```sh
 zig build test-docs-drift test-doc-links --summary all
-zig build test-zigts --summary all
+zig build test-zts --summary all
 zig build test-zruntime test-server test-modules test-module-governance test-capability-audit test-sdk --summary all
 zig build test-cli test-expert test-expert-app test-cassette test-expert-golden test-proof-review --summary all
 zig build test-panic-isolation --summary all

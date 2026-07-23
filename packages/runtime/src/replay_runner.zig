@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
@@ -400,7 +400,7 @@ test "witness round-trip: solved witness replays into an executable leak" {
     const allocator = arena.allocator();
 
     const handler_code =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
         \\  if (secret) {
@@ -500,7 +500,7 @@ test "witness round-trip: solved witness replays into an executable leak" {
 // handler that hashes `live_arg`, and return the resulting divergence count.
 fn replaySha256ArgDivergences(allocator: std.mem.Allocator, comptime live_arg: []const u8) !u32 {
     const handler_code =
-        "import { sha256 } from \"zigttp:crypto\";\n" ++
+        "import { sha256 } from \"zttp:crypto\";\n" ++
         "function handler(req) {\n" ++
         "  return Response.json({ h: sha256(\"" ++ live_arg ++ "\") });\n" ++
         "}\n";

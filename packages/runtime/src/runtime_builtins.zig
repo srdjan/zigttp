@@ -7,7 +7,7 @@
 //! other natives in zruntime also depend on them.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const zruntime = @import("zruntime.zig");
 
 pub fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {

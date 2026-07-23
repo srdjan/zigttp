@@ -1,6 +1,6 @@
 // Test handler for format validation (email, uuid, iso-date, iso-datetime)
 
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("FormatInput", JSON.stringify({
   type: "object",

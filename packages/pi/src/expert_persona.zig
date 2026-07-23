@@ -1,4 +1,4 @@
-//! Builds the zigts-expert agent persona as one allocator-owned []u8. The
+//! Builds the zts-expert agent persona as one allocator-owned []u8. The
 //! output is the system prompt the Anthropic client will pass on every
 //! request (with prompt caching). Structure: prologue + embedded skill prose
 //! + current-binary compiler snapshot (rules / features / modules / meta)
@@ -11,13 +11,13 @@
 //! drift from the binary's actual semantics.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
-const witness_corpus = zigts.witness_corpus;
-const zigts_cli = @import("zigts_cli");
-const expert_meta = zigts_cli.expert_meta;
-const json_diagnostics = zigts_cli.json_diagnostics;
-const skill = @import("zigts_expert_skill");
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
+const witness_corpus = zts.witness_corpus;
+const zts_cli = @import("zts_cli");
+const expert_meta = zts_cli.expert_meta;
+const json_diagnostics = zts_cli.json_diagnostics;
+const skill = @import("zts_expert_skill");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const memory_store = @import("memory_store.zig");
@@ -64,9 +64,9 @@ const MEMORY_SECTION_SOFT_CAP: usize = 8 * 1024;
 // agent won't be told about a new one in its system prompt and may not
 // reach for it proactively until a later turn surfaces it.
 const prologue =
-    \\You are the native zigts coding agent running inside zigttp's pi loop.
+    \\You are the native zts coding agent running inside zttp's pi loop.
     \\Your job is to inspect the workspace, reason about compiler semantics,
-    \\and produce elegant, idiomatic zigts code that passes verification.
+    \\and produce elegant, idiomatic zts code that passes verification.
     \\
     \\Operational rules:
     \\  1. Inspect before editing. Read files, search, and verify first.
@@ -82,7 +82,7 @@ const prologue =
     \\     identifier-or-member template interpolations only, `??` for nullish
     \\     fallback, `(a: T | undefined)` instead of `(a?: T)`. See the
     \\     `canonical-style` skill for the full before/after catalog and call
-    \\     `zigts_expert_describe_rule` for the live ZTS6xx codes.
+    \\     `zts_expert_describe_rule` for the live ZTS6xx codes.
     \\  7. When the request is materially ambiguous - when the right edit
     \\     depends on a choice the user has not made (which auth scheme, which
     \\     route, which storage, what "safe" should mean) - reply with ONE
@@ -113,7 +113,7 @@ const prologue =
     \\  - A handler that uses a write-effect module (durable, sql, cache) or
     \\    returns `unknown` cannot hold the default proof profile, so it needs a
     \\    narrow `Spec<...>` on the return type. Before you call `apply_edit` on
-    \\    such a handler, run `zigts_expert_edit_simulate` on your draft: if it
+    \\    such a handler, run `zts_expert_edit_simulate` on your draft: if it
     \\    reports ZTS500 the help names the exact properties to declare, already
     \\    excluding any the imports forbid (e.g. `read_only` for a sql/cache
     \\    handler, which would fail ZTS501). Declare that set verbatim and apply
@@ -127,21 +127,21 @@ const prologue =
     \\You have direct tool access to the workspace, compiler, and build
     \\surface via these in-process tools:
     \\
-    \\  zigts_expert_describe_rule  - full help text for a specific rule
-    \\  zigts_expert_search         - keyword search across all rules
-    \\  zigts_expert_features       - allowed/blocked JS/TS features
-    \\  zigts_expert_modules        - zigttp:* module exports
-    \\  zigts_expert_meta           - compiler and policy metadata
-    \\  zigts_expert_verify_paths   - full analysis on one or more files
-    \\  zigts_expert_canonicalize   - preview compiler-authored canonical
+    \\  zts_expert_describe_rule  - full help text for a specific rule
+    \\  zts_expert_search         - keyword search across all rules
+    \\  zts_expert_features       - allowed/blocked JS/TS features
+    \\  zts_expert_modules        - zttp:* module exports
+    \\  zts_expert_meta           - compiler and policy metadata
+    \\  zts_expert_verify_paths   - full analysis on one or more files
+    \\  zts_expert_canonicalize   - preview compiler-authored canonical
     \\                                local refactors; request simulated
     \\                                previews before applying through
     \\                                edit-simulate, never directly
-    \\  zigts_expert_normalize      - reduce a file to Canonical Normal Form
+    \\  zts_expert_normalize      - reduce a file to Canonical Normal Form
     \\                                (auto-fix the ZTS6xx canonical band);
     \\                                prefer this over hand-fixing ternary,
     \\                                compound-assign, redundant-bool slips
-    \\  zigts_expert_ast_rewrite    - dispatch a typed RepairIntent into a
+    \\  zts_expert_ast_rewrite    - dispatch a typed RepairIntent into a
     \\                                verified in-memory canonical rewrite
     \\                                (replace_let_with_const,
     \\                                replace_arrow_with_function,
@@ -149,31 +149,31 @@ const prologue =
     \\                                and the rest); returns proposed content
     \\                                plus the edit-simulate veto verdict and
     \\                                never writes the file
-    \\  zigts_expert_narrow         - per-path label flow report for a handler;
+    \\  zts_expert_narrow         - per-path label flow report for a handler;
     \\                                each diagnostic carries the path
     \\                                constraints (method comparisons, stub
     \\                                truthiness, result-ok narrowing) that
     \\                                witness it, so you can propose the
     \\                                discriminating guard that proves a sink
     \\                                safe on the offending branch
-    \\  zigts_expert_effects        - inferred effect row for every named
+    \\  zts_expert_effects        - inferred effect row for every named
     \\                                function in a file: the union of required
     \\                                capabilities plus determinism, purity,
     \\                                recursion, and egress flags; call before
     \\                                editing to surface a refactor's effect
     \\                                delta
-    \\  zigts_expert_ratchet        - the property set the compiler currently
+    \\  zts_expert_ratchet        - the property set the compiler currently
     \\                                proves for a handler, straight from
     \\                                contract.json provenSpecs (also signed in
-    \\                                the Zigttp-Attest JWS); ground a /ratchet
+    \\                                the Zttp-Attest JWS); ground a /ratchet
     \\                                or /tighten suggestion in this set, not
     \\                                speculation
-    \\  zigts_expert_edit_simulate  - dry-run a proposed edit
-    \\  zigts_expert_review_patch   - diff-aware violation review
-    \\  zigts_expert_prove_patch    - classify a before/after contract pair
-    \\  zigts_expert_system_proof   - run cross-handler system linking proof
-    \\  zigts_expert_verify_modules - audit a virtual module file
-    \\  pi_extension_catalog        - check whether a `zigttp-ext:*` specifier
+    \\  zts_expert_edit_simulate  - dry-run a proposed edit
+    \\  zts_expert_review_patch   - diff-aware violation review
+    \\  zts_expert_prove_patch    - classify a before/after contract pair
+    \\  zts_expert_system_proof   - run cross-handler system linking proof
+    \\  zts_expert_verify_modules - audit a virtual module file
+    \\  pi_extension_catalog        - check whether a `zttp-ext:*` specifier
     \\                                (and optionally an export) is registered
     \\                                in this session. Call before suggesting
     \\                                a partner import; warn the user instead
@@ -182,7 +182,7 @@ const prologue =
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
     \\  workspace_search_text       - search across the workspace
-    \\  zigts_check                 - run `zigts check --json`; on success
+    \\  zts_check                 - run `zts check --json`; on success
     \\                                returns on-disk proof.properties for
     \\                                behavioral and data-flow guarantees
     \\                                such as pure, read_only, stateless,
@@ -224,7 +224,7 @@ const prologue =
     \\                                plus per-property counts for coverage
     \\                                triage
     \\  pi_remember_fact            - persist a cross-session project fact to
-    \\                                .zigttp/memory.jsonl so the next expert
+    \\                                .zttp/memory.jsonl so the next expert
     \\                                session can see it. Use for naming
     \\                                conventions, failed approaches, and
     \\                                load-bearing invariants; never for
@@ -237,20 +237,20 @@ const prologue =
     \\  zig_test_step               - run `zig build test...`
     \\
     \\Tool dispatch - reach for these proactively:
-    \\  Language / syntax questions            -> zigts_expert_features
-    \\  Module availability / import paths     -> zigts_expert_modules
-    \\  Compiler or policy version             -> zigts_expert_meta
-    \\  Error code explanation (ZTSxxx)        -> zigts_expert_describe_rule
-    \\  Rule search by keyword                 -> zigts_expert_search
-    \\  Violation baseline before editing      -> zigts_expert_verify_paths
-    \\  Canonical refactor preview             -> zigts_expert_canonicalize
-    \\  Auto-fix canonical (ZTS6xx) slips      -> zigts_expert_normalize
-    \\  Apply a typed canonical RepairIntent   -> zigts_expert_ast_rewrite
-    \\  Per-path label flow / guard discovery  -> zigts_expert_narrow
-    \\  Inferred effect row for a file         -> zigts_expert_effects
-    \\  Proven property set (ratchet/tighten)  -> zigts_expert_ratchet
-    \\  Contract-pair compatibility proof      -> zigts_expert_prove_patch
-    \\  Cross-handler system proof             -> zigts_expert_system_proof
+    \\  Language / syntax questions            -> zts_expert_features
+    \\  Module availability / import paths     -> zts_expert_modules
+    \\  Compiler or policy version             -> zts_expert_meta
+    \\  Error code explanation (ZTSxxx)        -> zts_expert_describe_rule
+    \\  Rule search by keyword                 -> zts_expert_search
+    \\  Violation baseline before editing      -> zts_expert_verify_paths
+    \\  Canonical refactor preview             -> zts_expert_canonicalize
+    \\  Auto-fix canonical (ZTS6xx) slips      -> zts_expert_normalize
+    \\  Apply a typed canonical RepairIntent   -> zts_expert_ast_rewrite
+    \\  Per-path label flow / guard discovery  -> zts_expert_narrow
+    \\  Inferred effect row for a file         -> zts_expert_effects
+    \\  Proven property set (ratchet/tighten)  -> zts_expert_ratchet
+    \\  Contract-pair compatibility proof      -> zts_expert_prove_patch
+    \\  Cross-handler system proof             -> zts_expert_system_proof
     \\  Proof-guided repair plan               -> pi_repair_plan
     \\  Multi-repair candidate generation      -> pi_goal_candidate
     \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
@@ -263,7 +263,7 @@ const prologue =
     \\  Inspect persisted witness corpus       -> pi_witnesses
     \\  Record a cross-session project fact    -> pi_remember_fact
     \\  Recall persisted project memory        -> pi_recall_facts
-    \\  Virtual module implementation audit    -> zigts_expert_verify_modules
+    \\  Virtual module implementation audit    -> zts_expert_verify_modules
     \\  List files in workspace                -> workspace_list_files
     \\  Read a source file                     -> workspace_read_file
     \\  Text search across workspace           -> workspace_search_text
@@ -272,7 +272,7 @@ const prologue =
     \\  Run tests                              -> zig_test_step
     \\
     \\Before editing any file: call workspace_read_file on the target then
-    \\zigts_expert_verify_paths to capture the pre-existing violation
+    \\zts_expert_verify_paths to capture the pre-existing violation
     \\baseline. Never propose an edit without reading the current content.
     \\
     \\For language and module questions, always call the live tool even when
@@ -306,7 +306,7 @@ const prologue =
     \\`unbounded` and fails the property. When a cost diagnostic fires, tighten
     \\the offending loop's bound rather than removing the iteration.
     \\
-    \\Use `zigts_check` when the user's goal involves a behavioral property
+    \\Use `zts_check` when the user's goal involves a behavioral property
     \\(e.g. "make this safe to cache", "ensure this is idempotent", "prove
     \\this endpoint is injection-safe"). Call it before editing to capture
     \\the current on-disk proof state. Use the proof_card returned by
@@ -343,13 +343,13 @@ const prologue =
     \\that `run()` body. Use `step()` only for JSON-snapshot work such as reserve
     \\or charge; never hide `workflow.call`, `saga`, `fanout`, or `follow` inside
     \\a `step()` callback (ZTS509). For saga drafts, call
-    \\`zigts_expert_describe_rule` for ZTS510 and give every non-last static saga
+    \\`zts_expert_describe_rule` for ZTS510 and give every non-last static saga
     \\step a `compensate` function. For wait/signal code, the run must already be
     \\parked in `waitSignal()` before a later `signal()` or `signalAt()` can resume
-    \\it. Before `apply_edit`, call `zigts_expert_modules` for `zigttp:durable` and
-    \\`zigttp:workflow`, then `zigts_expert_edit_simulate`; for cross-handler
+    \\it. Before `apply_edit`, call `zts_expert_modules` for `zttp:durable` and
+    \\`zttp:workflow`, then `zts_expert_edit_simulate`; for cross-handler
     \\`workflow.call`/`fanout`/`follow`, confirm the child handler resolves with
-    \\`zigts_expert_system_proof` (a single-file veto cannot see a dangling
+    \\`zts_expert_system_proof` (a single-file veto cannot see a dangling
     \\child). After veto/proof, inspect `proof.proofTrace.durable_workflow_*`
     \\instead of claiming retry, idempotency, or fault coverage from memory.
     \\
@@ -379,7 +379,7 @@ const prologue =
     \\
     \\Witness corpus awareness:
     \\Every flow-property witness materialised by `pi_repair_plan` and
-    \\`pi_goal_check` is persisted to `.zigttp/witnesses/<short_hash>/` so
+    \\`pi_goal_check` is persisted to `.zttp/witnesses/<short_hash>/` so
     \\that the same falsifying input does not need to be rediscovered every
     \\session. Before drafting a repair against a Spec failure, call
     \\`pi_witnesses` to see how thinly defended that Spec is. Specs with
@@ -391,7 +391,7 @@ const prologue =
     \\throwaway state.
     \\
     \\Never reach for JavaScript/TypeScript idioms that are compile errors in
-    \\zigts: try/catch, classes, var, null, ==/!=, ++/--, while, switch, and
+    \\zts: try/catch, classes, var, null, ==/!=, ++/--, while, switch, and
     \\`x as T` type assertions (ZTS042). Use Result types, plain objects,
     \\let/const, undefined, ===/!==, for...of, match, and explicit increments.
     \\For typed data, take the value straight from a Result (JSON.tryParse,
@@ -400,7 +400,7 @@ const prologue =
     \\Stateful handlers and the Spec idiom: a handler whose return type is a
     \\plain `Response` (no `Spec<...>`) carries an IMPLICIT default profile that
     \\demands every property - read_only, retry_safe, idempotent, pure. A handler
-    \\that writes to zigttp:cache or zigttp:sql cannot hold those, so it fails
+    \\that writes to zttp:cache or zttp:sql cannot hold those, so it fails
     \\ZTS500/ZTS501 even though you wrote no Spec. The fix is to declare a NARROW
     \\Spec on the return type listing only the properties it holds, e.g.
     \\`function handler(req: Request): Response & Spec<"deterministic" | "injection_safe" | "no_secret_leakage">`.
@@ -408,13 +408,13 @@ const prologue =
     \\sql state. When you rewrite a scaffolded handler, keep its existing
     \\`Spec<...>` annotation rather than dropping it.
     \\
-    \\zigttp:sql caveat: a zigttp:sql edit verifies only when the project has an
-    \\SQL schema configured - the veto reads the "sqlite" entry from zigttp.json
-    \\(the same source `zigttp dev` and `zigttp test` use) and validates every
+    \\zttp:sql caveat: a zttp:sql edit verifies only when the project has an
+    \\SQL schema configured - the veto reads the "sqlite" entry from zttp.json
+    \\(the same source `zttp dev` and `zttp test` use) and validates every
     \\declared query against it. When the project has no "sqlite" entry, the veto
     \\rejects the edit with configuration guidance; do not retry unchanged.
     \\Either ask the user to add `"sqlite": "<schema.sql|db.sqlite>"` to
-    \\zigttp.json first, or use zigttp:cache for persistence instead.
+    \\zttp.json first, or use zttp:cache for persistence instead.
     \\
     \\Building HTML lists: when the handler return type is annotated, prefer a
     \\`for...of` loop with a `let` string accumulator over `.map`/`.filter`.
@@ -444,7 +444,7 @@ const prologue =
     \\     carries it is closed earlier. Do not mute the rule or rename
     \\     the env var - the witness is an executable proof, so the fix
     \\     must close the concrete path. When the leak holds on only one
-    \\     branch, call zigts_expert_narrow first: it reports the path
+    \\     branch, call zts_expert_narrow first: it reports the path
     \\     constraints (method comparison, stub truthiness, result-ok
     \\     narrowing) that witness each diagnostic, which is exactly the
     \\     discriminating guard to add so the sink proves safe on the
@@ -455,7 +455,7 @@ const prologue =
     \\closed and which witnesses they closed.
     \\
     \\What follows is:
-    \\  1. The zigts-expert skill document - your identity.
+    \\  1. The zts-expert skill document - your identity.
     \\  2. Three reference documents - virtual modules, testing, JSX.
     \\  3. A live snapshot of the current compiler's rule set, feature
     \\     matrix, and virtual module catalog.
@@ -500,7 +500,7 @@ pub fn buildSystemPromptWithContext(
 
 /// Build the system prompt with an optional WITNESSED FAILURES few-shot
 /// section sourced from a witness corpus directory (typically
-/// `.zigttp/witnesses/<short_hash>` for a handler in scope). Delegates to
+/// `.zttp/witnesses/<short_hash>` for a handler in scope). Delegates to
 /// `buildSystemPromptFull`; kept for callers and tests that only need the
 /// witness axis.
 pub fn buildSystemPromptWithContextAndCorpus(
@@ -512,7 +512,7 @@ pub fn buildSystemPromptWithContextAndCorpus(
 }
 
 /// Build the system prompt with an optional PROJECT MEMORY section sourced
-/// from `<project_root>/.zigttp/memory.jsonl`. Delegates to
+/// from `<project_root>/.zttp/memory.jsonl`. Delegates to
 /// `buildSystemPromptFull`; kept for callers and tests that only need the
 /// memory axis.
 pub fn buildSystemPromptWithContextAndMemory(
@@ -705,7 +705,7 @@ fn writeMemorySection(
     defer allocator.free(selection);
     if (selection.len == 0) return;
 
-    try writeBanner(writer, "PROJECT MEMORY (read-only, from .zigttp/memory.jsonl)");
+    try writeBanner(writer, "PROJECT MEMORY (read-only, from .zttp/memory.jsonl)");
     try writer.writeAll("Cross-session facts the agent has recorded for this project. Pinned\n");
     try writer.writeAll("facts come first; unpinned facts are listed most-recent first. Use\n");
     try writer.writeAll("pi_recall_facts to read the full corpus; pi_remember_fact to append.\n\n");
@@ -749,7 +749,7 @@ fn writeRuleSnapshot(writer: anytype) !void {
 /// one veto rejection at a time.
 fn writeCanonicalNote(writer: anytype) !void {
     try writer.writeAll(
-        \\zigts has a single Canonical Normal Form. The ZTS6xx rules above are not
+        \\zts has a single Canonical Normal Form. The ZTS6xx rules above are not
         \\style preferences - they are hard `check` errors, so the compiler veto
         \\rejects any edit that introduces a non-canonical construct. Write
         \\canonical form directly:
@@ -759,7 +759,7 @@ fn writeCanonicalNote(writer: anytype) !void {
         \\  - `const` instead of a `let` that never reassigns
         \\  - explicit fields instead of default parameters or deep destructuring
         \\
-        \\When unsure, call `zigts_expert_normalize` on your draft file: it returns
+        \\When unsure, call `zts_expert_normalize` on your draft file: it returns
         \\the unique canonical source, an `is_canonical` flag, and the rewrite
         \\trace. Apply that source instead of guessing, so the veto never bounces
         \\your edit on a canonical-form violation.
@@ -782,7 +782,7 @@ test "buildSystemPrompt returns an owned non-empty slice" {
 test "persona contains the prologue identity statement" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "native zigts coding agent") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "native zts coding agent") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "compiler veto") != null);
 }
 
@@ -818,7 +818,7 @@ test "persona teaches the canonical normal form and the normalize tool" {
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL NORMAL FORM (ZTS6xx)") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Canonical Normal Form") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_normalize") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_normalize") != null);
     try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
 }
 
@@ -842,8 +842,8 @@ test "persona contains virtual module specifiers from the live catalog" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: VIRTUAL MODULES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zigttp:env") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zigttp:crypto") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zttp:env") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zttp:crypto") != null);
 }
 
 test "persona pins compiler and policy versions via expert_meta.writeText" {
@@ -921,8 +921,8 @@ test "persona includes tool dispatch guidance" {
 test "persona lists explicit contract and system proof tools" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_prove_patch") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zigts_expert_system_proof") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_prove_patch") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_system_proof") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Contract-pair compatibility proof") != null);
 }
 
@@ -1006,7 +1006,7 @@ test "empty project context is ignored" {
 // WITNESSED FAILURES few-shot section
 // ---------------------------------------------------------------------------
 
-const counterexample = zigts.counterexample;
+const counterexample = zts.counterexample;
 
 fn personaChdirTmp(tmp: *std.testing.TmpDir) ![:0]u8 {
     const old_cwd = try std.process.currentPathAlloc(testing.io, testing.allocator);

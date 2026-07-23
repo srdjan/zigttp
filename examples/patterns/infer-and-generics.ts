@@ -1,13 +1,13 @@
 // Annotate the boundary, infer the internals, and reuse a generic helper.
 //
-// zigts requires parameter and return annotations on named functions (the
+// zts requires parameter and return annotations on named functions (the
 // boundary), then infers locals from their initializers, so redundant local
 // annotations are unnecessary. A generic helper such as
 // `first<T>(xs: T[]): T | undefined` is reused across element types by naming
 // the type argument at the call site. The single absent-value sentinel is
 // `undefined`, never `null`.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "deterministic"

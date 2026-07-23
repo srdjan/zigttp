@@ -1,8 +1,8 @@
 // Users service handler with author-declared proof obligations.
-import type { Spec } from "zigttp:types";
-import { cacheGet, cacheSet } from "zigttp:cache";
-import { routerMatch } from "zigttp:router";
-import { serviceCall } from "zigttp:service";
+import type { Spec } from "zttp:types";
+import { cacheGet, cacheSet } from "zttp:cache";
+import { routerMatch } from "zttp:router";
+import { serviceCall } from "zttp:service";
 
 type Guardrails = Spec<
     | "injection_safe"

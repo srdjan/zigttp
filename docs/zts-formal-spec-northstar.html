@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>zts formal spec: the northstar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f4f7f1;
+        --card: #fffdf8;
+        --code: #1e2530;
+        --code-ink: #e7ece3;
+        --ink: #181b22;
+        --muted: #4f5665;
+        --dim: #6b7280;
+        --border: rgba(27, 32, 43, 0.14);
+        --accent: #2a6796;
+        --accent-soft: #6eaddb;
+        --green: #2f8a4f;
+        --green-deep: #1f6f3c;
+        --red: #c43f5f;
+        --amber: #9a6a00;
+        --blue: #2563eb;
+        --violet: #6d4aff;
+        --sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 56px 24px 110px; }
+      header.hero { margin-bottom: 40px; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      }
+      .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--violet); display: inline-block; }
+      h1 { font-size: 44px; line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 12px; font-weight: 800; }
+      h2 { font-size: 27px; letter-spacing: -0.01em; margin: 60px 0 12px; font-weight: 700; }
+      h2 .num { font-family: var(--mono); font-size: 16px; color: var(--violet); margin-right: 12px; font-weight: 500; }
+      h3 { font-size: 18px; margin: 28px 0 8px; font-weight: 600; }
+      .lede { font-size: 21px; color: var(--muted); max-width: 74ch; }
+      p { max-width: 76ch; }
+      ul, ol { max-width: 76ch; }
+      li { margin: 5px 0; }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      sup a { font-family: var(--mono); font-size: 0.72em; color: var(--violet); padding: 0 1px; }
+      .card {
+        background: var(--card);
+        border: 1.5px solid var(--border);
+        border-radius: 14px;
+        padding: 22px 24px;
+        margin: 18px 0;
+      }
+      .card.tight { padding: 16px 20px; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+      @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 34px; } }
+      code.inline {
+        font-family: var(--mono); font-size: 0.86em;
+        background: rgba(42, 103, 150, 0.1); color: var(--accent);
+        padding: 2px 6px; border-radius: 5px;
+      }
+      pre {
+        background: var(--code); color: var(--code-ink);
+        border-radius: 12px; padding: 18px 20px; overflow-x: auto;
+        font-family: var(--mono); font-size: 13px; line-height: 1.62; margin: 14px 0;
+      }
+      pre b { font-weight: 700; color: #fff; }
+      pre .c { color: #7c8694; font-style: italic; }
+      pre .hl { color: #ffd479; }
+      pre .v { color: #c9a6ff; }
+
+      .thesis {
+        border: 1.5px solid rgba(109,74,255,0.45);
+        background: rgba(109,74,255,0.06);
+        border-radius: 16px; padding: 26px 28px; margin: 24px 0;
+        font-size: 19px; line-height: 1.55; color: var(--ink);
+      }
+      .thesis b { color: var(--violet); }
+
+      /* pillars */
+      .pillar {
+        display: grid; grid-template-columns: 54px 1fr; gap: 18px;
+        border: 1.5px solid var(--border); border-radius: 14px; background: var(--card);
+        padding: 20px 22px; margin: 16px 0;
+      }
+      .pillar .idx {
+        font-family: var(--mono); font-weight: 700; font-size: 22px;
+        color: var(--violet); border-right: 1.5px solid var(--border); padding-right: 18px;
+        display: flex; align-items: flex-start; justify-content: center; padding-top: 2px;
+      }
+      .pillar h3 { margin: 0 0 4px; font-size: 18px; }
+      .pillar .who { font-family: var(--mono); font-size: 12px; color: var(--dim); letter-spacing: 0.03em; }
+      .pillar p { margin: 10px 0 0; font-size: 14.5px; color: var(--muted); max-width: none; }
+
+      /* highlight box */
+      .edge {
+        border: 1.5px solid rgba(47,138,79,0.45);
+        background: rgba(47,138,79,0.06);
+        border-radius: 16px; padding: 24px 26px; margin: 22px 0;
+      }
+      .edge h3 { margin-top: 0; color: var(--green-deep); }
+      .edge p { color: var(--ink); }
+
+      /* compare table */
+      table.cmp { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+      table.cmp th, table.cmp td { padding: 11px 14px; border-top: 1.5px solid var(--border); text-align: left; vertical-align: top; }
+      table.cmp thead th { border-top: none; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); }
+      table.cmp td.dim { color: var(--muted); }
+      table.cmp td.ns { color: var(--violet); font-weight: 500; }
+      table.cmp .rowlbl { font-weight: 600; }
+
+      /* trajectory */
+      .traj { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 22px 0; }
+      @media (max-width: 860px) { .traj { grid-template-columns: 1fr 1fr; } }
+      .step { border: 1.5px solid var(--border); border-radius: 12px; padding: 14px 15px; background: var(--card); position: relative; }
+      .step .ph { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--violet); }
+      .step .ti { font-weight: 700; font-size: 15px; margin: 5px 0 4px; }
+      .step .de { font-size: 12.5px; color: var(--muted); }
+      .step.now { border-color: rgba(47,138,79,0.5); background: rgba(47,138,79,0.05); }
+      .step.now .ph { color: var(--green-deep); }
+      .step.ceiling { border-style: dashed; opacity: 0.9; }
+
+      .tag {
+        font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+        text-transform: uppercase; padding: 3px 9px; border-radius: 999px;
+        border: 1.5px solid; display: inline-block; vertical-align: middle;
+      }
+      .tag.ns { color: var(--violet); border-color: rgba(109,74,255,0.4); background: rgba(109,74,255,0.08); }
+      .callout { border-left: 3px solid var(--amber); padding: 4px 0 4px 18px; margin: 18px 0; color: var(--muted); }
+      hr.soft { border: none; border-top: 1.5px solid var(--border); margin: 50px 0; }
+      .foot { color: var(--dim); font-size: 14px; }
+
+      /* references */
+      ol.refs { counter-reset: ref; list-style: none; padding: 0; margin: 16px 0; }
+      ol.refs li {
+        counter-increment: ref; position: relative; padding: 10px 0 10px 42px;
+        border-top: 1.5px solid var(--border); font-size: 14px; max-width: none;
+      }
+      ol.refs li:first-child { border-top: none; }
+      ol.refs li::before {
+        content: "[" counter(ref) "]"; position: absolute; left: 0; top: 10px;
+        font-family: var(--mono); font-size: 12px; color: var(--violet); font-weight: 700;
+      }
+      ol.refs .venue { color: var(--dim); font-size: 12.5px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <div class="eyebrow"><span class="dot"></span> zts &middot; formal spec &middot; <span class="tag ns">northstar</span></div>
+        <h1>The northstar: one declarative semantics, and a per-build certifying compiler</h1>
+        <p class="lede">
+          Where "a spec that reads like code and is provably tied to the bytecode" leads if we follow the
+          state of the art all the way. Grounded in WebAssembly's SpecTec, LLVM's Alive2, CompCert, and
+          proof-carrying code &mdash; with one structural advantage those projects don't have, and zts does.
+        </p>
+      </header>
+
+      <p>
+        This is the destination, not the next commit. The companion note
+        (<code class="inline">zts-formal-spec-design.html</code>) describes the pragmatic L2 design we can build now;
+        this document describes what that design is an on-ramp <em>to</em>, so every near-term decision points the
+        right way. The state of the art is not a single technique &mdash; it is the composition of three lines of
+        work that each matured in the last few years, plus a fourth that defines the ceiling.
+      </p>
+
+      <div class="thesis">
+        <b>The northstar.</b> A single declarative semantics for zts from which the readable spec, the executable
+        reference interpreter, and the SMT encoding are all <b>generated</b> &mdash; paired with a compiler that emits,
+        on every build, an <b>SMT-checked, signed refinement certificate</b> proving that this build's bytecode
+        implements that semantics. Because zts has removed the features that force approximation, the check is
+        <b>complete</b>, not bounded &mdash; CompCert-grade per-build assurance at Alive2-grade automation, with no
+        proof assistant in the loop.
+      </div>
+
+      <div class="edge">
+        <h3>Status &middot; 2026-06-25: Phase 1 (the L2 slice) shipped</h3>
+        <p>
+          Every piece of the trajectory's first phase now exists in the tree, so the on-ramp is real, not planned:
+        </p>
+        <ul style="margin:0">
+          <li><b>One source.</b> <code class="inline">semantics.zig</code> carries each node's denotation and lowering
+            <em>as data</em> &mdash; 10 IR nodes and 7 opcodes specified &mdash; reduced to a stable
+            <code class="inline">semanticsHash</code>.</li>
+          <li><b>Five checking mechanisms</b> in <code class="inline">zts spec-check</code>: the comptime drift gate,
+            the stack-effect arity check, the symbolic lowering proof (12 value proofs: 5 binop + 2 unop instances + the
+            literals/identifier/ternary/call core, plus 1 fused-opcode refinement), the
+            <b>differential corpus</b> (10/10 cases) that runs the registry's denotations against the <em>real</em>
+            compiler's output, and the SMT equivalence check over the slice value theory.</li>
+          <li><b>Readable view.</b> <code class="inline">zts spec-render</code> generates the TypeScript-shaped
+            <code class="inline">docs/spec/semantics.spec.ts</code> from the same table, drift-gated in CI
+            (<code class="inline">spec-render --check</code>).</li>
+          <li><b>Signed receipt.</b> <code class="inline">zttp spec-check</code> emits a persistent-key
+            <code class="inline">kind=semantics</code> JWS, self-verified before it is written and third-party
+            verifiable against the published attest JWK.</li>
+        </ul>
+        <p style="margin-bottom:0">
+          What stays honest: the drift gate is still a named-alphabet size pin (not per-member SMT coverage), the
+          <code class="inline">eq</code> opcode has no differential case because the restricted language emits
+          <code class="inline">strict_eq</code> for <code class="inline">===</code>, and the third-party
+          <em>file</em> verifier is a convenience still to add (the receipt is already verifiable with the existing
+          well-known JWK). Phase 2 (the SMT refinement check) follows below.
+        </p>
+      </div>
+
+      <div class="edge">
+        <h3>Status &middot; 2026-06-26: Phase 2 (the SMT refinement check) &mdash; first slice shipped</h3>
+        <p>
+          The symbolic executor is no longer the only judge of equivalence. A <b>fifth mechanism</b> in
+          <code class="inline">spec-check</code> lifts the same registry data to a <em>semantic</em> check: it encodes
+          each obligation over the slice's value model and asks <b>Z3</b> whether the two sides agree on <em>all</em>
+          inputs. This is the Alive2 move &mdash; and it admits exactly what structural equality (mechanism 3) cannot:
+          structurally different but semantically equal lowerings.
+        </p>
+        <ul style="margin:0">
+          <li><b>Value model, encoded.</b> A pure, wasm-safe encoder (<code class="inline">semantics_smt.zig</code>)
+            turns an RPN denotation into SMT-LIB2 over native <code class="inline">Int</code>/<code class="inline">Bool</code>
+            sorts with light type inference. (A tagged value datatype was tried first and rejected: it returns spurious
+            <code class="inline">sat</code> on algebraic laws when a free leaf may be a bool, so
+            <code class="inline">getInt</code> of it is unconstrained junk. Native sorts avoid that; the tagged/poison
+            model is deferred to when the heap enters &mdash; see the caveat below.)</li>
+          <li><b>Full value-rule coverage.</b> Every value node's <code class="inline">denote == exec(lower)</code>
+            goes through the SMT check, so mechanism 5 is a superset of the structural mechanism 3 for the value rules
+            (and catches the day a lowering stops being a syntactic transliteration of its denotation), alongside the
+            fused-opcode refinements. The asserted-algebraic-law table is now <em>empty</em>: no unconditioned
+            equivalence survives the engine's coercing operators (see below), so until the reachability layer can assert
+            laws under type guards, the proving tier proves the lowerings and refinements only.</li>
+          <li><b>The value model is an abstraction, and that boundary is enforced.</b> Numbers are encoded as unbounded
+            mathematical integers (ℤ), an abstraction of the engine's actual values (i32 promoting to f64 on overflow,
+            and the polymorphic <code class="inline">+</code> / <code class="inline">!</code> operators). A law is asserted
+            only if it holds under the engine's value model, not merely over ℤ. Three tempting laws are deliberately
+            excluded: associativity of <code class="inline">+</code> (holds over ℤ but fails on f64 once a child is a large
+            mul-overflow float past 2^53), commutativity of <code class="inline">+</code> (generic
+            <code class="inline">+</code> also concatenates strings, so <code class="inline">a+b &ne; b+a</code>), and
+            <code class="inline">!</code> involution (<code class="inline">!</code> coerces via truthiness, so
+            <code class="inline">!!x</code> is a boolean, not <code class="inline">x</code>). A soundness review caught
+            associativity after an earlier draft shipped it as "proven" &mdash; exactly the false attestation this
+            mechanism must not produce.</li>
+          <li><b>The exclusion boundary is machine-checked, not just commented.</b> An <em>exclusion audit</em>
+            (<code class="inline">semantics_audit.zig</code>) encodes each excluded law over a FAITHFUL value model &mdash;
+            a tagged <code class="inline">number</code>|<code class="inline">bool</code>|<code class="inline">string</code>
+            with JS coercion (<code class="inline">toNum</code>/<code class="inline">toStr</code>/<code class="inline">toBool</code>),
+            polymorphic <code class="inline">+</code>, type-strict <code class="inline">===</code> &mdash; and REQUIRES z3 to
+            find a counterexample. <code class="inline">sat</code> confirms the exclusion; <code class="inline">unsat</code>
+            (the "non-law" actually holds) fails the build with <code class="inline">ZTS757</code>; a z3 that cannot evaluate
+            the model (errors, lacks the FP/String theory) fails with <code class="inline">ZTS758</code> rather than silently
+            passing; a genuine timeout is inconclusive (non-fatal). The four excluded laws are associativity and
+            commutativity of <code class="inline">+</code>, and the <code class="inline">!</code> and unary-<code class="inline">-</code>
+            involutions &mdash; <code class="inline">neg_involution</code> moved here from the law table once the audit
+            existed (it is false under string coercion, <code class="inline">-(-"5") !== "5"</code>), which removes the
+            receipt over-claim. spec-check reports <code class="inline">exclusion audit: 4/4 excluded laws refuted</code>.
+            The audit is opt-in (<code class="inline">spec-check --audit</code>, run by CI) because its f64-associativity
+            refutation is ~5s; interactive spec-check stays sub-second. A go/no-go spike (U1) set the strategy: faithful
+            Float64 refutations and simple proofs are sub-second, only binary commutativity/associativity <em>proofs</em>
+            time out (so they are excluded, not asserted).</li>
+          <li><b>Injected solver, honest outcomes.</b> The driver takes the solver as a function pointer, so
+            <code class="inline">std.process.Child</code> never enters the freestanding/wasm analyzer. For the prover, only a
+            genuine counterexample is a failure: <code class="inline">sat</code> &rarr; <code class="inline">ZTS755</code>,
+            an ill-typed obligation &rarr; <code class="inline">ZTS756</code>, and a solver that cannot decide or run &rarr;
+            <em>unproven</em>, reported but non-fatal &mdash; the same outcome as no z3. The audit inverts this and adds a
+            fail-closed guard: a solver that errors on the faithful model is a failure (<code class="inline">ZTS758</code>),
+            not a benign inconclusive, so a broken z3 cannot make the boundary look checked. SMT is also opt-out:
+            <code class="inline">ZTTP_Z3=off</code> disables it even where z3 is installed.</li>
+          <li><b>In the receipt.</b> The signed <code class="inline">kind=semantics</code> JWS carries the SMT
+            availability and proved/total counts plus the exclusion-audit availability and refuted/total counts (payload
+            v5); a receipt where the audit did not run is distinguishable from one where it ran and refuted nothing.</li>
+        </ul>
+        <p style="margin-bottom:0">
+          What stays honest: the PROVING tier still uses the integer abstraction (ints, bools, seven operators), and the
+          faithful value model is so far used only for REFUTATION (the exclusion audit), not yet to assert laws. The U1
+          spike showed why: faithful binary-commutativity <em>proofs</em> time out, and once operators coerce, every
+          unconditioned law refutes &mdash; so there are currently <em>no</em> asserted algebraic laws, and the four
+          tempting ones are machine-refuted instead. Asserting laws faithfully needs a reachability / type-precondition
+          layer &mdash; the larger, deferred part of Phase 2. What landed: every value-rule lowering, the refinements,
+          and a machine-checked exclusion audit (with <code class="inline">neg_involution</code> now correctly refuted, not
+          over-claimed). The U2 reachability analysis then closed out the scalar tier: the slice's operand leaves are
+          genuinely opaque (a local or call result can carry a string), so a type-precondition narrows nothing &mdash; the
+          unconstrained value domain already <em>is</em> the reachable domain, and the four exclusions are machine-tight,
+          not conservative. Asserting a numeric law would need a <em>typed leaf</em> (a registry change), and the one law it
+          would unlock &mdash; numeric <code class="inline">+</code> commutativity &mdash; the U1 spike measured at ~130s,
+          landing unproven under the timeout anyway. So the faithful <em>scalar</em> value model is complete; what remains is
+          the value/heap model (NaN-boxing, object identity, inline caches &mdash; the Alive2 CAV'21 memory-model analog).
+        </p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">01</span>The pillars</h2>
+
+      <div class="pillar">
+        <div class="idx">1</div>
+        <div>
+          <h3>One source generates every view</h3>
+          <div class="who">WebAssembly SpecTec &middot; PLDI 2024 &middot; adopted as official Wasm tooling, March 2025 <sup><a href="#r1">1</a><a href="#r2">2</a></sup></div>
+          <p>
+            Wasm's standard required every feature to appear in formal semantics, prose, <em>and</em> the reference
+            interpreter &mdash; three hand-synced artifacts that drifted. SpecTec made them one: from a single declarative
+            DSL it generates the typeset spec, the prose pseudocode, and a meta-level interpreter, automatically deriving
+            the algorithmic (executable) semantics from the declarative (relational) one. The generated interpreter passes
+            100% of the official conformance suite. The same group did the JS version &mdash; JISET/ESMeta mechanically
+            extract an executable interpreter from the ECMAScript standard's structured prose <sup><a href="#r8">8</a></sup>.
+            This is the elevation of our "Zig table renders TypeScript" choice into "one source, many generated views, zero hand-sync."
+          </p>
+        </div>
+      </div>
+
+      <div class="pillar">
+        <div class="idx">2</div>
+        <div>
+          <h3>Per-build translation validation via SMT</h3>
+          <div class="who">Alive2 &middot; PLDI 2021 <sup><a href="#r3">3</a></sup></div>
+          <p>
+            Alive2 takes LLVM IR before and after a transform, encodes both into SMT, and asks Z3 whether the output
+            <em>refines</em> the input &mdash; same result, no new undefined behavior, for all inputs &mdash; fully automatic,
+            no changes to LLVM. It found 47 real bugs in LLVM's own test suite and 21 more in memory optimizations.
+            "Refinement" is exactly the relation behind <code class="inline">get_loc_add &equiv; get_loc; add</code>.
+            <b>This now runs in <code class="inline">spec-check</code> for the slice's value theory</b> (mechanism 5): the
+            symbolic executor is subsumed by an SMT-backed equivalence check that encodes each obligation over the value
+            model and lets Z3 discharge <code class="inline">eval(node) &supe; run(lower(node))</code> &mdash; and the
+            registry's algebraic laws, which the syntactic check could not. The northstar extends that encoding from the
+            slice's ints-and-bools to the full value/heap model.
+          </p>
+        </div>
+      </div>
+
+      <div class="pillar">
+        <div class="idx">3</div>
+        <div>
+          <h3>The certificate the consumer checks without trusting the compiler</h3>
+          <div class="who">Certifying compilers &middot; Necula &amp; Lee, PLDI 1998 &middot; Foundational PCC, Appel <sup><a href="#r10">10</a><a href="#r11">11</a></sup></div>
+          <p>
+            A certifying compiler emits <em>both</em> code and a certificate of a property the code satisfies; the consumer
+            checks the certificate independently, with no need to trust the producer or verify the compiler itself. That is
+            precisely what a <code class="inline">kind=semantics</code> receipt should be &mdash; and zts already owns the
+            Ed25519 sign/verify half. The northstar makes the receipt genuinely proof-carrying: it ships the discharged
+            refinement obligations (or their hashes) so a third party can re-run the SMT checks.
+          </p>
+        </div>
+      </div>
+
+      <div class="pillar">
+        <div class="idx">4</div>
+        <div>
+          <h3>The mechanized ceiling</h3>
+          <div class="who">CompCert &middot; CakeML <sup><a href="#r9">9</a><a href="#r12">12</a></sup></div>
+          <p>
+            Fully mechanized verified compilers &mdash; end-to-end Coq/HOL proofs. This is L3, the ceiling we keep a path to
+            but do not require day one. The detail worth internalizing: even CompCert does not prove every pass once-and-for-all;
+            several backend passes are done by translation validation, and seL4's compilation to machine code was validated,
+            not proven. Mixing "proven-once" with "validated-per-build" is not a compromise &mdash; it is what the gold
+            standard itself does.
+          </p>
+        </div>
+      </div>
+
+      <div class="pillar">
+        <div class="idx">&middot;</div>
+        <div>
+          <h3>The road not taken (and why)</h3>
+          <div class="who">K framework / Matching Logic &middot; KJS &middot; JSCert / JaVerT <sup><a href="#r5">5</a><a href="#r6">6</a><a href="#r7">7</a></sup></div>
+          <p>
+            K derives a parser, interpreter, symbolic model checker, deductive verifier, and equivalence checker from one
+            semantics &mdash; the maximalist "all tools from the semantics" vision, proven on JS by KJS (passes all 2,782
+            ES5.1 core tests, symbolically executable). We do not adopt it wholesale for two reasons. First, zts already
+            has its analyzer family hand-written in Zig; the goal is to <em>tie</em> them to a spec, not regenerate them in a
+            different framework. Second, KJS, JSCert, and JaVerT formalize <em>full</em> JavaScript &mdash; which is exactly
+            what makes them enormous. zts is not full JavaScript, by design, and that is the whole advantage.
+          </p>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">02</span>The angle that is uniquely zts's</h2>
+
+      <div class="edge">
+        <h3>Restrictions make bounded validation complete</h3>
+        <p>
+          Alive2 is <em>bounded</em> because LLVM has unbounded loops &mdash; it unrolls to a fixed depth and accepts
+          incompleteness as the price. The full-JS formalizations are enormous because JS is enormous. zts has already
+          thrown away exactly the features that force both compromises: no <code class="inline">while</code>, no unbounded
+          back-edges, no <code class="inline">try/catch</code>, no <code class="inline">eval</code>, no dynamic
+          <code class="inline">this</code>.
+        </p>
+        <p style="margin-bottom:0">
+          The repo's thesis &mdash; <em>restrictions unlock proofs</em> &mdash; applies one level down. The same cuts that
+          make handler verification decidable make the bounded translation validation <b>complete, not approximate</b>, for
+          the bulk of the language. Alive2's bound is a ceiling it cannot see past; for zts's core the "bound" is just the
+          structural depth of the IR tree, so the refinement check is exhaustive. zts can target
+          <b>CompCert-grade per-build assurance at Alive2-grade automation, with no proof assistant in the loop.</b> No one
+          gets to make that claim about real JavaScript. zts can &mdash; because it is not real JavaScript, by design.
+        </p>
+      </div>
+
+      <span class="foot" style="display:block;margin-top:8px">The same restrictions-to-proofs argument the project already makes at the handler level, applied to the engine's own lowering.</span>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">03</span>L2 design vs. northstar</h2>
+      <p>The two are not competitors. The L2 slice is the on-ramp; each piece of it is a down payment on the northstar.
+        The middle column below is now <b>shipped</b> (2026-06-25).</p>
+
+      <table class="cmp">
+        <thead>
+          <tr><th style="width:20%"></th><th style="width:40%">Pragmatic L2 (shipped)</th><th style="width:40%">Northstar</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="rowlbl">Source of truth</td><td class="dim">Zig comptime table; denotations hand-written</td><td class="ns">One declarative semantics DSL</td></tr>
+          <tr><td class="rowlbl">Readable <code class="inline">spec.ts</code></td><td class="dim">Rendered from the table (<code class="inline">spec-render</code>, drift-gated)</td><td class="ns">One generated artifact among several</td></tr>
+          <tr><td class="rowlbl">Executable reference</td><td class="dim">Differential corpus: registry vs the real compiler (no separate <code class="inline">spec/eval.ts</code> needed at L2)</td><td class="ns">Derived from the DSL (SpecTec-style)</td></tr>
+          <tr><td class="rowlbl">Lowering proof</td><td class="dim">Symbolic executor + differential corpus + <b>SMT equivalence on the slice's value theory</b> (Phase 2 slice)</td><td class="ns">SMT refinement check; <b>complete</b> on the bounded-by-construction core, value+heap model</td></tr>
+          <tr><td class="rowlbl">Receipt</td><td class="dim">Hash of results, Ed25519-signed (<code class="inline">kind=semantics</code>)</td><td class="ns">Proof-carrying: ships re-checkable obligations</td></tr>
+          <tr><td class="rowlbl">L3 path</td><td class="dim">none</td><td class="ns">Export DSL + obligations to Coq / Isabelle</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">04</span>Trajectory</h2>
+      <p>Four phases, each shippable and each strictly stronger than the last. Phase 1 is complete; Phase 2's first
+        slice has landed; the rest of Phase 2 (full coverage, then the value/heap model) and Phase 3 follow.</p>
+
+      <div class="traj">
+        <div class="step now">
+          <div class="ph">Phase 1 &middot; shipped</div>
+          <div class="ti">L2 slice</div>
+          <div class="de">Zig table, hand-rolled symbolic checker, rendered <code class="inline">spec.ts</code>, differential corpus vs the real compiler, one signed receipt. All landed (2026-06-25).</div>
+        </div>
+        <div class="step now">
+          <div class="ph">Phase 2 &middot; slice shipped</div>
+          <div class="ti">SMT validation</div>
+          <div class="de">Z3 refinement check (Alive2-style) over the slice's value theory: a pure SMT-LIB2 encoder (integer abstraction), full value-rule coverage (every node's denote == exec(lower)) plus the fused-opcode refinements, AND a faithful-value-model exclusion audit (opt-in, --audit) that machine-refutes the four excluded laws (associativity/commutativity of +, !/unary-- involution) over a tagged number|bool|string model with coercion; injected solver with structural fallback and a fail-closed guard on solver errors, counts in the receipt. Landed 2026-06-26/27. The U2 reachability analysis (2026-06-27) closed out the scalar tier: the slice's operand leaves are genuinely opaque (a local/call-result can carry a string), so the exclusions are machine-tight and a type-precondition would narrow nothing; asserting a numeric law would need a typed-leaf registry change to unlock numeric + commutativity, which the U1 spike measured at ~130s (unproven under the timeout) - low payoff, not built. Faithful scalar value model complete; remaining: the value/heap encoding.</div>
+        </div>
+        <div class="step">
+          <div class="ph">Phase 3</div>
+          <div class="ti">DSL-generated spec</div>
+          <div class="de">Promote the Zig table to a declarative DSL; generate <code class="inline">spec.ts</code>, the reference interpreter, and the SMT encoding from it (SpecTec-style).</div>
+        </div>
+        <div class="step ceiling">
+          <div class="ph">Phase 4 &middot; ceiling</div>
+          <div class="ti">Coq export (L3)</div>
+          <div class="de">Export the DSL and per-node obligations to a proof assistant for mechanized end-to-end correctness. Optional, research-grade.</div>
+        </div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2><span class="num">05</span>Honest caveats</h2>
+      <p>Three things are genuinely hard, and the northstar is more credible for naming them.</p>
+      <div class="grid2">
+        <div class="card tight">
+          <h3 style="margin-top:0">The value/heap SMT encoding is the real cost</h3>
+          <p style="font-size:14px;color:var(--muted)">
+            Alive2's memory-model encoding was its own CAV 2021 paper <sup><a href="#r4">4</a></sup>. NaN-boxing, object identity,
+            and inline caches all need careful SMT encoding &mdash; that is where the weeks go in Phase 2.
+          </p>
+        </div>
+        <div class="card tight">
+          <h3 style="margin-top:0">The FFI boundary stays an oracle</h3>
+          <p style="font-size:14px;color:var(--muted)">
+            Native <code class="inline">zttp:*</code> modules cannot be symbolically executed. They keep stated contracts,
+            referenced from the module registry, outside the proof boundary &mdash; the same honest line the L2 design draws.
+          </p>
+        </div>
+      </div>
+      <div class="callout">
+        And building "the DSL generates everything" is a multi-month investment. SpecTec is a serious piece of engineering,
+        not a weekend. Phase 3 is where the northstar earns its name, and it should be entered with eyes open.
+      </div>
+
+      <hr class="soft" />
+
+      <!-- ============================================================ -->
+      <h2 id="refs" style="margin-top:0"><span class="num">&sect;</span>References</h2>
+      <ol class="refs">
+        <li id="r1">Youn, Shin, Lee, Ryu, Breitner, Gardner, Lindley, Pretnar, Watt, Rossberg et al. <b>Bringing the WebAssembly Standard up to Speed with SpecTec.</b> <span class="venue">PACMPL / PLDI 2024.</span> <a href="https://dl.acm.org/doi/10.1145/3656440">dl.acm.org/doi/10.1145/3656440</a></li>
+        <li id="r2"><b>SpecTec has been adopted.</b> <span class="venue">WebAssembly.org news, March 27, 2025.</span> <a href="https://webassembly.org/news/2025-03-27-spectec/">webassembly.org/news/2025-03-27-spectec</a></li>
+        <li id="r3">Lopes, Lee, Hur, Liang, Regehr. <b>Alive2: Bounded Translation Validation for LLVM.</b> <span class="venue">PLDI 2021.</span> <a href="https://users.cs.utah.edu/~regehr/alive2-pldi21.pdf">users.cs.utah.edu/~regehr/alive2-pldi21.pdf</a></li>
+        <li id="r4">Lee, Hur, Lopes. <b>An SMT Encoding of LLVM's Memory Model for Bounded Translation Validation.</b> <span class="venue">CAV 2021.</span> <a href="https://web.ist.utl.pt/nuno.lopes/pubs/alive2-mem-cav21.pdf">web.ist.utl.pt/nuno.lopes/pubs/alive2-mem-cav21.pdf</a></li>
+        <li id="r5">Ros&#x21;u et al. <b>An Overview of the K Semantic Framework / Matching Logic.</b> <span class="venue">Pi&sup2; Labs.</span> <a href="https://pi2labs.org/papers/overview-k-semantic-framework">pi2labs.org/papers/overview-k-semantic-framework</a></li>
+        <li id="r6">Park, Stefanescu, Ros&#x21;u. <b>KJS: A Complete Formal Semantics of JavaScript.</b> <span class="venue">PLDI 2015.</span> <a href="https://dl.acm.org/doi/10.1145/2813885.2737991">dl.acm.org/doi/10.1145/2813885.2737991</a></li>
+        <li id="r7">Naudziuniene et al. <b>An Infrastructure for Tractable Verification of JavaScript Programs (JSCert / JaVerT).</b> <span class="venue">Imperial College London.</span> <a href="https://www.doc.ic.ac.uk/~pg/publications/Naudziuniene2018Infrastructure.pdf">doc.ic.ac.uk/~pg/publications/Naudziuniene2018Infrastructure.pdf</a></li>
+        <li id="r8">Park, An, Ryu et al. <b>JISET: JavaScript IR-based Semantics Extraction Toolchain.</b> <span class="venue">ASE 2020 (ESMeta line of work).</span> <a href="https://www.researchgate.net/publication/348827805_JISET_JavaScript_IR-based_semantics_extraction_toolchain">researchgate.net/publication/348827805</a></li>
+        <li id="r9">Leroy. <b>A Formally Verified Compiler Back-end (CompCert).</b> <span class="venue">J. Automated Reasoning, 2009.</span> <a href="https://arxiv.org/pdf/0902.2137">arxiv.org/pdf/0902.2137</a></li>
+        <li id="r10">Necula, Lee. <b>The Design and Implementation of a Certifying Compiler.</b> <span class="venue">PLDI 1998.</span> <a href="https://www.cs.cmu.edu/afs/cs/academic/class/15745-s06/web/handouts/necula-pldi98.pdf">cs.cmu.edu/.../necula-pldi98.pdf</a></li>
+        <li id="r11">Appel. <b>Foundational Proof-Carrying Code.</b> <span class="venue">LICS 2001 / Princeton.</span> <a href="https://www.cs.princeton.edu/~appel/papers/fpcc.pdf">cs.princeton.edu/~appel/papers/fpcc.pdf</a></li>
+        <li id="r12">Tan, Myreen, Kumar, Fox, Owens, Norrish. <b>The Verified CakeML Compiler Backend.</b> <span class="venue">JFP 2019.</span> <a href="https://www.researchgate.net/publication/330851837_The_verified_CakeML_compiler_backend">researchgate.net/publication/330851837</a></li>
+      </ol>
+    </div>
+  </body>
+</html>

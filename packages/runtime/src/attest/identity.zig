@@ -1,7 +1,7 @@
 //! Persistent proof-receipt identity.
 //!
 //! Loads or generates a stable Ed25519 keypair from
-//! `~/.zigttp/attest/keypair.bin`, so every deploy by the same operator attests
+//! `~/.zttp/attest/keypair.bin`, so every deploy by the same operator attests
 //! under the same identity that verifiers can pin once and trust across future
 //! builds.
 //!
@@ -10,7 +10,7 @@
 //! Mode 0600 enforced on both write and load.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -41,13 +41,13 @@ const file_mode: std.posix.mode_t = 0o600;
 /// key file means group or other can read or modify the private key.
 const permission_group_bits: std.posix.mode_t = 0o077;
 
-/// Default user-scoped entry. Resolves `$HOME/.zigttp/attest/keypair.bin`,
+/// Default user-scoped entry. Resolves `$HOME/.zttp/attest/keypair.bin`,
 /// loads on cache hit, generates and writes on cache miss.
 pub fn loadOrCreate(allocator: std.mem.Allocator) !SignerIdentity {
     const home_raw = std.c.getenv("HOME") orelse return error.HomeDirUnavailable;
     const home = std.mem.sliceTo(home_raw, 0);
 
-    const dir_path = try std.fs.path.join(allocator, &.{ home, ".zigttp", "attest" });
+    const dir_path = try std.fs.path.join(allocator, &.{ home, ".zttp", "attest" });
     defer allocator.free(dir_path);
 
     const file_path = try std.fs.path.join(allocator, &.{ dir_path, "keypair.bin" });
@@ -78,7 +78,7 @@ fn loadExisting(file_path: []const u8) !SignerIdentity {
     };
     defer std.Io.Threaded.closeFd(fd);
 
-    const stat = zigts.file_io.fstatFd(fd) catch return error.KeyFileMalformed;
+    const stat = zts.file_io.fstatFd(fd) catch return error.KeyFileMalformed;
     if (stat.size != file_size_bytes) return error.KeyFileMalformed;
     if (stat.mode & permission_group_bits != 0) return error.KeyFilePermissionsTooOpen;
 
@@ -249,7 +249,7 @@ test "generated file is exactly 64 bytes" {
     const path_z = try toCStr(&path_buf, paths[1]);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    const stat = try zigts.file_io.fstatFd(fd);
+    const stat = try zts.file_io.fstatFd(fd);
     try testing.expectEqual(@as(u64, file_size_bytes), stat.size);
 }
 

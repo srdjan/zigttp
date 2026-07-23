@@ -1,4 +1,4 @@
-# Plan 006: Range-validate ISO date/datetime in `zigttp:validate`
+# Plan 006: Range-validate ISO date/datetime in `zttp:validate`
 
 > **Executor instructions**: Follow this plan step by step. Run every verification command and confirm the expected result before moving on. Touch only the files listed as in scope. If any STOP condition occurs, stop and report; do not improvise around it. When done, update the status row for this plan in `plans/README.md`, unless a reviewer says they maintain the index.
 >
@@ -16,7 +16,7 @@
 
 ## Why this matters
 
-`zigttp:validate` is a trust boundary: a value that passes a schema constraint is stamped `.validated`, and the flow analyzer then treats it as well-formed, trusted input. The ISO date/datetime format validators only check character shape (digits and separators), never ranges. So `"2024-13-45"` (month 13, day 45) and `"2024-01-01T24:60:99"` (hour 24, minute 60, second 99) pass validation and are marked `.validated`, and `validateIsoDatetime` ignores everything after the seconds field, so arbitrary trailing junk is accepted. This is a fail-open on the ingress boundary. The correct range logic already exists in the sibling `time.zig` parser and can be reused.
+`zttp:validate` is a trust boundary: a value that passes a schema constraint is stamped `.validated`, and the flow analyzer then treats it as well-formed, trusted input. The ISO date/datetime format validators only check character shape (digits and separators), never ranges. So `"2024-13-45"` (month 13, day 45) and `"2024-01-01T24:60:99"` (hour 24, minute 60, second 99) pass validation and are marked `.validated`, and `validateIsoDatetime` ignores everything after the seconds field, so arbitrary trailing junk is accepted. This is a fail-open on the ingress boundary. The correct range logic already exists in the sibling `time.zig` parser and can be reused.
 
 ## Current state
 

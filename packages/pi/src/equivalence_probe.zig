@@ -19,7 +19,7 @@
 //!
 //! Best-effort by contract: a failed probe never fails an apply. The
 //! auditable artifact is the signed `kind=equivalence` row the probe writes
-//! to `.zigttp/proofs.jsonl`; this side only triggers it.
+//! to `.zttp/proofs.jsonl`; this side only triggers it.
 
 const std = @import("std");
 

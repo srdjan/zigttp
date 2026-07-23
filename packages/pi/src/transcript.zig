@@ -355,13 +355,13 @@ test "assistant_tool_use and tool_result variants are preserved" {
     defer tr.deinit(testing.allocator);
 
     const calls = [_]turn.ToolCall{
-        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
-        .{ .id = "toolu_2", .name = "zigts_expert_features", .args_json = "{}" },
+        .{ .id = "toolu_1", .name = "zts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_2", .name = "zts_expert_features", .args_json = "{}" },
     };
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
     try tr.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}\n",
     } });
@@ -369,7 +369,7 @@ test "assistant_tool_use and tool_result variants are preserved" {
     switch (tr.at(0).*) {
         .assistant_tool_use => |owned_calls| {
             try testing.expectEqual(@as(usize, 2), owned_calls.len);
-            try testing.expectEqualStrings("zigts_expert_meta", owned_calls[0].name);
+            try testing.expectEqualStrings("zts_expert_meta", owned_calls[0].name);
         },
         else => return error.TestFailed,
     }
@@ -387,14 +387,14 @@ test "every entry variant renders a stable plain-text label" {
     defer tr.deinit(testing.allocator);
 
     const calls = [_]turn.ToolCall{
-        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_1", .name = "zts_expert_meta", .args_json = "{}" },
     };
     try tr.append(testing.allocator, .{ .user_text = "add a route" });
     try tr.append(testing.allocator, .{ .model_text = "I'll inspect first." });
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
     try tr.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
-        .tool_name = "zigts_expert_meta",
+        .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } });
@@ -406,8 +406,8 @@ test "every entry variant renders a stable plain-text label" {
 
     try testing.expect(std.mem.indexOf(u8, out, "user: add a route\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "model: I'll inspect first.\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "assistant: tool_use zigts_expert_meta\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "tool zigts_expert_meta: {\"ok\":true}\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "assistant: tool_use zts_expert_meta\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tool zts_expert_meta: {\"ok\":true}\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "proof: contract ok\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "error: ZTS001 unsupported var\n") != null);
 }

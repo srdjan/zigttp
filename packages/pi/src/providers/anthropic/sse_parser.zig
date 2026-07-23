@@ -314,7 +314,7 @@ test "tool_use cassette: header carries id+name, input_json deltas assemble to v
                 .tool_use => |h| {
                     saw_header = true;
                     try testing.expectEqualStrings("toolu_01ABCDEF", h.id);
-                    try testing.expectEqualStrings("zigts_expert_describe_rule", h.name);
+                    try testing.expectEqualStrings("zts_expert_describe_rule", h.name);
                 },
                 else => {},
             },

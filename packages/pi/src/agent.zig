@@ -12,7 +12,7 @@
 //! history on every submission.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const loop = @import("loop.zig");
 const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
@@ -22,8 +22,8 @@ const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const openai_client = @import("providers/openai/client.zig");
 const models_registry = @import("providers/models.zig");
 const expert_persona = @import("expert_persona.zig");
-const zigts_cli = @import("zigts_cli");
-const expert_meta = zigts_cli.expert_meta;
+const zts_cli = @import("zts_cli");
+const expert_meta = zts_cli.expert_meta;
 const session_id_mod = @import("session/session_id.zig");
 const session_paths = @import("session/paths.zig");
 const session_events = @import("session/events.zig");
@@ -666,7 +666,7 @@ fn envVar(name_z: [:0]const u8) ?[]const u8 {
 }
 
 /// True when a live model backend can be built from the environment. The
-/// `zigttp expert` entry point checks this before launching the interactive
+/// `zttp expert` entry point checks this before launching the interactive
 /// session so a missing key fails fast with setup guidance instead of
 /// dropping into the offline stub. Single source of truth for the env-var
 /// names matched by `initFromEnvWithSessionConfig`.
@@ -1077,14 +1077,14 @@ test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
     var session = try AgentSession.initAnthropic(
         testing.allocator,
         "test-fixture-key",
-        "you are a zigts expert",
-        "[{\"name\":\"zigts_expert_meta\",\"description\":\"d\",\"input_schema\":{}}]",
+        "you are a zts expert",
+        "[{\"name\":\"zts_expert_meta\",\"description\":\"d\",\"input_schema\":{}}]",
     );
     defer session.deinit(testing.allocator);
 
     try testing.expect(session.backend == .anthropic);
     try testing.expectEqualStrings("test-fixture-key", session.backend.anthropic.config.api_key);
-    try testing.expectEqualStrings("you are a zigts expert", session.backend.anthropic.config.system_prompt);
+    try testing.expectEqualStrings("you are a zts expert", session.backend.anthropic.config.system_prompt);
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expect(session.backend.anthropic.config.tools_json != null);
@@ -1095,14 +1095,14 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
     var session = try AgentSession.initOpenAI(
         testing.allocator,
         "openai-fixture-key",
-        "you are a zigts expert",
+        "you are a zts expert",
         "[{\"type\":\"function\",\"function\":{\"name\":\"x\"}}]",
     );
     defer session.deinit(testing.allocator);
 
     try testing.expect(session.backend == .openai);
     try testing.expectEqualStrings("openai-fixture-key", session.backend.openai.config.api_key);
-    try testing.expectEqualStrings("you are a zigts expert", session.backend.openai.config.system_prompt);
+    try testing.expectEqualStrings("you are a zts expert", session.backend.openai.config.system_prompt);
     try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
     try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
     try testing.expectEqual(AuthKind.openai_api_key, session.authKind());
@@ -1257,7 +1257,7 @@ test "rejected startup model creates no session state and frees owned buffers" {
     const sessions_dir = try tmp.childPath(allocator, "sessions-not-created");
     defer allocator.free(sessions_dir);
 
-    var sessions = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
     var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
     defer anthropic.restore(allocator);
@@ -1369,7 +1369,7 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     try testing.expect(std.mem.indexOf(u8, actual, "CLAUDE_MARKER_ABC") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") != null);
     // Persona identity still intact - project context never overrides it.
-    try testing.expect(std.mem.indexOf(u8, actual, "native zigts coding agent") != null);
+    try testing.expect(std.mem.indexOf(u8, actual, "native zts coding agent") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "END OF PERSONA") != null);
 }
 
@@ -1408,7 +1408,7 @@ test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
 
     const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
     defer allocator.free(sessions_dir);
-    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
     var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
     defer api_override.restore(allocator);
@@ -1445,7 +1445,7 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
 
     const sessions_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "sessions" });
     defer allocator.free(sessions_dir);
-    var env_override = try EnvOverride.set(allocator, "ZIGTTP_SESSIONS_DIR", sessions_dir);
+    var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
 
     const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
@@ -1467,7 +1467,7 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
     const captured_meta_path: []u8 = blk: {
         var s = try initFromEnvWithSessionConfig(allocator, null, .{});
         defer s.deinit(allocator);
-        try zigts.file_io.writeFile(allocator, s.events_path orelse return error.TestUnexpectedResult, "");
+        try zts.file_io.writeFile(allocator, s.events_path orelse return error.TestUnexpectedResult, "");
         break :blk try allocator.dupe(u8, s.meta_path orelse return error.TestUnexpectedResult);
     };
     defer allocator.free(captured_meta_path);

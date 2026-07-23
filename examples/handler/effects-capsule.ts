@@ -12,8 +12,8 @@
 // budget would fail with ZTS607; the handler reaching one directly would
 // fail with ZTS506.
 
-import type { Effects } from "zigttp:types";
-import { sha256 } from "zigttp:crypto";
+import type { Effects } from "zttp:types";
+import { sha256 } from "zttp:crypto";
 
 function digest(s: string): Effects<string, "crypto"> {
     sha256(s);
@@ -21,5 +21,5 @@ function digest(s: string): Effects<string, "crypto"> {
 }
 
 function handler(req: Request): Effects<Response, "crypto"> {
-    return Response.text(digest("zigttp"));
+    return Response.text(digest("zttp"));
 }

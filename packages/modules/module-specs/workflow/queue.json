@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:queue",
-  "source": "packages/zigts/src/modules/workflow/queue.zig",
+  "specifier": "zttp:queue",
+  "source": "packages/zts/src/modules/workflow/queue.zig",
   "requiredCapabilities": [
     "runtime_callback"
   ],

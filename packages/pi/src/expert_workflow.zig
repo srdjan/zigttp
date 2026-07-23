@@ -1,4 +1,4 @@
-//! Deterministic task routing for `zigttp expert`.
+//! Deterministic task routing for `zttp expert`.
 //!
 //! This module does not decide whether an edit is safe. It only gives the
 //! model a compiler-native route before the first model round-trip so common
@@ -90,7 +90,7 @@ pub fn classify(user_text: []const u8) WorkflowHint {
     }
 
     if (containsAny(user_text, &proof_property_needles) or
-        containsAny(user_text, &.{ "durable workflow", "zigttp:durable" }))
+        containsAny(user_text, &.{ "durable workflow", "zttp:durable" }))
     {
         return .{ .kind = .spec_goal, .confidence = .high };
     }
@@ -105,7 +105,7 @@ pub fn classify(user_text: []const u8) WorkflowHint {
         return .{ .kind = .handler_scaffold, .confidence = .high };
     }
 
-    if (containsAny(user_text, &.{ "env var", "environment variable", "zigttp:env", "secret", "api key" })) {
+    if (containsAny(user_text, &.{ "env var", "environment variable", "zttp:env", "secret", "api key" })) {
         return .{ .kind = .env_feature, .confidence = .medium };
     }
 
@@ -137,28 +137,28 @@ pub fn renderSystemNote(
 fn workflowRoute(kind: TaskKind) []const u8 {
     return switch (kind) {
         .route_add =>
-        \\Use the compiler-native Route Forge path before manual code. First read the target file or list files if the target is unknown, capture `zigts_expert_verify_paths`, and call `pi_forge_route`. Submit its returned `proposed_content` as one `apply_edit` call so the host veto and approval gate own the write.
+        \\Use the compiler-native Route Forge path before manual code. First read the target file or list files if the target is unknown, capture `zts_expert_verify_paths`, and call `pi_forge_route`. Submit its returned `proposed_content` as one `apply_edit` call so the host veto and approval gate own the write.
         ,
         .handler_scaffold =>
         \\Create the smallest canonical handler that satisfies the request. Read nearby handlers first, use live module/rule tools for imports and syntax, then let the compiler veto verify the complete scaffold before apply.
         ,
         .violation_fix =>
-        \\Use compiler diagnostics as the source of truth. Read the target, run `zigts_expert_verify_paths`, call `pi_repair_plan`, dry-run supported plans with `pi_apply_repair_plan` or `pi_goal_candidate`, and edit manually only for unsupported repair intents.
+        \\Use compiler diagnostics as the source of truth. Read the target, run `zts_expert_verify_paths`, call `pi_repair_plan`, dry-run supported plans with `pi_apply_repair_plan` or `pi_goal_candidate`, and edit manually only for unsupported repair intents.
         ,
         .spec_goal =>
         \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
         ,
         .workflow_authoring =>
-        \\Author workflow code from the shipped ZigTS grammar. Call `zigts_expert_modules` for `zigttp:durable`/`zigttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at step depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, dry-run with `zigts_expert_edit_simulate`, confirm the child handler resolves with `zigts_expert_system_proof` (a single-file veto cannot see a dangling child), then inspect `proof.proofTrace.durable_workflow_*` after the veto/proof card.
+        \\Author workflow code from the shipped ZigTS grammar. Call `zts_expert_modules` for `zttp:durable`/`zttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at step depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, dry-run with `zts_expert_edit_simulate`, confirm the child handler resolves with `zts_expert_system_proof` (a single-file veto cannot see a dangling child), then inspect `proof.proofTrace.durable_workflow_*` after the veto/proof card.
         ,
         .sql_feature =>
-        \\Check SQL support before drafting. Read the handler and `zigttp.json`, verify the configured sqlite schema exists, use named parameters supported by the analyzer, and do not retry unchanged if the veto reports missing SQL schema configuration.
+        \\Check SQL support before drafting. Read the handler and `zttp.json`, verify the configured sqlite schema exists, use named parameters supported by the analyzer, and do not retry unchanged if the veto reports missing SQL schema configuration.
         ,
         .auth_jwt =>
-        \\Use the auth module path deliberately. Check `zigts_expert_modules` for `zigttp:auth`, keep bearer tokens and claims out of responses/logs, avoid fallback secrets, and verify no credential leakage after the edit.
+        \\Use the auth module path deliberately. Check `zts_expert_modules` for `zttp:auth`, keep bearer tokens and claims out of responses/logs, avoid fallback secrets, and verify no credential leakage after the edit.
         ,
         .env_feature =>
-        \\Treat environment values as toxic. Check `zigttp:env` with live module tools, avoid fallback secrets, redact in output, and verify no secret leakage before applying the edit.
+        \\Treat environment values as toxic. Check `zttp:env` with live module tools, avoid fallback secrets, redact in output, and verify no secret leakage before applying the edit.
         ,
         .test_generation =>
         \\Use the existing test shape. Read adjacent tests and handler proofs first, draft JSONL from compiler-proven behavior, then submit the complete test file through one `apply_edit` call.
@@ -176,7 +176,7 @@ fn isWorkflowAuthoring(user_text: []const u8) bool {
     // pattern" / "as follows" do not collide via substring. "saga"/"fanout" stay
     // bare because they rarely occur outside workflow prose.
     const has_workflow_surface = containsAny(user_text, &.{
-        "zigttp:workflow",
+        "zttp:workflow",
         "workflow.call",
         "workflow call",
         "workflow queue",
@@ -188,7 +188,7 @@ fn isWorkflowAuthoring(user_text: []const u8) bool {
         "orchestrate",
         "durable handler",
         "durable workflow",
-        "zigttp:durable",
+        "zttp:durable",
         "run()",
         "step()",
         "waitsignal",

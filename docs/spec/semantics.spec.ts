@@ -1,5 +1,5 @@
-// zigts semantics spec - GENERATED from packages/zigts/src/semantics.zig.
-// Do not edit by hand; run `zigts spec-render` to regenerate.
+// zts semantics spec - GENERATED from packages/zts/src/semantics.zig.
+// Do not edit by hand; run `zts spec-render` to regenerate.
 //
 // semanticsHash:   f7b6a0fb20d14e65e7df47bb54963527b00fe2b6a6c9a0a6bbf2d2064318001f
 // irTableHash:     19ac13b87ab1996a21f39fc7464884765854558b9d2337a5ec47ecdd715a2e20

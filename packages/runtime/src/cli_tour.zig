@@ -1,8 +1,8 @@
 //! First-run tour rendering and durable dismissal marker.
 //!
 //! Extracted from dev_cli.zig. The tour text is rendered once per project,
-//! the first time `zigttp dev` is invoked; the marker file at
-//! `.zigttp/tour-shown` records dismissal and is checked on every
+//! the first time `zttp dev` is invoked; the marker file at
+//! `.zttp/tour-shown` records dismissal and is checked on every
 //! subsequent run. Skipped when stderr is not a TTY (CI, redirected logs)
 //! or when the user passes `--no-tour`.
 
@@ -10,9 +10,9 @@ const std = @import("std");
 const shared = @import("cli_shared.zig");
 
 /// Path of the marker file that records "first-run tour was shown."
-/// Once this file exists, `zigttp dev` skips the tour on subsequent runs.
+/// Once this file exists, `zttp dev` skips the tour on subsequent runs.
 pub fn tourMarkerPath() []const u8 {
-    return ".zigttp/tour-shown";
+    return ".zttp/tour-shown";
 }
 
 /// First-run tour copy. One screen, no prompts, dismissed by writing the
@@ -21,7 +21,7 @@ pub fn tourMarkerPath() []const u8 {
 /// the four properties mean and then sees them flip live.
 pub const tour_text =
     \\
-    \\  zigttp dev   proof-aware live reload
+    \\  zttp dev   proof-aware live reload
     \\  ----------------------------------------------------------------------
     \\  every save is recompiled, then proven. the hud frame below shows your
     \\  handler's proof surface in real time. four properties to watch:
@@ -44,7 +44,7 @@ pub const tour_text =
     \\    Trade        each proof paired with what the substrate gave up
     \\    Handover     a copy-pasteable proof certificate for ai agents
     \\
-    \\  this is also why ai coding agents work well with zigttp: every
+    \\  this is also why ai coding agents work well with zttp: every
     \\  restriction is a guarantee the agent can rely on while it refactors.
     \\
     \\
@@ -64,7 +64,7 @@ pub fn touchTourMarkerAt(allocator: std.mem.Allocator, base_dir: []const u8) voi
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    const state_dir = std.fs.path.join(allocator, &.{ base_dir, ".zigttp" }) catch return;
+    const state_dir = std.fs.path.join(allocator, &.{ base_dir, ".zttp" }) catch return;
     defer allocator.free(state_dir);
     std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, state_dir) catch return;
     const path = std.fs.path.join(allocator, &.{ base_dir, tourMarkerPath() }) catch return;
@@ -88,7 +88,7 @@ pub fn skipRequested(argv: []const []const u8) bool {
     return shared.hasFlag(argv, "--no-tour") or shared.hasFlag(argv, "--no-quest");
 }
 
-/// Render the first-run tour exactly once, the first time `zigttp dev` is
+/// Render the first-run tour exactly once, the first time `zttp dev` is
 /// invoked in a project. Dismissal is durable (marker file). Skipped when
 /// stderr is not a TTY (CI, redirected logs) or `--no-quest`/`--no-tour` passed.
 pub fn maybeShowFirstRunTour(allocator: std.mem.Allocator, argv: []const []const u8) void {

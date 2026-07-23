@@ -1,12 +1,12 @@
-//! `zigttp proofs` subcommand. `list` and `show <ref>` render the proof
-//! ledger using the same card renderer as `zigttp deploy`. `show`
+//! `zttp proofs` subcommand. `list` and `show <ref>` render the proof
+//! ledger using the same card renderer as `zttp deploy`. `show`
 //! reconstructs a `DeployReview` over a borrowed historical snapshot.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const proof_ledger = @import("proof_ledger.zig");
-const review = @import("zigttp_proof_review").review;
-const printer_mod = @import("zigttp_proof_review").printer;
+const review = @import("zttp_proof_review").review;
+const printer_mod = @import("zttp_proof_review").printer;
 const bundle_mod = @import("proofs/bundle.zig");
 const pr_gate = @import("proofs/pr_gate.zig");
 const shared = @import("cli_shared.zig");
@@ -73,7 +73,7 @@ pub fn runWith(
     stderr: *std.Io.Writer,
 ) !void {
     const sub = parseSubcommand(argv) catch |err| {
-        try stderr.writeAll("zigttp proofs: unknown subcommand\n\n");
+        try stderr.writeAll("zttp proofs: unknown subcommand\n\n");
         try writeHelp(stderr);
         return err;
     };
@@ -119,11 +119,11 @@ fn gateCommand(
             } else if (std.mem.eql(u8, value, "json")) {
                 opts.format = .json;
             } else {
-                try stderr.writeAll("zigttp proofs gate: --format must be md or json\n");
+                try stderr.writeAll("zttp proofs gate: --format must be md or json\n");
                 return error.UnknownFormat;
             }
         } else {
-            try stderr.print("zigttp proofs gate: unknown argument `{s}`\n", .{arg});
+            try stderr.print("zttp proofs gate: unknown argument `{s}`\n", .{arg});
             return error.UnknownArgument;
         }
     }
@@ -159,7 +159,7 @@ fn bundleCommand(
         } else if (std.mem.eql(u8, arg, "--out")) {
             out_dir = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else {
-            try stderr.print("zigttp proofs bundle: unknown argument '{s}'\n", .{arg});
+            try stderr.print("zttp proofs bundle: unknown argument '{s}'\n", .{arg});
             return error.UnknownArgument;
         }
     }
@@ -179,7 +179,7 @@ fn verifyCommand(
     stderr: *std.Io.Writer,
 ) !void {
     if (argv.len != 1) {
-        try stderr.writeAll("zigttp proofs verify: usage is `verify <bundle-dir>`\n");
+        try stderr.writeAll("zttp proofs verify: usage is `verify <bundle-dir>`\n");
         return error.MissingArgValue;
     }
     bundle_mod.verify(allocator, argv[0], stdout, stderr) catch |err| {
@@ -214,7 +214,7 @@ fn parseSubcommand(argv: []const []const u8) !Subcommand {
 
 fn writeHelp(w: *std.Io.Writer) !void {
     try w.writeAll(
-        \\Usage: zigttp proofs <subcommand>
+        \\Usage: zttp proofs <subcommand>
         \\
         \\Subcommands:
         \\  list             Print the last 10 ledger entries (newest last).
@@ -230,7 +230,7 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   and print a markdown snippet for your README.
         \\                   Flags: [--out PATH] [--inline] [--public-url URL]
         \\                          [--ref REF].
-        \\                   Defaults: --out ./zigttp-proof.svg, --ref HEAD.
+        \\                   Defaults: --out ./zttp-proof.svg, --ref HEAD.
         \\  bundle           Package a contract (and optionally binary and
         \\                   replay artifacts) into a verifiable audit bundle.
         \\                   Flags: --contract PATH --out DIR [--binary PATH]
@@ -247,7 +247,7 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   working tree, --format md.
         \\
         \\Refs may be HEAD, HEAD~N, or a contract sha prefix.
-        \\Ledger file: .zigttp/proofs.jsonl
+        \\Ledger file: .zttp/proofs.jsonl
         \\
     );
 }
@@ -261,7 +261,7 @@ fn listCommand(allocator: std.mem.Allocator, stdout: *std.Io.Writer) !void {
     defer proof_ledger.freeEvents(allocator, events);
 
     if (events.len == 0) {
-        try stdout.writeAll("No proofs recorded yet. Run `zigttp deploy`, `zigttp dev --watch --prove`, or `zigts check` to populate .zigttp/proofs.jsonl.\n");
+        try stdout.writeAll("No proofs recorded yet. Run `zttp deploy`, `zttp dev --watch --prove`, or `zts check` to populate .zttp/proofs.jsonl.\n");
         return;
     }
 
@@ -325,11 +325,11 @@ fn showCommand(
     stderr: *std.Io.Writer,
 ) !void {
     if (rest.len == 0) {
-        try stderr.writeAll("zigttp proofs show requires a ref (HEAD, HEAD~N, or a contract sha prefix).\n");
+        try stderr.writeAll("zttp proofs show requires a ref (HEAD, HEAD~N, or a contract sha prefix).\n");
         return error.MissingRefArgument;
     }
     if (rest.len > 1) {
-        try stderr.writeAll("zigttp proofs show accepts exactly one ref.\n");
+        try stderr.writeAll("zttp proofs show accepts exactly one ref.\n");
         return error.TooManyArguments;
     }
 
@@ -347,11 +347,11 @@ fn diffCommand(
     stderr: *std.Io.Writer,
 ) !void {
     if (rest.len < 2) {
-        try stderr.writeAll("zigttp proofs diff requires two refs: <a> <b> (a = baseline, b = current).\n");
+        try stderr.writeAll("zttp proofs diff requires two refs: <a> <b> (a = baseline, b = current).\n");
         return error.MissingRefArgument;
     }
     if (rest.len > 2) {
-        try stderr.writeAll("zigttp proofs diff accepts exactly two refs.\n");
+        try stderr.writeAll("zttp proofs diff accepts exactly two refs.\n");
         return error.TooManyArguments;
     }
 
@@ -440,7 +440,7 @@ fn exportCommand(
             };
             continue;
         }
-        try stderr.writeAll("zigttp proofs export accepts --format and --ref only.\n");
+        try stderr.writeAll("zttp proofs export accepts --format and --ref only.\n");
         return error.UnknownArgument;
     }
 
@@ -466,7 +466,7 @@ fn exportCommand(
 // badge
 // ---------------------------------------------------------------------------
 
-/// `zigttp proofs badge` is the share artifact for first-time authors. It
+/// `zttp proofs badge` is the share artifact for first-time authors. It
 /// writes an SVG verdict badge for the latest ledger entry and prints the
 /// markdown snippet they can paste into their README. Composes the same
 /// renderSvg path as `proofs export --format svg`; the only new behavior is
@@ -477,7 +477,7 @@ fn badgeCommand(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    var out_path: []const u8 = "./zigttp-proof.svg";
+    var out_path: []const u8 = "./zttp-proof.svg";
     var ref_text: []const u8 = "HEAD";
     var inline_mode: bool = false;
     var public_url: ?[]const u8 = null;
@@ -510,7 +510,7 @@ fn badgeCommand(
             inline_mode = true;
             continue;
         }
-        try stderr.writeAll("zigttp proofs badge accepts --out, --inline, --public-url, --ref only.\n");
+        try stderr.writeAll("zttp proofs badge accepts --out, --inline, --public-url, --ref only.\n");
         return error.UnknownArgument;
     }
 
@@ -538,12 +538,12 @@ fn badgeCommand(
     defer svg_buf.deinit();
     try renderSvg(&svg_buf.writer, &ev.facts, verdict);
 
-    try zigts.file_io.writeFile(allocator, out_path, svg_buf.writer.buffered());
+    try zts.file_io.writeFile(allocator, out_path, svg_buf.writer.buffered());
 
     const link: []const u8 = public_url orelse ev.facts.contract_sha;
     try stdout.print("Wrote {s} ({s}).\n", .{ out_path, verdict.toString() });
     try stdout.print("Paste into your README:\n\n", .{});
-    try stdout.print("[![zigttp verified]({s})]({s})\n", .{ out_path, link });
+    try stdout.print("[![zttp verified]({s})]({s})\n", .{ out_path, link });
 }
 
 fn renderMarkdown(
@@ -892,7 +892,7 @@ test "list: empty ledger prints help-style hint" {
     try runWith(testing.allocator, &.{}, &out.writer, &err.writer);
     const text = out.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, text, "No proofs recorded yet") != null);
-    try testing.expect(std.mem.indexOf(u8, text, ".zigttp/proofs.jsonl") != null);
+    try testing.expect(std.mem.indexOf(u8, text, ".zttp/proofs.jsonl") != null);
 }
 
 test "list: tabulates two events with verdicts" {
@@ -1508,12 +1508,12 @@ test "badge: writes svg file and prints markdown snippet for HEAD" {
     try runWith(testing.allocator, &.{"badge"}, &out.writer, &err.writer);
 
     const stdout_text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, stdout_text, "Wrote ./zigttp-proof.svg") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_text, "Wrote ./zttp-proof.svg") != null);
     try testing.expect(std.mem.indexOf(u8, stdout_text, "(safe).") != null);
-    try testing.expect(std.mem.indexOf(u8, stdout_text, "[![zigttp verified](./zigttp-proof.svg)](sha-only)") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout_text, "[![zttp verified](./zttp-proof.svg)](sha-only)") != null);
 
     // Verify the SVG file was written and contains the expected verdict header.
-    const svg = try zigts.file_io.readFile(testing.allocator, "./zigttp-proof.svg", 64 * 1024);
+    const svg = try zts.file_io.readFile(testing.allocator, "./zttp-proof.svg", 64 * 1024);
     defer testing.allocator.free(svg);
     try testing.expect(std.mem.indexOf(u8, svg, "<svg") != null);
     try testing.expect(std.mem.indexOf(u8, svg, "#22c55e") != null); // safe = green
@@ -1563,7 +1563,7 @@ test "badge: --public-url overrides the snippet link target" {
     try runWith(testing.allocator, &.{ "badge", "--public-url", "https://example.com/h" }, &out.writer, &err.writer);
 
     const text = out.writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, text, "[![zigttp verified](./zigttp-proof.svg)](https://example.com/h)") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[![zttp verified](./zttp-proof.svg)](https://example.com/h)") != null);
 }
 
 test "export md: proof level change renders" {

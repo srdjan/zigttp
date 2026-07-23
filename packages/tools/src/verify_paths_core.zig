@@ -1,13 +1,13 @@
-//! Shared `verify-paths` v1 envelope writer. See docs/zigts-expert-contract.md.
+//! Shared `verify-paths` v1 envelope writer. See docs/zts-expert-contract.md.
 //!
 //! Diagnostics from `precompile.runCheckOnly` are serialized inside the loop
 //! while the per-file CheckResult is still alive, so no cross-iteration
 //! borrowed strings survive into the envelope.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
-const writeJsonString = zigts.handler_contract.writeJsonString;
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
+const writeJsonString = zts.handler_contract.writeJsonString;
 const precompile = @import("precompile.zig");
 const json_diag = precompile.json_diag;
 const expert_meta = @import("expert_meta.zig");
@@ -63,7 +63,7 @@ pub fn collect(
 /// Run full analysis on `paths` and write the v1 JSON envelope to `writer`.
 /// `scratch` is used for per-file CheckResult allocations and an internal
 /// violations buffer; neither outlives this call. The writer's bytes are
-/// the authoritative contract — see docs/zigts-expert-contract.md.
+/// the authoritative contract — see docs/zts-expert-contract.md.
 pub fn writeJsonEnvelope(
     scratch: std.mem.Allocator,
     writer: anytype,
@@ -135,7 +135,7 @@ test "writeJsonEnvelope on a non-existent path emits a ZTS000 envelope" {
     defer buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
 
-    const paths = [_][]const u8{"/tmp/zigts-verify-paths-core-not-real.ts"};
+    const paths = [_][]const u8{"/tmp/zts-verify-paths-core-not-real.ts"};
     const outcome = try writeJsonEnvelope(std.testing.allocator, &aw.writer, &paths);
 
     buf = aw.toArrayList();
@@ -144,7 +144,7 @@ test "writeJsonEnvelope on a non-existent path emits a ZTS000 envelope" {
     try std.testing.expect(!outcome.ok);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ok\":false") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"ZTS000\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "/tmp/zigts-verify-paths-core-not-real.ts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "/tmp/zts-verify-paths-core-not-real.ts") != null);
 }
 
 test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
@@ -157,7 +157,7 @@ test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
     defer tmp_dir.cleanup();
 
     const fixture =
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
         \\  if (secret) {

@@ -1,0 +1,307 @@
+//! Virtual Module Resolver
+//!
+//! Resolves module specifiers at compile time against the unified module
+//! binding registry. Core built-ins remain in-tree under `zttp:*`, while
+//! explicitly registered packaged extensions live under `zttp-ext:*`.
+
+const std = @import("std");
+const object = @import("../../object.zig");
+const context = @import("../../context.zig");
+const gc = @import("../../gc.zig");
+const trace = @import("../../trace.zig");
+const mb = @import("../../module_binding.zig");
+const builtin_modules = @import("../../builtin_modules.zig");
+const module_manifest = @import("../../module_manifest.zig");
+
+/// Effect classification for virtual module functions.
+/// Used by the contract builder to derive handler-level properties
+/// (pure, read_only, retry_safe) at compile time.
+pub const EffectClass = enum {
+    /// Does not modify external state
+    read,
+    /// Modifies external state
+    write,
+    /// Compile-time only, no runtime effect (e.g. guard)
+    none,
+
+    pub fn toString(self: EffectClass) []const u8 {
+        return switch (self) {
+            .read => "read",
+            .write => "write",
+            .none => "none",
+        };
+    }
+};
+
+/// A single exported function from a virtual module.
+pub const ModuleExport = struct {
+    name: []const u8,
+    func: object.NativeFn,
+    arg_count: u8,
+    effect: EffectClass = .read,
+};
+
+/// Resolution result
+pub const ResolveResult = union(enum) {
+    /// Virtual module with native implementations
+    virtual: *const mb.ModuleBinding,
+    /// Relative file import (specifier is the path)
+    file: []const u8,
+    /// Unknown module - compile error
+    unknown: void,
+};
+
+/// Resolve a module specifier.
+pub fn resolve(specifier: []const u8) ResolveResult {
+    if (builtin_modules.fromSpecifier(specifier)) |binding| {
+        return .{ .virtual = binding };
+    }
+
+    if (specifier.len > 0 and (specifier[0] == '.' or specifier[0] == '/')) {
+        return .{ .file = specifier };
+    }
+
+    return .unknown;
+}
+
+/// Register all exports from a virtual module into a JS context.
+/// Called once per import at compile time (before codegen runs).
+pub fn registerVirtualModule(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, base_func);
+    }
+}
+
+/// Register module exports with trace-recording wrappers.
+pub fn registerVirtualModuleTraced(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
+        const func = if (comptime shouldWrapExport(binding, exp))
+            comptime trace.makeTracingWrapper(binding.name, exp.name, base_func)
+        else
+            base_func;
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
+    }
+}
+
+/// Register module exports with replay stubs.
+pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
+        const func = if (comptime isFetchExport(binding, exp))
+            base_func
+        else if (comptime shouldWrapExport(binding, exp))
+            // Pure functions (Law.pure) run for real when no I/O entry was
+            // recorded for the call, so handler tests need not mock them; a
+            // recorded entry is still consumed and replayed.
+            (if (comptime isReplayPure(exp))
+                comptime trace.makeReplayStubWithFallback(binding.name, exp.name, base_func)
+            else
+                comptime trace.makeReplayStub(binding.name, exp.name))
+        else
+            base_func;
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
+    }
+}
+
+/// Register module exports with durable execution wrappers.
+pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
+        const func = if (comptime shouldWrapExport(binding, exp))
+            comptime trace.makeDurableWrapper(binding.name, exp.name, base_func)
+        else
+            base_func;
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
+    }
+}
+
+fn registerNativeExportForBinding(
+    comptime binding: mb.ModuleBinding,
+    comptime exp: mb.FunctionBinding,
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    pool: *object.HiddenClassPool,
+    func: object.NativeFn,
+) !void {
+    // Only the namespaced atom is registered: two virtual modules may export
+    // the same function name (e.g. zttp:queue.send vs zttp:websocket.send),
+    // and a single shared bare-name global cannot resolve both. Import codegen
+    // (importGlobalAtom) always binds `import { fn } from "zttp:module"` to
+    // this namespaced atom, so it is the only reachable path for virtual
+    // module exports.
+    const namespaced_name = comptime binding.specifier ++ module_manifest.namespaced_export_separator ++ exp.name;
+    const namespaced_atom = try ctx.atoms.intern(namespaced_name);
+    try registerNativeExport(ctx, allocator, pool, namespaced_atom, func, exp.arg_count);
+}
+
+fn registerNativeExport(
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    pool: *object.HiddenClassPool,
+    name_atom: object.Atom,
+    func: object.NativeFn,
+    arg_count: u8,
+) !void {
+    const fn_obj = try object.JSObject.createNativeFunction(
+        allocator,
+        pool,
+        ctx.root_class_idx,
+        func,
+        name_atom,
+        arg_count,
+    );
+    var fn_obj_unowned = true;
+    errdefer if (fn_obj_unowned) fn_obj.destroyBuiltin(allocator, pool);
+    try ctx.builtin_objects.append(allocator, fn_obj);
+    fn_obj_unowned = false;
+    try ctx.setGlobal(name_atom, fn_obj.toValue());
+}
+
+fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
+    return !binding.comptime_only and !binding.self_managed_io and func_binding.traceable;
+}
+
+/// A function is replay-pure when running it live during replay is hermetic:
+/// its result depends only on its arguments (and in-process setup like a
+/// compiled schema), with no read of host/external or non-deterministic state.
+/// This is an explicit, audited opt-in (`FunctionBinding.replay_pure`), NOT
+/// inferred from `Law.pure` - the latter is the algebraic "adjacent equal calls
+/// collapse" property, which `env()` satisfies while reading the host
+/// environment. Default false keeps a function replay-stubbed (recorded result
+/// or `undefined`).
+fn isReplayPure(comptime func_binding: mb.FunctionBinding) bool {
+    return func_binding.replay_pure;
+}
+
+fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
+    return std.mem.eql(u8, binding.specifier, "zttp:fetch") and std.mem.eql(u8, func_binding.name, "fetch");
+}
+
+fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
+    // Both branches install the active-module context so `sdk.requireCapability`
+    // sees the binding's declared `required_capabilities`. Skipping the wrap on
+    // the `module_func` path would silently leave every sandbox SDK call with
+    // an empty active context — that was the gap from Wave 1B/2D P0 #3 in the
+    // 2026-05-23 review.
+    if (func_binding.func) |native_fn| {
+        if (binding.required_capabilities.len == 0) return native_fn;
+        return comptime mb.wrapNativeFnWithCapabilities(native_fn, binding.specifier, binding.required_capabilities);
+    }
+    if (func_binding.module_func) |module_fn| {
+        return comptime mb.wrapModuleFnWithCapabilities(module_fn, binding.specifier, binding.required_capabilities);
+    }
+    @compileError("FunctionBinding must set either func or module_func: " ++ func_binding.name);
+}
+
+/// Validate that all import specifiers from a module are actually exported.
+/// Returns the first unresolved specifier name, or null if all resolve.
+pub fn validateImports(binding: *const mb.ModuleBinding, specifier_names: []const []const u8) ?[]const u8 {
+    for (specifier_names) |name| {
+        var found = false;
+        for (binding.exports) |exp| {
+            if (std.mem.eql(u8, exp.name, name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return name;
+    }
+    return null;
+}
+
+test "validateImports accepts known exports" {
+    const binding = builtin_modules.fromSpecifier("zttp:crypto") orelse return error.ExpectedBinding;
+    const names = [_][]const u8{ "sha256", "base64Encode" };
+    try std.testing.expect(validateImports(binding, &names) == null);
+}
+
+test "validateImports reports first missing export" {
+    const binding = builtin_modules.fromSpecifier("zttp:env") orelse return error.ExpectedBinding;
+    const names = [_][]const u8{ "env", "missing" };
+    const missing = validateImports(binding, &names) orelse return error.ExpectedMissingExport;
+    try std.testing.expectEqualStrings("missing", missing);
+}
+
+// ---------------------------------------------------------------------------
+// wrappedExportFn — capability propagation on the module_func path.
+//
+// Wave 1B/2D P0 #3 (2026-05-23 review) flagged that this branch previously
+// short-circuited through `getNativeFn()`, which wraps with empty
+// `required_capabilities`. Any sandbox module declaring caps would then run
+// with an empty active-module context, so every `sdk.requireCapability` call
+// — including the ones inside `sdk.hmacSha256`, `sdk.fillRandom`, and the
+// JWT verifier — would refuse the operation. The test below pins the fixed
+// shape: a `module_func` binding with `.crypto` declared in its parent
+// `ModuleBinding` must observe `.crypto` in the active context.
+// ---------------------------------------------------------------------------
+
+const value = @import("../../value.zig");
+
+test "wrappedExportFn propagates required_capabilities through module_func" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const probe = struct {
+        fn run(_: *mb.ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            // Asserts execute against the active context installed by the
+            // resolver's wrapper, not the test's outer scope.
+            const fake_handle: *mb.ModuleHandle = @ptrFromInt(0x1);
+            if (!mb.hasCapability(fake_handle, .crypto)) return error.MissingCrypto;
+            if (mb.hasCapability(fake_handle, .clock)) return error.UnexpectedClock;
+            return value.JSValue.true_val;
+        }
+    }.run;
+
+    const fb = mb.FunctionBinding{
+        .name = "probe",
+        .module_func = probe,
+        .arg_count = 0,
+    };
+    const binding = mb.ModuleBinding{
+        .specifier = "zttp:test-cap-probe",
+        .name = "test-cap-probe",
+        .required_capabilities = &.{.crypto},
+        .exports = &.{fb},
+    };
+
+    const wrapped = comptime wrappedExportFn(binding, fb);
+    const result = try wrapped(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(result.isTrue());
+    try std.testing.expectEqual(@as(u32, 1), ctx.cost_meter.count(.other));
+}
+
+test "wrappedExportFn leaves func path unwrapped when no capabilities declared" {
+    const native = struct {
+        fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.true_val;
+        }
+    }.run;
+
+    const fb = mb.FunctionBinding{
+        .name = "bare",
+        .func = native,
+        .arg_count = 0,
+    };
+    const binding = mb.ModuleBinding{
+        .specifier = "zttp:test-bare",
+        .name = "test-bare",
+        .exports = &.{fb},
+    };
+
+    const wrapped = comptime wrappedExportFn(binding, fb);
+    // No wrapping means the wrapped pointer is literally the original.
+    try std.testing.expectEqual(@as(object.NativeFn, native), wrapped);
+}

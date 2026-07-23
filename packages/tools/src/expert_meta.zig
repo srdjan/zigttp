@@ -1,13 +1,13 @@
-//! Single source of truth for the `zigts meta` v1 envelope.
-//! See docs/zigts-expert-contract.md.
+//! Single source of truth for the `zts meta` v1 envelope.
+//! See docs/zts-expert-contract.md.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
-const builtin_modules = zigts.builtin_modules;
-const module_manifest = zigts.module_manifest;
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
+const builtin_modules = zts.builtin_modules;
+const module_manifest = zts.module_manifest;
 
-pub const compiler_version = zigts.version.string;
+pub const compiler_version = zts.version.string;
 pub const policy_version = "2026.04.2";
 pub const mode = "embedded";
 
@@ -36,8 +36,8 @@ pub const category_counts: Categories = blk: {
             .verifier => v += 1,
             .policy => p += 1,
             .property => pr += 1,
-            // The v1 `zigts meta` envelope closes `categories` on three keys
-            // (see docs/internals/zigts-expert-contract.md line 102: "new
+            // The v1 `zts meta` envelope closes `categories` on three keys
+            // (see docs/internals/zts-expert-contract.md line 102: "new
             // categories would be a v2 change"). FlowChecker rules carry the
             // `.flow` registry tag but project into the `property` bucket so
             // the v1 invariant `rule_count == verifier + policy + property`
@@ -80,7 +80,7 @@ pub fn writeJson(writer: anytype, info: *const MetaInfo) !void {
 
 pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
     try writer.print(
-        \\zigts policy
+        \\zts policy
         \\  compiler: {s}
         \\  policy:   {s}
         \\  hash:     {s}
@@ -103,7 +103,7 @@ pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
 
 test "compute fills all fields" {
     const info = compute();
-    try std.testing.expectEqualStrings(zigts.version.string, info.compiler_version);
+    try std.testing.expectEqualStrings(zts.version.string, info.compiler_version);
     try std.testing.expectEqualStrings("2026.04.2", info.policy_version);
     try std.testing.expectEqualStrings("embedded", info.mode);
     try std.testing.expectEqual(@as(usize, 64), info.module_registry_hash.len);
@@ -122,7 +122,7 @@ test "writeJson produces parseable v1 envelope" {
     buf = aw.toArrayList();
     const s = buf.items;
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ zigts.version.string ++ "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"compiler_version\":\"" ++ zts.version.string ++ "\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"module_registry_hash\":\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"mode\":\"embedded\"") != null);
@@ -141,8 +141,8 @@ test "writeText emits the human-readable report with pinned versions" {
     buf = aw.toArrayList();
     const s = buf.items;
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "zigts policy") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ zigts.version.string) != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "zts policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "compiler: " ++ zts.version.string) != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "modules:  ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);

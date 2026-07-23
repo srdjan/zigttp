@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
-const handler_policy = zigts.handler_policy;
+const zts = @import("zts");
+const handler_policy = zts.handler_policy;
 
 // -- Trailer format (32 bytes, little-endian, at end of file) --
 //
@@ -542,7 +542,7 @@ fn getFileSize(fd: std.c.fd_t) ?u64 {
     return @intCast(end);
 }
 
-const readFile = zigts.file_io.readFile;
+const readFile = zts.file_io.readFile;
 
 fn writeAllCapability(_: ?*anyopaque, fd: std.c.fd_t, data: []const u8) !void {
     try writeAll(fd, data);
@@ -627,8 +627,8 @@ test "create preserves the previous artifact when a payload write fails" {
     defer allocator.free(output_path);
     const base = "#!/bin/sh\nexit 0\n";
     const old_artifact = "previous runnable artifact\n";
-    try zigts.file_io.writeFile(allocator, base_path, base);
-    try zigts.file_io.writeFile(allocator, output_path, old_artifact);
+    try zts.file_io.writeFile(allocator, base_path, base);
+    try zts.file_io.writeFile(allocator, output_path, old_artifact);
 
     const policy = handler_policy.RuntimePolicy{};
     var failing = FailingArtifactWriter{ .remaining = base.len + 1 };
@@ -666,7 +666,7 @@ test "create produces a runnable mode 0755 artifact" {
     defer allocator.free(base_path);
     const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
     defer allocator.free(output_path);
-    try zigts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
+    try zts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
 
     const previous_umask = std.c.umask(0o022);
     defer _ = std.c.umask(previous_umask);
@@ -678,7 +678,7 @@ test "create produces a runnable mode 0755 artifact" {
     defer allocator.free(output_path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    const stat = try zigts.file_io.fstatFd(fd);
+    const stat = try zts.file_io.fstatFd(fd);
     try std.testing.expectEqual(@as(u32, 0o755), stat.mode & 0o777);
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -706,7 +706,7 @@ test "create respects umask while keeping the artifact executable" {
     defer allocator.free(base_path);
     const output_path = try selfExtractTestPath(allocator, tmp, "artifact-umask");
     defer allocator.free(output_path);
-    try zigts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
+    try zts.file_io.writeFile(allocator, base_path, "#!/bin/sh\nexit 0\n");
 
     const previous_umask = std.c.umask(0o077);
     defer _ = std.c.umask(previous_umask);
@@ -718,7 +718,7 @@ test "create respects umask while keeping the artifact executable" {
     defer allocator.free(output_path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    const stat = try zigts.file_io.fstatFd(fd);
+    const stat = try zts.file_io.fstatFd(fd);
     try std.testing.expectEqual(@as(u32, 0o700), stat.mode & 0o777);
 }
 

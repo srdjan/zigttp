@@ -1,11 +1,11 @@
-//! zigttp:websocket - bidirectional connections with hibernation.
+//! zttp:websocket - bidirectional connections with hibernation.
 //!
 //! Six exports. All dispatch through runtime-owned callbacks installed
-//! by the zigts-side shim. Until installed, each call throws the same
+//! by the zts-side shim. Until installed, each call throws the same
 //! "runtime not installed" error.
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const MODULE_STATE_SLOT: usize = 12; // module_slots.Slot.websocket
 
@@ -26,7 +26,7 @@ pub const WebSocketCallbacks = struct {
 };
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:websocket",
+    .specifier = "zttp:websocket",
     .name = "websocket",
     // .network: send/close write to the peer socket via the runtime callback.
     // .filesystem: attachment serialization may persist hibernation state.
@@ -58,7 +58,7 @@ test "public binding matches the executable WebSocket callback contract" {
 
 fn dispatch(handle: *sdk.ModuleHandle, args: []const sdk.JSValue, comptime field: []const u8) anyerror!sdk.JSValue {
     const state = sdk.getModuleState(handle, WebSocketCallbacks, MODULE_STATE_SLOT) orelse {
-        return sdk.throwError(handle, "Error", "zigttp:websocket runtime not installed");
+        return sdk.throwError(handle, "Error", "zttp:websocket runtime not installed");
     };
     try sdk.requireCapability(handle, .runtime_callback);
     return @field(state, field)(state.runtime_ptr, handle, args);

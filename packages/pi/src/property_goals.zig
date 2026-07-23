@@ -5,10 +5,10 @@
 //! they are structural facts today rather than goal-check / repair-plan goals.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const ui_payload = @import("ui_payload.zig");
 
-const counterexample = zigts.counterexample;
+const counterexample = zts.counterexample;
 
 pub const supported_goals = [_]counterexample.PropertyTag{
     .no_secret_leakage,

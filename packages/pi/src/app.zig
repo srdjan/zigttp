@@ -1,4 +1,4 @@
-//! Top-level entrypoint for `zigttp expert` (developer CLI).
+//! Top-level entrypoint for `zttp expert` (developer CLI).
 
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
@@ -15,23 +15,23 @@ const property_goals = @import("property_goals.zig");
 const models_registry = @import("providers/models.zig");
 const tools_common = @import("tools/common.zig");
 
-const meta_tool = @import("tools/zigts_expert_meta.zig");
-const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
-const canonicalize_tool = @import("tools/zigts_expert_canonicalize.zig");
-const normalize_tool = @import("tools/zigts_expert_normalize.zig");
-const describe_rule_tool = @import("tools/zigts_expert_describe_rule.zig");
-const search_tool = @import("tools/zigts_expert_search.zig");
-const edit_simulate_tool = @import("tools/zigts_expert_edit_simulate.zig");
-const review_patch_tool = @import("tools/zigts_expert_review_patch.zig");
-const prove_patch_tool = @import("tools/zigts_expert_prove_patch.zig");
-const system_proof_tool = @import("tools/zigts_expert_system_proof.zig");
-const features_tool = @import("tools/zigts_expert_features.zig");
-const modules_tool = @import("tools/zigts_expert_modules.zig");
-const verify_modules_tool = @import("tools/zigts_expert_verify_modules.zig");
+const meta_tool = @import("tools/zts_expert_meta.zig");
+const verify_paths_tool = @import("tools/zts_expert_verify_paths.zig");
+const canonicalize_tool = @import("tools/zts_expert_canonicalize.zig");
+const normalize_tool = @import("tools/zts_expert_normalize.zig");
+const describe_rule_tool = @import("tools/zts_expert_describe_rule.zig");
+const search_tool = @import("tools/zts_expert_search.zig");
+const edit_simulate_tool = @import("tools/zts_expert_edit_simulate.zig");
+const review_patch_tool = @import("tools/zts_expert_review_patch.zig");
+const prove_patch_tool = @import("tools/zts_expert_prove_patch.zig");
+const system_proof_tool = @import("tools/zts_expert_system_proof.zig");
+const features_tool = @import("tools/zts_expert_features.zig");
+const modules_tool = @import("tools/zts_expert_modules.zig");
+const verify_modules_tool = @import("tools/zts_expert_verify_modules.zig");
 const workspace_list_files_tool = @import("tools/workspace_list_files.zig");
 const workspace_read_file_tool = @import("tools/workspace_read_file.zig");
 const workspace_search_text_tool = @import("tools/workspace_search_text.zig");
-const zigts_check_tool = @import("tools/zigts_check.zig");
+const zts_check_tool = @import("tools/zts_check.zig");
 const zig_build_step_tool = @import("tools/zig_build_step.zig");
 const zig_test_step_tool = @import("tools/zig_test_step.zig");
 const gen_tests_tool = @import("tools/gen_tests.zig");
@@ -39,7 +39,7 @@ const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
 const pi_goal_candidate_tool = @import("tools/pi_goal_candidate.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
-const ast_rewrite_tool = @import("tools/zigts_expert_ast_rewrite.zig");
+const ast_rewrite_tool = @import("tools/zts_expert_ast_rewrite.zig");
 const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
 const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
 const pi_forge_spec_tool = @import("tools/pi_forge_spec.zig");
@@ -48,9 +48,9 @@ const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
 const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
 const pi_recall_facts_tool = @import("tools/pi_recall_facts.zig");
 const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
-const effects_tool = @import("tools/zigts_expert_effects.zig");
-const narrow_tool = @import("tools/zigts_expert_narrow.zig");
-const ratchet_tool = @import("tools/zigts_expert_ratchet.zig");
+const effects_tool = @import("tools/zts_expert_effects.zig");
+const narrow_tool = @import("tools/zts_expert_narrow.zig");
+const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -72,7 +72,7 @@ pub const equivalence_probe = @import("equivalence_probe.zig");
 pub const capsule_probe = @import("capsule_probe.zig");
 pub const demo_passport = @import("demo_passport.zig");
 
-/// Re-exported so the `zigttp expert` CLI dispatch can fail fast when no
+/// Re-exported so the `zttp expert` CLI dispatch can fail fast when no
 /// model backend is configured, without reaching into `agent.zig` directly.
 pub const envHasModelBackend = agent.envHasModelBackend;
 
@@ -107,7 +107,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, workspace_list_files_tool.tool);
     try reg.register(allocator, workspace_read_file_tool.tool);
     try reg.register(allocator, workspace_search_text_tool.tool);
-    try reg.register(allocator, zigts_check_tool.tool);
+    try reg.register(allocator, zts_check_tool.tool);
     try reg.register(allocator, zig_build_step_tool.tool);
     try reg.register(allocator, zig_test_step_tool.tool);
     try reg.register(allocator, gen_tests_tool.tool);
@@ -131,7 +131,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     return reg;
 }
 
-/// Long flags whose next token is a value. `zigts_main.zig` consults this
+/// Long flags whose next token is a value. `zts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
 pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--model" };
 
@@ -207,7 +207,7 @@ fn runAutoloop(
 
     // Bootstrap a session unless `--no-session` is passed: lets the
     // autoloop's verified_patch and autoloop_outcome events persist to
-    // events.jsonl, so a follow-up `zigttp expert --resume` can open
+    // events.jsonl, so a follow-up `zttp expert --resume` can open
     // the resulting witnesses tab on the same patches. Without
     // session bootstrap the run is in-memory only (the original
     // behaviour, kept for `--no-session`).
@@ -243,7 +243,7 @@ fn runAutoloop(
     try printAutoloopOutcome(allocator, outcome, &session.transcript, handler, goal_slices);
     if (session.session_id) |sid| {
         var stdout_buf: [128]u8 = undefined;
-        const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zigttp expert --resume`)\n", .{sid}) catch "session persisted\n";
+        const line = std.fmt.bufPrint(&stdout_buf, "session: {s} (resume with `zttp expert --resume`)\n", .{sid}) catch "session persisted\n";
         _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
     }
     if (outcome.verdict != .achieved) std.process.exit(1);
@@ -378,7 +378,7 @@ fn setMode(out: *ExpertFlags, val: []const u8) !void {
     return error.UnsupportedMode;
 }
 
-/// Flags parsed from `zigttp expert` argv. `policy == null` means the user
+/// Flags parsed from `zttp expert` argv. `policy == null` means the user
 /// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
 /// (`.ask` for interactive, `.auto_reject` for `--print`).
 pub const ExpertFlags = struct {
@@ -399,7 +399,7 @@ pub const ExpertFlags = struct {
     rpc_mode: bool = false,
     tools_preset: ToolsPreset = .full,
     /// Comma-separated property tags to drive convergence against. When
-    /// non-null, `zigttp expert` short-circuits the conversational run and
+    /// non-null, `zttp expert` short-circuits the conversational run and
     /// invokes the autoloop orchestrator end-to-end.
     goals: ?[]const u8 = null,
     /// Iteration budget for the autoloop. When null, the orchestrator's
@@ -409,7 +409,7 @@ pub const ExpertFlags = struct {
     /// set; ignored otherwise.
     handler: ?[]const u8 = null,
     /// Emit a signed perf-as-proof receipt (`kind=perf` row in
-    /// `.zigttp/proofs.jsonl`) on every applied edit. Default on, matching
+    /// `.zttp/proofs.jsonl`) on every applied edit. Default on, matching
     /// the attestation default; `--no-perf-receipt` opts out. No effect when
     /// the runtime probe is not registered (analyzer-only builds, tests).
     perf_receipt: bool = true,
@@ -544,30 +544,30 @@ test "buildRegistry registers every first-party compiler primitive" {
     defer reg.deinit(testing.allocator);
 
     const expected_names = [_][]const u8{
-        "zigts_expert_meta",
-        "zigts_expert_verify_paths",
-        "zigts_expert_canonicalize",
-        "zigts_expert_normalize",
-        "zigts_expert_describe_rule",
-        "zigts_expert_search",
-        "zigts_expert_edit_simulate",
-        "zigts_expert_review_patch",
-        "zigts_expert_prove_patch",
-        "zigts_expert_system_proof",
-        "zigts_expert_features",
-        "zigts_expert_modules",
-        "zigts_expert_verify_modules",
+        "zts_expert_meta",
+        "zts_expert_verify_paths",
+        "zts_expert_canonicalize",
+        "zts_expert_normalize",
+        "zts_expert_describe_rule",
+        "zts_expert_search",
+        "zts_expert_edit_simulate",
+        "zts_expert_review_patch",
+        "zts_expert_prove_patch",
+        "zts_expert_system_proof",
+        "zts_expert_features",
+        "zts_expert_modules",
+        "zts_expert_verify_modules",
         "workspace_list_files",
         "workspace_read_file",
         "workspace_search_text",
-        "zigts_check",
+        "zts_check",
         "zig_build_step",
         "zig_test_step",
         "workspace_gen_tests",
         "pi_goal_check",
         "pi_repair_plan",
         "pi_apply_repair_plan",
-        "zigts_expert_ast_rewrite",
+        "zts_expert_ast_rewrite",
         "pi_feature_plan",
         "pi_forge_route",
         "pi_forge_spec",
@@ -576,9 +576,9 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_remember_fact",
         "pi_recall_facts",
         "pi_extension_catalog",
-        "zigts_expert_effects",
-        "zigts_expert_narrow",
-        "zigts_expert_ratchet",
+        "zts_expert_effects",
+        "zts_expert_narrow",
+        "zts_expert_ratchet",
     };
 
     for (expected_names) |expected| {
@@ -603,7 +603,7 @@ test "buildRegistry omits the direct feature-plan writer from model tools" {
 
     const process_tools = [_][]const u8{
         "workspace_search_text",
-        "zigts_check",
+        "zts_check",
         "pi_specs_status",
     };
     for (process_tools) |process_tool_name| {
@@ -635,23 +635,23 @@ test "parseExpertFlags: empty argv yields defaults" {
 }
 
 test "parseExpertFlags: --no-perf-receipt opts out" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-perf-receipt" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-perf-receipt" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(false, flags.perf_receipt);
 }
 
 test "parseExpertFlags: equivalence receipt defaults on, --no- opts out" {
-    const default_argv = [_][]const u8{ "zigts", "expert" };
+    const default_argv = [_][]const u8{ "zts", "expert" };
     const default_flags = try parseExpertFlags(default_argv[0..]);
     try testing.expectEqual(true, default_flags.equivalence_receipt);
 
-    const off_argv = [_][]const u8{ "zigts", "expert", "--no-equivalence-receipt" };
+    const off_argv = [_][]const u8{ "zts", "expert", "--no-equivalence-receipt" };
     const off_flags = try parseExpertFlags(off_argv[0..]);
     try testing.expectEqual(false, off_flags.equivalence_receipt);
 }
 
 test "parseExpertFlags: --yes yields auto_approve" {
-    const argv = [_][]const u8{ "zigts", "expert", "--yes" };
+    const argv = [_][]const u8{ "zts", "expert", "--yes" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expectEqual(false, flags.no_session);
@@ -659,13 +659,13 @@ test "parseExpertFlags: --yes yields auto_approve" {
 }
 
 test "parseExpertFlags: --no-edit yields auto_reject" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-edit" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-edit" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(loop.ApprovalPolicy.auto_reject, flags.policy.?);
 }
 
 test "parseExpertFlags: --no-session alone flips only that field" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-session" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-session" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.policy == null);
     try testing.expectEqual(true, flags.no_session);
@@ -673,7 +673,7 @@ test "parseExpertFlags: --no-session alone flips only that field" {
 }
 
 test "parseExpertFlags: --no-persist-tool-output alone flips only that field" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-persist-tool-output" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-persist-tool-output" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
@@ -681,7 +681,7 @@ test "parseExpertFlags: --no-persist-tool-output alone flips only that field" {
 }
 
 test "parseExpertFlags: --yes --no-session --no-persist-tool-output combine" {
-    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-persist-tool-output" };
+    const argv = [_][]const u8{ "zts", "expert", "--yes", "--no-session", "--no-persist-tool-output" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expectEqual(true, flags.no_session);
@@ -689,12 +689,12 @@ test "parseExpertFlags: --yes --no-session --no-persist-tool-output combine" {
 }
 
 test "parseExpertFlags: --yes + --no-edit still errors regardless of session flags" {
-    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-edit" };
+    const argv = [_][]const u8{ "zts", "expert", "--yes", "--no-session", "--no-edit" };
     try testing.expectError(error.MutuallyExclusiveApprovalFlags, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --no-context-files flips only that field" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-context-files" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-context-files" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.no_context_files);
     try testing.expectEqual(false, flags.no_session);
@@ -702,36 +702,36 @@ test "parseExpertFlags: --no-context-files flips only that field" {
 }
 
 test "parseExpertFlags: --no-context-files defaults to false" {
-    const argv = [_][]const u8{ "zigts", "expert" };
+    const argv = [_][]const u8{ "zts", "expert" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(false, flags.no_context_files);
 }
 
 test "parseExpertFlags: --mode rpc sets rpc_mode" {
-    const argv = [_][]const u8{ "zigts", "expert", "--mode", "rpc" };
+    const argv = [_][]const u8{ "zts", "expert", "--mode", "rpc" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.rpc_mode);
     try testing.expectEqual(false, flags.json_mode);
 }
 
 test "parseExpertFlags: --mode=rpc inline form" {
-    const argv = [_][]const u8{ "zigts", "expert", "--mode=rpc" };
+    const argv = [_][]const u8{ "zts", "expert", "--mode=rpc" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.rpc_mode);
 }
 
 test "parseExpertFlags: --mode rpc with --print errors" {
-    const argv = [_][]const u8{ "zigts", "expert", "--mode", "rpc", "--print", "hi" };
+    const argv = [_][]const u8{ "zts", "expert", "--mode", "rpc", "--print", "hi" };
     try testing.expectError(error.RpcModeConflictsWithPrint, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --mode bogus still rejected" {
-    const argv = [_][]const u8{ "zigts", "expert", "--mode", "xml" };
+    const argv = [_][]const u8{ "zts", "expert", "--mode", "xml" };
     try testing.expectError(error.UnsupportedMode, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: unknown --frobnicate is ignored, defaults preserved" {
-    const argv = [_][]const u8{ "zigts", "expert", "--frobnicate" };
+    const argv = [_][]const u8{ "zts", "expert", "--frobnicate" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
@@ -739,14 +739,14 @@ test "parseExpertFlags: unknown --frobnicate is ignored, defaults preserved" {
 }
 
 test "parseExpertFlags: repeated --no-session is idempotent" {
-    const argv = [_][]const u8{ "zigts", "expert", "--no-session", "--no-session" };
+    const argv = [_][]const u8{ "zts", "expert", "--no-session", "--no-session" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.no_session);
     try testing.expect(flags.policy == null);
 }
 
 test "parseExpertFlags: --session-id <id> two-argv form captures value" {
-    const argv = [_][]const u8{ "zigts", "expert", "--session-id", "abc123" };
+    const argv = [_][]const u8{ "zts", "expert", "--session-id", "abc123" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.session_id != null);
     try testing.expectEqualStrings("abc123", flags.session_id.?);
@@ -754,31 +754,31 @@ test "parseExpertFlags: --session-id <id> two-argv form captures value" {
 }
 
 test "parseExpertFlags: --session-id=<id> one-argv form captures value" {
-    const argv = [_][]const u8{ "zigts", "expert", "--session-id=xyz" };
+    const argv = [_][]const u8{ "zts", "expert", "--session-id=xyz" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.session_id != null);
     try testing.expectEqualStrings("xyz", flags.session_id.?);
 }
 
 test "parseExpertFlags: --session-id without a value errors" {
-    const argv = [_][]const u8{ "zigts", "expert", "--session-id" };
+    const argv = [_][]const u8{ "zts", "expert", "--session-id" };
     try testing.expectError(error.MissingSessionId, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --resume alone sets the flag" {
-    const argv = [_][]const u8{ "zigts", "expert", "--resume" };
+    const argv = [_][]const u8{ "zts", "expert", "--resume" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.resume_latest);
     try testing.expect(flags.session_id == null);
 }
 
 test "parseExpertFlags: --resume + --session-id is an error" {
-    const argv = [_][]const u8{ "zigts", "expert", "--resume", "--session-id", "x" };
+    const argv = [_][]const u8{ "zts", "expert", "--resume", "--session-id", "x" };
     try testing.expectError(error.MutuallyExclusiveResumeFlags, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --print \"hello\" captures prompt" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print", "hello" };
+    const argv = [_][]const u8{ "zts", "expert", "--print", "hello" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.print != null);
     try testing.expectEqualStrings("hello", flags.print.?);
@@ -786,42 +786,42 @@ test "parseExpertFlags: --print \"hello\" captures prompt" {
 }
 
 test "parseExpertFlags: --print=hello inline form captures prompt" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print=hello" };
+    const argv = [_][]const u8{ "zts", "expert", "--print=hello" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.print != null);
     try testing.expectEqualStrings("hello", flags.print.?);
 }
 
 test "parseExpertFlags: --print without a value errors MissingPrintPrompt" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print" };
+    const argv = [_][]const u8{ "zts", "expert", "--print" };
     try testing.expectError(error.MissingPrintPrompt, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --mode json without --print errors JsonModeRequiresPrint" {
-    const argv = [_][]const u8{ "zigts", "expert", "--mode", "json" };
+    const argv = [_][]const u8{ "zts", "expert", "--mode", "json" };
     try testing.expectError(error.JsonModeRequiresPrint, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --mode json with --print sets json_mode" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode", "json" };
+    const argv = [_][]const u8{ "zts", "expert", "--print", "x", "--mode", "json" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.json_mode);
     try testing.expect(flags.print != null);
 }
 
 test "parseExpertFlags: --mode=json inline form sets json_mode" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode=json" };
+    const argv = [_][]const u8{ "zts", "expert", "--print", "x", "--mode=json" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.json_mode);
 }
 
 test "parseExpertFlags: --mode bogus errors UnsupportedMode" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode", "bogus" };
+    const argv = [_][]const u8{ "zts", "expert", "--print", "x", "--mode", "bogus" };
     try testing.expectError(error.UnsupportedMode, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --print + --yes combines policy with print" {
-    const argv = [_][]const u8{ "zigts", "expert", "--print", "hello", "--yes" };
+    const argv = [_][]const u8{ "zts", "expert", "--print", "hello", "--yes" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expect(flags.print != null);
@@ -829,14 +829,14 @@ test "parseExpertFlags: --print + --yes combines policy with print" {
 }
 
 test "parseExpertFlags: --continue sets resume_latest like --resume" {
-    const argv = [_][]const u8{ "zigts", "expert", "--continue" };
+    const argv = [_][]const u8{ "zts", "expert", "--continue" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.resume_latest);
     try testing.expect(flags.fork_session_id == null);
 }
 
 test "parseExpertFlags: --fork two-argv form captures id" {
-    const argv = [_][]const u8{ "zigts", "expert", "--fork", "abc123" };
+    const argv = [_][]const u8{ "zts", "expert", "--fork", "abc123" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.fork_session_id != null);
     try testing.expectEqualStrings("abc123", flags.fork_session_id.?);
@@ -844,45 +844,45 @@ test "parseExpertFlags: --fork two-argv form captures id" {
 }
 
 test "parseExpertFlags: --fork=id inline form captures id" {
-    const argv = [_][]const u8{ "zigts", "expert", "--fork=xyz" };
+    const argv = [_][]const u8{ "zts", "expert", "--fork=xyz" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqualStrings("xyz", flags.fork_session_id.?);
 }
 
 test "parseExpertFlags: --fork without value errors MissingForkSessionId" {
-    const argv = [_][]const u8{ "zigts", "expert", "--fork" };
+    const argv = [_][]const u8{ "zts", "expert", "--fork" };
     try testing.expectError(error.MissingForkSessionId, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --fork + --resume errors MutuallyExclusiveForkFlags" {
-    const argv = [_][]const u8{ "zigts", "expert", "--fork", "x", "--resume" };
+    const argv = [_][]const u8{ "zts", "expert", "--fork", "x", "--resume" };
     try testing.expectError(error.MutuallyExclusiveForkFlags, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --fork + --session-id errors MutuallyExclusiveForkFlags" {
-    const argv = [_][]const u8{ "zigts", "expert", "--fork", "x", "--session-id", "y" };
+    const argv = [_][]const u8{ "zts", "expert", "--fork", "x", "--session-id", "y" };
     try testing.expectError(error.MutuallyExclusiveForkFlags, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --tools minimal sets preset" {
-    const argv = [_][]const u8{ "zigts", "expert", "--tools", "minimal" };
+    const argv = [_][]const u8{ "zts", "expert", "--tools", "minimal" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(ToolsPreset.minimal, flags.tools_preset);
 }
 
 test "parseExpertFlags: --tools=full sets preset" {
-    const argv = [_][]const u8{ "zigts", "expert", "--tools=full" };
+    const argv = [_][]const u8{ "zts", "expert", "--tools=full" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(ToolsPreset.full, flags.tools_preset);
 }
 
 test "parseExpertFlags: --tools without value errors MissingToolsPreset" {
-    const argv = [_][]const u8{ "zigts", "expert", "--tools" };
+    const argv = [_][]const u8{ "zts", "expert", "--tools" };
     try testing.expectError(error.MissingToolsPreset, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --tools bad-value errors UnsupportedToolsPreset" {
-    const argv = [_][]const u8{ "zigts", "expert", "--tools", "quantum" };
+    const argv = [_][]const u8{ "zts", "expert", "--tools", "quantum" };
     try testing.expectError(error.UnsupportedToolsPreset, parseExpertFlags(argv[0..]));
 }
 
@@ -890,84 +890,84 @@ test "buildRegistry + dispatchLine end-to-end against every tool" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    var meta_outcome = try repl.dispatchLine(testing.allocator, &reg, "zigts_expert_meta");
+    var meta_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_meta");
     try expectOkContains(&meta_outcome, testing.allocator, "\"compiler_version\"");
 
-    var rule_outcome = try repl.dispatchLine(testing.allocator, &reg, "zigts_expert_describe_rule ZTS303");
+    var rule_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_describe_rule ZTS303");
     try expectOkContains(&rule_outcome, testing.allocator, "\"ZTS303\"");
 
-    var search_outcome = try repl.dispatchLine(testing.allocator, &reg, "zigts_expert_search result");
+    var search_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_search result");
     try expectOkContains(&search_outcome, testing.allocator, "\"code\":");
 }
 
 test "parseExpertFlags: --goal sets goals csv" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "handler.ts", "--goal", "no_secret_leakage,injection_safe" };
+    const argv = [_][]const u8{ "zts", "expert", "--handler", "handler.ts", "--goal", "no_secret_leakage,injection_safe" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqualStrings("no_secret_leakage,injection_safe", flags.goals.?);
     try testing.expectEqualStrings("handler.ts", flags.handler.?);
 }
 
 test "parseExpertFlags: --goal= and --handler= attached forms" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler=h.ts", "--goal=no_secret_leakage" };
+    const argv = [_][]const u8{ "zts", "expert", "--handler=h.ts", "--goal=no_secret_leakage" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqualStrings("no_secret_leakage", flags.goals.?);
     try testing.expectEqualStrings("h.ts", flags.handler.?);
 }
 
 test "parseExpertFlags: --max-iters parses a positive integer" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--max-iters", "12" };
+    const argv = [_][]const u8{ "zts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--max-iters", "12" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(@as(u32, 12), flags.max_iters.?);
 }
 
 test "parseExpertFlags: --max-iters rejects zero" {
-    const argv = [_][]const u8{ "zigts", "expert", "--max-iters", "0" };
+    const argv = [_][]const u8{ "zts", "expert", "--max-iters", "0" };
     try testing.expectError(error.InvalidMaxIters, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --max-iters rejects non-numeric" {
-    const argv = [_][]const u8{ "zigts", "expert", "--max-iters", "abc" };
+    const argv = [_][]const u8{ "zts", "expert", "--max-iters", "abc" };
     try testing.expectError(error.InvalidMaxIters, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --model <id> two-argv form captures the canonical id" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model", "claude-haiku-4-5-20251001" };
+    const argv = [_][]const u8{ "zts", "expert", "--model", "claude-haiku-4-5-20251001" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model != null);
     try testing.expectEqualStrings("claude-haiku-4-5-20251001", flags.model.?);
 }
 
 test "parseExpertFlags: --model=<id> inline form captures the canonical id" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model=claude-sonnet-4-6" };
+    const argv = [_][]const u8{ "zts", "expert", "--model=claude-sonnet-4-6" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model != null);
     try testing.expectEqualStrings("claude-sonnet-4-6", flags.model.?);
 }
 
 test "parseExpertFlags: --model accepts the registered OpenAI default" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-4o-mini" };
+    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-4o-mini" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqualStrings("gpt-4o-mini", flags.model.?);
 }
 
 test "parseExpertFlags: --model defaults to null when absent" {
-    const argv = [_][]const u8{ "zigts", "expert" };
+    const argv = [_][]const u8{ "zts", "expert" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model == null);
 }
 
 test "parseExpertFlags: --model without a value errors MissingModelValue" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model" };
+    const argv = [_][]const u8{ "zts", "expert", "--model" };
     try testing.expectError(error.MissingModelValue, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --model with an unknown id errors UnknownModel" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-9-turbo" };
+    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-9-turbo" };
     try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --model uses exact ids for specialized OpenAI models" {
-    const argv = [_][]const u8{ "zigts", "expert", "--model", "gpt-4o-mini-search-preview" };
+    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-4o-mini-search-preview" };
     try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
 }
 
@@ -979,17 +979,17 @@ test "modeErrorMessage explains provider mismatch without provider payloads" {
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {
-    const argv = [_][]const u8{ "zigts", "expert", "--goal", "no_secret_leakage" };
+    const argv = [_][]const u8{ "zts", "expert", "--goal", "no_secret_leakage" };
     try testing.expectError(error.GoalRequiresHandler, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --goal conflicts with --print" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--print", "hi" };
+    const argv = [_][]const u8{ "zts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--print", "hi" };
     try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --goal conflicts with --mode rpc" {
-    const argv = [_][]const u8{ "zigts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--mode", "rpc" };
+    const argv = [_][]const u8{ "zts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--mode", "rpc" };
     try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
 }
 

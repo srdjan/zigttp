@@ -2,8 +2,8 @@
 // in-process by call()/saga() (no HTTP hop, isolated pooled runtime) - it is
 // never bound to the HTTP port itself, so entry-orchestrator.ts is the only
 // externally-reachable door into this bundle.
-import { routerMatch } from "zigttp:router";
-import type { Spec } from "zigttp:types";
+import { routerMatch } from "zttp:router";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
 

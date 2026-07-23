@@ -1,10 +1,10 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-const contract_diff = zigts.contract_diff;
-const handler_contract = zigts.handler_contract;
-const system_linker = zigts.system_linker;
-const writeJsonString = zigts.json_utils.writeJsonString;
+const contract_diff = zts.contract_diff;
+const handler_contract = zts.handler_contract;
+const system_linker = zts.system_linker;
+const writeJsonString = zts.json_utils.writeJsonString;
 
 const system_analysis = @import("system_analysis.zig");
 const upgrade_verifier = @import("upgrade_verifier.zig");
@@ -723,7 +723,7 @@ fn writeOutputs(allocator: std.mem.Allocator, plan: *const RolloutPlan, output_d
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
         try writeRolloutJson(plan, &aw.writer);
         buf = aw.toArrayList();
-        try zigts.file_io.writeFile(allocator, json_path, buf.items);
+        try zts.file_io.writeFile(allocator, json_path, buf.items);
         std.debug.print("Wrote {s}\n", .{json_path});
     }
 
@@ -736,7 +736,7 @@ fn writeOutputs(allocator: std.mem.Allocator, plan: *const RolloutPlan, output_d
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
         try writeRolloutReport(plan, &aw.writer);
         buf = aw.toArrayList();
-        try zigts.file_io.writeFile(allocator, report_path, buf.items);
+        try zts.file_io.writeFile(allocator, report_path, buf.items);
         std.debug.print("Wrote {s}\n", .{report_path});
     }
 }
@@ -876,7 +876,7 @@ fn boolString(value: bool) []const u8 {
 
 fn printHelp() void {
     std.debug.print(
-        \\Usage: zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
+        \\Usage: zts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
         \\
         \\Prove whether a multi-handler change can be rolled out safely and emit
         \\an ordered deployment plan.
@@ -933,7 +933,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
     defer tmp.cleanup();
 
     const old_gateway =
-        \\import { serviceCall } from "zigttp:service";
+        \\import { serviceCall } from "zttp:service";
         \\
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
@@ -944,7 +944,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\}
     ;
     const old_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -963,7 +963,7 @@ test "rollout degrades additive multi-route updates to needs_review when payload
         \\}
     ;
     const new_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -1012,7 +1012,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
     defer tmp.cleanup();
 
     const old_gateway =
-        \\import { serviceCall } from "zigttp:service";
+        \\import { serviceCall } from "zttp:service";
         \\
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
@@ -1023,7 +1023,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\}
     ;
     const new_gateway =
-        \\import { serviceCall } from "zigttp:service";
+        \\import { serviceCall } from "zttp:service";
         \\
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/profiles/42", {});
@@ -1034,7 +1034,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\}
     ;
     const old_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -1053,7 +1053,7 @@ test "rollout chooses coordinated phase when single-handler cutover is unsafe" {
         \\}
     ;
     const new_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getProfile(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -1097,7 +1097,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
     defer tmp.cleanup();
 
     const gateway =
-        \\import { serviceCall } from "zigttp:service";
+        \\import { serviceCall } from "zttp:service";
         \\
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
@@ -1108,7 +1108,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\}
     ;
     const old_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -1127,7 +1127,7 @@ test "rollout reports breaking when target system leaves an internal edge unreso
         \\}
     ;
     const new_users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getProfile(req: Request): Response {
         \\    return Response.json({ id: "42" });
@@ -1163,7 +1163,7 @@ test "rollout rejects dynamic internal edges at compile time" {
     defer tmp.cleanup();
 
     const old_gateway =
-        \\import { serviceCall } from "zigttp:service";
+        \\import { serviceCall } from "zttp:service";
         \\
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
         \\    const user = serviceCall("users", "GET /api/users/42", {});
@@ -1188,7 +1188,7 @@ test "rollout rejects dynamic internal edges at compile time" {
         \\}
     ;
     const users =
-        \\import { routerMatch } from "zigttp:router";
+        \\import { routerMatch } from "zttp:router";
         \\
         \\function getUser(req: Request): Response {
         \\    return Response.json({ id: "42" });

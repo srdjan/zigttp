@@ -6,7 +6,7 @@
 //! and enforces the configured approval policy.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const proof_enrichment = @import("../proof_enrichment.zig");
@@ -15,10 +15,10 @@ const feature_plan = @import("pi_feature_plan.zig");
 const repair_apply = @import("repair_apply.zig");
 const repair_plan_tool = @import("pi_repair_plan.zig");
 
-const json_utils = zigts.json_utils;
-const ir = zigts.parser;
-const repair_plan = zigts.repair_plan;
-const handler_verifier = zigts.handler_verifier;
+const json_utils = zts.json_utils;
+const ir = zts.parser;
+const repair_plan = zts.repair_plan;
+const handler_verifier = zts.handler_verifier;
 
 const name = "pi_forge_route";
 
@@ -71,7 +71,7 @@ pub fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const source = zigts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
@@ -356,12 +356,12 @@ fn deriveAndApplyFirstVerifierRepair(
     allocator: std.mem.Allocator,
     source: []const u8,
 ) !?RepairAttempt {
-    var strip_result = zigts.strip(allocator, source, .{ .comptime_env = .{} }) catch return null;
+    var strip_result = zts.strip(allocator, source, .{ .comptime_env = .{} }) catch return null;
     defer strip_result.deinit();
 
-    var atoms = zigts.context.AtomTable.init(allocator);
+    var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = zigts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -369,7 +369,7 @@ fn deriveAndApplyFirstVerifierRepair(
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, program_root) orelse return null;
 
-    var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
+    var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
     defer verifier.deinit();
     _ = try verifier.verify(handler_fn);
 

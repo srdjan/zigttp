@@ -1,12 +1,12 @@
-//! `zigts review-patch` subcommand.
+//! `zts review-patch` subcommand.
 //!
 //! Analyzes a file (optionally against a before version) and reports violations.
 //! With `--diff-only`, only violations introduced by the patch are shown.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const edit_simulate = @import("edit_simulate.zig");
-const file_io = zigts.file_io;
+const file_io = zts.file_io;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
@@ -62,7 +62,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         break :blk parsed;
     } else blk: {
         const path = handler_path orelse {
-            const usage = "Usage: zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]\n";
+            const usage = "Usage: zts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]\n";
             _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
             std.process.exit(1);
         };
@@ -148,10 +148,10 @@ fn writeTextReport(writer: anytype, result: *const edit_simulate.SimulateResult)
 
 fn printHelp() void {
     const help =
-        \\zigts review-patch - review a file for violations
+        \\zts review-patch - review a file for violations
         \\
         \\Usage:
-        \\  zigts review-patch <file> [--before <old-file>] [--diff-only] [--json] [--stdin-json]
+        \\  zts review-patch <file> [--before <old-file>] [--diff-only] [--json] [--stdin-json]
         \\
         \\Options:
         \\  --before FILE    Original file for diff-aware analysis

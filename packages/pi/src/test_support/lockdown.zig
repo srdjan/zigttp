@@ -2,7 +2,7 @@
 //! any `.zig` file contains a substring that would signal a runtime
 //! extension-loader slipping in: external SYSTEM.md loaders, dynamic-
 //! library loading, or a scan of
-//! `~/.zigttp/{skills,prompts,extensions,models.json}`.
+//! `~/.zttp/{skills,prompts,extensions,models.json}`.
 //!
 //! Rationale: the pi lockdown policy (docs: "One place, one file, one
 //! rebuild.") relies on nothing being loaded at runtime that was not in
@@ -16,10 +16,10 @@
 const std = @import("std");
 
 const forbidden: []const []const u8 = &.{
-    "~/.zigttp/skills",
-    "~/.zigttp/prompts",
-    "~/.zigttp/extensions",
-    "~/.zigttp/models.json",
+    "~/.zttp/skills",
+    "~/.zttp/prompts",
+    "~/.zttp/extensions",
+    "~/.zttp/models.json",
     "SYSTEM.md",
     "APPEND_SYSTEM.md",
     "dlopen",

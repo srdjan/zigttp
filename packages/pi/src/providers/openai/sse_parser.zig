@@ -342,7 +342,7 @@ test "tool_use cassette: header carries call_id+name, arg deltas concatenate to 
                 .function_call => |h| {
                     saw_header = true;
                     try testing.expectEqualStrings("call_abc123", h.call_id);
-                    try testing.expectEqualStrings("zigts_expert_describe_rule", h.name);
+                    try testing.expectEqualStrings("zts_expert_describe_rule", h.name);
                 },
                 else => {},
             },

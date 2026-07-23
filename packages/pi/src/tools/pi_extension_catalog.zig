@@ -1,24 +1,24 @@
 //! pi_extension_catalog - given a set of partner module manifests, report
-//! which `zigttp-ext:*` specifiers (and optionally exports) are registered
+//! which `zttp-ext:*` specifiers (and optionally exports) are registered
 //! in this session. The agent calls this before suggesting a partner import
 //! so it can flag unregistered specifiers up front instead of letting the
 //! compiler veto catch them after the fact.
 //!
 //! Input:
 //!   {
-//!     "module_manifest_paths": ["path/to/zigttp-module.json", ...],
-//!     "specifier": "zigttp-ext:foo",
+//!     "module_manifest_paths": ["path/to/zttp-module.json", ...],
+//!     "specifier": "zttp-ext:foo",
 //!     "export": "bar"   // optional; checked against the manifest's exports
 //!   }
 //!
 //! Output (llm_text):
 //!   {
 //!     "ok": bool,
-//!     "specifier": "zigttp-ext:foo",
+//!     "specifier": "zttp-ext:foo",
 //!     "specifier_known": bool,
 //!     "export": "bar"|null,
 //!     "export_known": bool,
-//!     "registered_specifiers": ["zigttp-ext:foo", ...],
+//!     "registered_specifiers": ["zttp-ext:foo", ...],
 //!     "parse_errors": [{ "path": "...", "error": "InvalidSpecifier" }, ...]
 //!   }
 //!
@@ -27,9 +27,9 @@
 //! authoritative.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
-const writeJsonString = zigts.handler_contract.writeJsonString;
+const writeJsonString = zts.handler_contract.writeJsonString;
 
 const name = "pi_extension_catalog";
 
@@ -38,8 +38,8 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "extension-catalog",
     .effect = .read_workspace,
     .description =
-    \\Confirm whether a partner specifier (`zigttp-ext:*`) is registered for
-    \\this session via one or more `zigttp-module.json` manifests. Pass the
+    \\Confirm whether a partner specifier (`zttp-ext:*`) is registered for
+    \\this session via one or more `zttp-module.json` manifests. Pass the
     \\manifest paths the user has on disk plus the specifier (and optionally
     \\an export name) the agent is about to suggest. The tool returns
     \\specifier_known + export_known booleans alongside the registered
@@ -86,7 +86,7 @@ fn execute(
         break :blk value.string;
     } else null;
 
-    var registry = zigts.manifest_registry.Registry.init(allocator);
+    var registry = zts.manifest_registry.Registry.init(allocator);
     defer registry.deinit();
 
     var parse_errors: std.ArrayListUnmanaged(ParseError) = .empty;
@@ -153,16 +153,16 @@ fn execute(
 fn loadManifestInto(
     allocator: std.mem.Allocator,
     path: []const u8,
-    registry: *zigts.manifest_registry.Registry,
+    registry: *zts.manifest_registry.Registry,
     parse_errors: *std.ArrayListUnmanaged(ParseError),
 ) !void {
-    const bytes = zigts.file_io.readFile(allocator, path, 256 * 1024) catch |err| {
+    const bytes = zts.file_io.readFile(allocator, path, 256 * 1024) catch |err| {
         try parse_errors.append(allocator, .{ .path = path, .err = @errorName(err) });
         return;
     };
     defer allocator.free(bytes);
 
-    var manifest = zigts.module_manifest.parse(allocator, bytes) catch |err| {
+    var manifest = zts.module_manifest.parse(allocator, bytes) catch |err| {
         try parse_errors.append(allocator, .{ .path = path, .err = @errorName(err) });
         return;
     };
@@ -186,7 +186,7 @@ test "missing specifier returns an error body" {
 }
 
 test "unregistered specifier reports specifier_known=false" {
-    var result = try execute(testing.allocator, &.{"{\"specifier\":\"zigttp-ext:nope\"}"});
+    var result = try execute(testing.allocator, &.{"{\"specifier\":\"zttp-ext:nope\"}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"specifier_known\":false") != null);
@@ -202,15 +202,15 @@ test "registered specifier with export round-trips" {
     const manifest_json =
         \\{
         \\  "schemaVersion": 1,
-        \\  "specifier": "zigttp-ext:foo",
+        \\  "specifier": "zttp-ext:foo",
         \\  "exports": [{ "name": "bar" }]
         \\}
     ;
-    try zigts.file_io.writeFile(testing.allocator, manifest_path, manifest_json);
+    try zts.file_io.writeFile(testing.allocator, manifest_path, manifest_json);
 
     const args_json = try std.fmt.allocPrint(
         testing.allocator,
-        "{{\"module_manifest_paths\":[\"{s}\"],\"specifier\":\"zigttp-ext:foo\",\"export\":\"bar\"}}",
+        "{{\"module_manifest_paths\":[\"{s}\"],\"specifier\":\"zttp-ext:foo\",\"export\":\"bar\"}}",
         .{manifest_path},
     );
     defer testing.allocator.free(args_json);
@@ -220,5 +220,5 @@ test "registered specifier with export round-trips" {
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"specifier_known\":true") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"export_known\":true") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"registered_specifiers\":[\"zigttp-ext:foo\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"registered_specifiers\":[\"zttp-ext:foo\"]") != null);
 }

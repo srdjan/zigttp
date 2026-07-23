@@ -2,7 +2,7 @@
 //! property expectations, and the build-report writer.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const util = @import("precompile_util.zig");
 const buildtime = @import("precompile_buildtime.zig");
 const manifest_alignment = @import("manifest_alignment.zig");
@@ -10,9 +10,9 @@ const property_expectations = @import("property_expectations.zig");
 const build_report = @import("report.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
 
-const handler_contract = zigts.handler_contract;
+const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const readFilePosix = zigts.file_io.readFile;
+const readFilePosix = zts.file_io.readFile;
 
 pub fn runProvePipeline(
     allocator: std.mem.Allocator,
@@ -46,7 +46,7 @@ pub fn runProvePipeline(
         };
         defer allocator.free(prove_trace_source);
 
-        const groups = zigts.trace.parseTraceFile(allocator, prove_trace_source) catch |err| {
+        const groups = zts.trace.parseTraceFile(allocator, prove_trace_source) catch |err| {
             std.debug.print("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
             return err;
         };

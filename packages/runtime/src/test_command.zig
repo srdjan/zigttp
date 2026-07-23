@@ -1,4 +1,4 @@
-//! `zigttp test` — run declarative handler tests for the current project after
+//! `zttp test` — run declarative handler tests for the current project after
 //! a mandatory pre-test analyzer pass. Split out of dev_cli.zig; the dispatch
 //! and error-to-exit-code translation stay in dev_cli.main.
 
@@ -32,7 +32,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer if (project) |*p| p.deinit(allocator);
     const cfg = if (project) |*p| p else return error.NoProjectConfig;
     if (cfg.outbound_hosts.len > 1) {
-        std.debug.print("zigttp test cannot run with multiple outboundHosts; current runtime accepts one.\n", .{});
+        std.debug.print("zttp test cannot run with multiple outboundHosts; current runtime accepts one.\n", .{});
         return error.UnsupportedMultipleOutboundHosts;
     }
 
@@ -44,7 +44,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     if (!doctorPathExists(io, test_path)) {
         std.debug.print("Test fixture not found: {s}\n", .{test_path});
-        std.debug.print("Run `zigttp gen-tests` or create tests/handler.test.jsonl.\n", .{});
+        std.debug.print("Run `zttp gen-tests` or create tests/handler.test.jsonl.\n", .{});
         return error.FileNotFound;
     }
 
@@ -52,7 +52,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer allocator.free(entry);
     if (!doctorPathExists(io, entry)) {
         std.debug.print("Handler not found: {s}\n", .{entry});
-        std.debug.print("Next: update `entry` in zigttp.json or create the handler file.\n", .{});
+        std.debug.print("Next: update `entry` in zttp.json or create the handler file.\n", .{});
         return error.FileNotFound;
     }
 
@@ -61,7 +61,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var check = runDoctorAnalyzerForProject(allocator, cfg, entry, sqlite_path) catch |err| {
         if (!builtin.is_test) {
             std.debug.print("Pre-test check could not run: {}\n", .{err});
-            std.debug.print("Next: run `zigttp check` for full diagnostics.\n", .{});
+            std.debug.print("Next: run `zttp check` for full diagnostics.\n", .{});
         }
         return error.CheckFailed;
     };
@@ -70,7 +70,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (!builtin.is_test) {
             std.debug.print("Pre-test check failed for {s}: {d} error(s)\n", .{ entry, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
-            std.debug.print("Next: fix the errors above, then rerun `zigttp test`.\n", .{});
+            std.debug.print("Next: fix the errors above, then rerun `zttp test`.\n", .{});
         }
         return error.CheckFailed;
     }
@@ -83,15 +83,15 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
 pub fn printTestHelp() void {
     const help =
-        \\zigttp test [tests.jsonl]
+        \\zttp test [tests.jsonl]
         \\
         \\Run declarative handler tests for the current project. If no test
-        \\file is passed, zigttp reads tests/handler.test.jsonl under the
-        \\project root discovered from zigttp.json.
+        \\file is passed, zttp reads tests/handler.test.jsonl under the
+        \\project root discovered from zttp.json.
         \\
         \\Examples:
-        \\  zigttp test
-        \\  zigttp test tests/handler.test.jsonl
+        \\  zttp test
+        \\  zttp test tests/handler.test.jsonl
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -119,7 +119,7 @@ test "testCommand runs analyzer before runtime tests" {
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.createDirPath(io, "tests");
     try tmp.dir.writeFile(io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/handler.ts"
@@ -162,7 +162,7 @@ test "testCommand accepts relative explicit fixture path" {
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.createDirPath(io, "tests");
     try tmp.dir.writeFile(io, .{
-        .sub_path = "zigttp.json",
+        .sub_path = "zttp.json",
         .data =
         \\{
         \\  "entry": "src/handler.ts"

@@ -17,7 +17,7 @@ Measured on Apple M4 Pro with ReleaseFast builds:
 | Deployed local binary | about 4.8 MB |
 
 Cold start is measured from process launch to first complete HTTP response for
-`zigttp serve -e <handler>`. Treat it as a distribution: scheduling jitter and
+`zttp serve -e <handler>`. Treat it as a distribution: scheduling jitter and
 host load move the tail.
 
 Run the in-repo benchmark suite with:
@@ -40,12 +40,12 @@ for investigation.
 
 ## What Affects Latency
 
-- Build-time precompile with `zig build -Dhandler=handler.ts` or `zigttp build`
+- Build-time precompile with `zig build -Dhandler=handler.ts` or `zttp build`
   embeds handler bytecode and removes parse/codegen work from startup.
 - `-n` controls isolated runtime count. The default is derived from CPU count
   and clamped to 8-128.
 - `-m` sets a per-runtime allocator ceiling. The default is no explicit limit.
-- `zigttp:fetch`, `zigttp:service`, `zigttp:io`, durable workflows, and
+- `zttp:fetch`, `zttp:service`, `zttp:io`, durable workflows, and
   WebSocket paths depend on external systems and runtime flags.
 - `--actor-queue` allocates in-memory mailbox rings only when enabled. The
   default serving path pays no queue-worker or mailbox cost, and queued payloads
@@ -72,9 +72,9 @@ commands above when changing engine or runtime hot paths.
 
 ## Deployment Notes
 
-`zigttp deploy` produces a local self-contained binary under
-`.zigttp/deploy/<project-name>`. Run multiple instances behind a reverse proxy
-or platform load balancer for higher throughput. A standalone `zigttp serve`
+`zttp deploy` produces a local self-contained binary under
+`.zttp/deploy/<project-name>`. Run multiple instances behind a reverse proxy
+or platform load balancer for higher throughput. A standalone `zttp serve`
 process should not be exposed directly without the usual network controls.
 
 For current limits and failure behavior, see [Reliability](reliability.md).

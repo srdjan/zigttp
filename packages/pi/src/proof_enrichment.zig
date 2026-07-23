@@ -1,6 +1,6 @@
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const tools_common = @import("tools/common.zig");
@@ -8,11 +8,11 @@ const perf_probe = @import("perf_probe.zig");
 const equivalence_probe = @import("equivalence_probe.zig");
 const capsule_probe = @import("capsule_probe.zig");
 
-const edit_simulate = zigts_cli.edit_simulate;
-const precompile = zigts_cli.precompile;
-const system_analysis = zigts_cli.system_analysis;
-const contract_diff = zigts.contract_diff;
-const HandlerProperties = zigts.handler_contract.HandlerProperties;
+const edit_simulate = zts_cli.edit_simulate;
+const precompile = zts_cli.precompile;
+const system_analysis = zts_cli.system_analysis;
+const contract_diff = zts.contract_diff;
+const HandlerProperties = zts.handler_contract.HandlerProperties;
 
 pub const PatchAnalysis = struct {
     stats: ui_payload.ProofStats,
@@ -246,7 +246,7 @@ pub fn analyzePatch(
     const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
     defer if (system_path) |path| allocator.free(path);
 
-    // zigttp:sql handlers need the project SQL schema to analyze; discover it
+    // zttp:sql handlers need the project SQL schema to analyze; discover it
     // from cwd exactly as the veto does. Without it, simulate() on a SQL handler
     // throws MissingSqlSchema and crashes the receipt build after an otherwise
     // successful apply.
@@ -640,7 +640,7 @@ fn discoverSystemPath(
     while (true) {
         if (!tools_common.isPathInsideRoot(root, current)) break;
 
-        const manifest_path = try std.fs.path.join(allocator, &.{ current, "zigttp.json" });
+        const manifest_path = try std.fs.path.join(allocator, &.{ current, "zttp.json" });
         defer allocator.free(manifest_path);
         if (try pathExists(allocator, manifest_path)) {
             if (try systemPathFromManifest(allocator, current, manifest_path)) |resolved| return resolved;
@@ -706,7 +706,7 @@ fn systemPathFromManifest(
     dir_path: []const u8,
     manifest_path: []const u8,
 ) !?[]u8 {
-    const bytes = zigts.file_io.readFile(allocator, manifest_path, 256 * 1024) catch return null;
+    const bytes = zts.file_io.readFile(allocator, manifest_path, 256 * 1024) catch return null;
     defer allocator.free(bytes);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return null;
@@ -909,7 +909,7 @@ fn stableViolationKey(
     return out;
 }
 
-fn systemProofLevelString(level: zigts.system_linker.ProofLevel) []const u8 {
+fn systemProofLevelString(level: zts.system_linker.ProofLevel) []const u8 {
     return switch (level) {
         .complete => "complete",
         .partial => "partial",
@@ -968,7 +968,7 @@ test "propertiesSnapshot maps full handler properties surface" {
 test "resolveHandlerPath rejects absolute paths outside workspace" {
     try testing.expectError(
         error.PathOutsideWorkspace,
-        resolveHandlerPath(testing.allocator, "/tmp/zigttp-proof-workspace", "/etc/passwd"),
+        resolveHandlerPath(testing.allocator, "/tmp/zttp-proof-workspace", "/etc/passwd"),
     );
 }
 
@@ -1038,7 +1038,7 @@ test "analyzePatch returns prove classification and rule citations" {
         workspace_root,
         "handler.ts",
         "function handler(req: Request): Response { return Response.json({ ok: true }); }",
-        "import { env } from \"zigttp:env\";\nfunction handler(req: Request): Response { return Response.json({ ok: true, region: env(\"REGION\") }); }",
+        "import { env } from \"zttp:env\";\nfunction handler(req: Request): Response { return Response.json({ ok: true, region: env(\"REGION\") }); }",
         &transcript,
     );
     defer analysis.deinit(testing.allocator);

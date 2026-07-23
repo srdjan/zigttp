@@ -212,7 +212,7 @@ test "assemble: tool_use cassette yields tool_calls reply with assembled JSON ar
         .tool_calls => |calls| {
             try testing.expectEqual(@as(usize, 1), calls.len);
             try testing.expectEqualStrings("call_abc123", calls[0].id);
-            try testing.expectEqualStrings("zigts_expert_describe_rule", calls[0].name);
+            try testing.expectEqualStrings("zts_expert_describe_rule", calls[0].name);
             try testing.expectEqualStrings("{\"rule\":\"ZTS303\"}", calls[0].args_json);
         },
         else => return error.TestFailed,
@@ -229,7 +229,7 @@ test "assemble: multi_tool cassette yields both function calls in order with the
         .tool_calls => |calls| {
             try testing.expectEqual(@as(usize, 2), calls.len);
             try testing.expectEqualStrings("call_meta_1", calls[0].id);
-            try testing.expectEqualStrings("zigts_expert_meta", calls[0].name);
+            try testing.expectEqualStrings("zts_expert_meta", calls[0].name);
             try testing.expectEqualStrings("{}", calls[0].args_json);
             try testing.expectEqualStrings("call_search_2", calls[1].id);
             try testing.expectEqualStrings("workspace_search_text", calls[1].name);

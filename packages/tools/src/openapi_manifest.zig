@@ -1,18 +1,18 @@
 //! OpenAPI Manifest Renderer
 //!
 //! Renders an OpenAPI 3.1 document from compiler-proven handler contract facts.
-//! The output only includes routes, schemas, and auth that zigttp can prove.
+//! The output only includes routes, schemas, and auth that zttp can prove.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const handler_contract = zigts.handler_contract;
+const zts = @import("zts");
+const handler_contract = zts.handler_contract;
 
 const HandlerContract = handler_contract.HandlerContract;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
 
 pub const RenderOptions = struct {
     title: ?[]const u8 = null,
-    version: []const u8 = zigts.version.string,
+    version: []const u8 = zts.version.string,
 };
 
 pub fn writeOpenApiJson(
@@ -32,7 +32,7 @@ pub fn writeOpenApiJson(
     try writer.writeAll("  },\n");
 
     if (contract.properties) |p| {
-        try writer.writeAll("  \"x-zigttp-properties\": {\n");
+        try writer.writeAll("  \"x-zttp-properties\": {\n");
         try writer.print("    \"pure\": {s},\n", .{if (p.pure) "true" else "false"});
         try writer.print("    \"readOnly\": {s},\n", .{if (p.read_only) "true" else "false"});
         try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
@@ -92,7 +92,7 @@ pub fn writeOpenApiJson(
                 try writer.writeAll("          }\n");
                 try writer.writeAll("        },\n");
             } else if (candidate.request_schema_refs.items.len > 0 or candidate.request_schema_dynamic or candidate.request_bodies_dynamic) {
-                try writer.writeAll("        \"x-zigttp-requestSchemas\": [");
+                try writer.writeAll("        \"x-zttp-requestSchemas\": [");
                 for (candidate.request_schema_refs.items, 0..) |schema_ref, j| {
                     if (j > 0) try writer.writeAll(", ");
                     try writeJsonString(writer, schema_ref);
@@ -101,13 +101,13 @@ pub fn writeOpenApiJson(
             }
 
             if (candidate.query_params_dynamic) {
-                try writer.writeAll("        \"x-zigttp-queryParamsDynamic\": true,\n");
+                try writer.writeAll("        \"x-zttp-queryParamsDynamic\": true,\n");
             }
             if (candidate.header_params_dynamic) {
-                try writer.writeAll("        \"x-zigttp-headerParamsDynamic\": true,\n");
+                try writer.writeAll("        \"x-zttp-headerParamsDynamic\": true,\n");
             }
             if (candidate.request_bodies_dynamic) {
-                try writer.writeAll("        \"x-zigttp-requestBodiesDynamic\": true,\n");
+                try writer.writeAll("        \"x-zttp-requestBodiesDynamic\": true,\n");
             }
 
             if (candidate.requires_bearer or candidate.requires_jwt) {
@@ -121,7 +121,7 @@ pub fn writeOpenApiJson(
             try writer.writeAll("\n        }");
             if (candidate.responses_dynamic or candidate.response_schema_dynamic) {
                 try writer.writeAll(",\n");
-                try writer.writeAll("        \"x-zigttp-responseSchemaDynamic\": true\n");
+                try writer.writeAll("        \"x-zttp-responseSchemaDynamic\": true\n");
             } else {
                 try writer.writeByte('\n');
             }
@@ -130,7 +130,7 @@ pub fn writeOpenApiJson(
 
         if (route.request_schema_dynamic or contract.api.routes_dynamic) {
             if (wrote_op) try writer.writeAll(",");
-            try writer.writeAll("\n      \"x-zigttp-routesDynamic\": true");
+            try writer.writeAll("\n      \"x-zttp-routesDynamic\": true");
         }
 
         if (wrote_op) try writer.writeAll("\n    ");
@@ -169,7 +169,7 @@ pub fn writeOpenApiJson(
     }
     try writer.writeAll("  },\n");
 
-    try writer.writeAll("  \"x-zigttp\": {\n");
+    try writer.writeAll("  \"x-zttp\": {\n");
     try writer.print("    \"schemasDynamic\": {s},\n", .{if (contract.api.schemas_dynamic) "true" else "false"});
     try writer.print("    \"routesDynamic\": {s},\n", .{if (contract.api.routes_dynamic) "true" else "false"});
     try writer.writeAll("    \"requestSchemas\": [");

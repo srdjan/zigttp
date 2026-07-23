@@ -27,7 +27,7 @@ System sub-handlers need their own contract-derived egress and environment polic
 
 ## What Didn't Work
 
-- Calling `compileHandler` with only `.emit_contract = true` was not behavior-preserving. `ResolveOptions.strict` defaults to `true` in `packages/zigts/src/pipeline.zig`, so an omitted option enables the strict checker.
+- Calling `compileHandler` with only `.emit_contract = true` was not behavior-preserving. `ResolveOptions.strict` defaults to `true` in `packages/zts/src/pipeline.zig`, so an omitted option enables the strict checker.
 - Disabling the boolean or type checker would have weakened real soundness gates. Their failures remain fatal in `packages/tools/src/precompile.zig`.
 
 ## Solution
@@ -41,7 +41,7 @@ pub const CompileOptions = struct {
     // ...
 };
 
-var resolved = try zigts.pipeline.resolve(
+var resolved = try zts.pipeline.resolve(
     allocator,
     parsed,
     .{ .type_env = type_env_storage.envPtr(), .service_type_context = stc_ptr, .strict = opts.strict },
@@ -73,4 +73,4 @@ Strict-profile enforcement and contract extraction are separate concerns. Contra
 
 - `packages/runtime/src/in_process_dispatch.zig`
 - `packages/tools/src/precompile.zig`
-- `packages/zigts/src/pipeline.zig`
+- `packages/zts/src/pipeline.zig`

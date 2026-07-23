@@ -449,7 +449,7 @@ test "resolveInsideWorkspace: write through outside symlink is rejected before w
         resolveInsideWorkspace(allocator, workspace.abs_path, "link-out"),
     );
 
-    const content = try @import("zigts").file_io.readFile(allocator, target, 1024);
+    const content = try @import("zts").file_io.readFile(allocator, target, 1024);
     defer allocator.free(content);
     try testing.expectEqualStrings("before", content);
 }

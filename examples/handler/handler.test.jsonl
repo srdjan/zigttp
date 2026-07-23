@@ -16,7 +16,7 @@
 
 {"type":"test","name":"GET / returns HTML home page"}
 {"type":"request","method":"GET","url":"/","headers":{},"body":null}
-{"type":"expect","status":200,"bodyContains":"zigttp-server"}
+{"type":"expect","status":200,"bodyContains":"zttp-server"}
 
 {"type":"test","name":"GET /unknown returns 404"}
 {"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}

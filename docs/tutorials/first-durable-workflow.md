@@ -12,7 +12,7 @@ zig build
 Use the built binary in the checkout:
 
 ```bash
-export ZIGTTP=./zig-out/bin/zigttp
+export ZTTP=./zig-out/bin/zttp
 ```
 
 ## Read The Proof First
@@ -20,8 +20,8 @@ export ZIGTTP=./zig-out/bin/zigttp
 Start with the compiler receipt before running the server:
 
 ```bash
-$ZIGTTP check examples/workflow/dsl-orchestrator.ts --json
-$ZIGTTP check examples/workflow/dsl-orchestrator.ts --contract
+$ZTTP check examples/workflow/dsl-orchestrator.ts --json
+$ZTTP check examples/workflow/dsl-orchestrator.ts --contract
 ```
 
 The first command emits the proof receipt to stdout. The second command writes
@@ -45,7 +45,7 @@ boundary.
 
 ```bash
 rm -rf ./.durable-demo
-$ZIGTTP serve examples/workflow/dsl-orchestrator.ts \
+$ZTTP serve examples/workflow/dsl-orchestrator.ts \
   --system examples/workflow/system.json \
   --durable ./.durable-demo \
   --workflow-queue \
@@ -92,10 +92,10 @@ or discarding the item and then retrying the *parent* request with the same
 alone only change the queue item's own state:
 
 ```bash
-$ZIGTTP workflow-queue list --durable ./.durable-demo
-$ZIGTTP workflow-queue show --durable ./.durable-demo <item-id>
-$ZIGTTP workflow-queue replay --durable ./.durable-demo <item-id>
-$ZIGTTP workflow-queue discard --durable ./.durable-demo <item-id>
+$ZTTP workflow-queue list --durable ./.durable-demo
+$ZTTP workflow-queue show --durable ./.durable-demo <item-id>
+$ZTTP workflow-queue replay --durable ./.durable-demo <item-id>
+$ZTTP workflow-queue discard --durable ./.durable-demo <item-id>
 curl -H 'Idempotency-Key: queued-1' http://127.0.0.1:3000/
 ```
 
@@ -111,7 +111,7 @@ curl -H 'Idempotency-Key: queued-1' http://127.0.0.1:3000/
 
 ```bash
 rm -rf ./.durable-demo
-$ZIGTTP serve examples/workflow/wait-signal-orchestrator.ts \
+$ZTTP serve examples/workflow/wait-signal-orchestrator.ts \
   --durable ./.durable-demo \
   -p 3000
 ```
@@ -144,9 +144,9 @@ operator replay/discard.
 Compile or deploy a durable handler, then inspect proof surfaces:
 
 ```bash
-$ZIGTTP check examples/workflow/dsl-orchestrator.ts --json
-$ZIGTTP check examples/workflow/dsl-orchestrator.ts --contract
-$ZIGTTP verify http://127.0.0.1:3000 --json
+$ZTTP check examples/workflow/dsl-orchestrator.ts --json
+$ZTTP check examples/workflow/dsl-orchestrator.ts --contract
+$ZTTP verify http://127.0.0.1:3000 --json
 ```
 
 Look for `durableWorkflowProofLevel`, `durableWorkflowRetrySafe`,

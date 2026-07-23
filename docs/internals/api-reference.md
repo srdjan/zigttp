@@ -1,6 +1,6 @@
 # API Reference: Zig Embedding & Advanced Configuration
 
-This document covers advanced server configuration and extending zigttp with native Zig functions. For handler JavaScript API, CLI options, and virtual modules, see [User Guide](../user-guide.md).
+This document covers advanced server configuration and extending zttp with native Zig functions. For handler JavaScript API, CLI options, and virtual modules, see [User Guide](../user-guide.md).
 
 ## Advanced Server Configuration (Zig API)
 
@@ -42,7 +42,7 @@ pub fn main() !void {
             .jit_code_max_bytes = 16 * 1024 * 1024, // Per-context native code cap
         },
     };
-    // For CORS, import `cors` from the `zigttp:http` virtual module in the handler.
+    // For CORS, import `cors` from the `zttp:http` virtual module in the handler.
 
     var server = try Server.init(allocator, config);
     defer server.deinit();
@@ -85,20 +85,20 @@ pub const NativeFn = *const fn(ctx: *Context, this: JSValue, args: []const JSVal
 ### Example: Custom Math Function
 
 ```zig
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-fn mySquare(ctx: *zigts.Context, this: zigts.JSValue, args: []const zigts.JSValue) !zigts.JSValue {
+fn mySquare(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
     if (args.len < 1) {
-        return zigts.JSValue.fromInt(0);
+        return zts.JSValue.fromInt(0);
     }
 
     const num = try args[0].toNumber(ctx);
     const result = num * num;
 
-    return zigts.JSValue.fromFloat(result);
+    return zts.JSValue.fromFloat(result);
 }
 
-pub fn registerCustomFunctions(ctx: *zigts.Context) !void {
+pub fn registerCustomFunctions(ctx: *zts.Context) !void {
     const fn_value = try ctx.createNativeFunction("square", mySquare);
     try ctx.setGlobal("square", fn_value);
 }
@@ -122,27 +122,27 @@ const num: f64 = try value.toNumber(ctx);
 const int: i32 = try value.toInt32(ctx);
 const str: []const u8 = try value.toString(ctx);
 const bool_val: bool = try value.toBoolean(ctx);
-const obj: *zigts.Object = try value.toObject(ctx);
+const obj: *zts.Object = try value.toObject(ctx);
 ```
 
 #### From Zig to JavaScript
 
 ```zig
-const num = zigts.JSValue.fromInt(42);
-const float = zigts.JSValue.fromFloat(3.14);
-const str = try zigts.JSValue.fromString(ctx, "hello");
-const true_val = zigts.JSValue.fromBool(true);
-const null_val = zigts.JSValue.null();
-const undef_val = zigts.JSValue.undefined();
+const num = zts.JSValue.fromInt(42);
+const float = zts.JSValue.fromFloat(3.14);
+const str = try zts.JSValue.fromString(ctx, "hello");
+const true_val = zts.JSValue.fromBool(true);
+const null_val = zts.JSValue.null();
+const undef_val = zts.JSValue.undefined();
 
 const obj = try ctx.createObject();
-try obj.setProperty(ctx, "key", zigts.JSValue.fromInt(123));
+try obj.setProperty(ctx, "key", zts.JSValue.fromInt(123));
 ```
 
 ### Error Handling
 
 ```zig
-fn mayFailFunction(ctx: *zigts.Context, this: zigts.JSValue, args: []const zigts.JSValue) !zigts.JSValue {
+fn mayFailFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
     if (args.len < 1) {
         return ctx.throwError("Missing required argument");
     }
@@ -153,7 +153,7 @@ fn mayFailFunction(ctx: *zigts.Context, this: zigts.JSValue, args: []const zigts
         return ctx.throwError("Value must be non-negative");
     }
 
-    return zigts.JSValue.fromFloat(@sqrt(value));
+    return zts.JSValue.fromFloat(@sqrt(value));
 }
 ```
 

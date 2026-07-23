@@ -2,9 +2,9 @@
 //! zruntime.zig (review finding M1).
 //!
 //! This module owns the request/response/headers JS constructors, the
-//! synchronous `fetch` bridge, durable-fetch caching, the `zigttp:service`
+//! synchronous `fetch` bridge, durable-fetch caching, the `zttp:service`
 //! call path, the parallel-I/O fetch workers, and the low-level
-//! `zigttp:http.request` native. These are plain free functions taking an
+//! `zttp:http.request` native. These are plain free functions taking an
 //! explicit `*Runtime` (or recovering it from the ambient `current_runtime`
 //! threadlocal), so they live here and back-import `Runtime` from zruntime.
 //! zruntime registers the exported native callbacks during binding setup, and
@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const ascii = std.ascii;
-const zq = @import("zigts");
+const zq = @import("zts");
 const zruntime = @import("zruntime.zig");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
@@ -590,7 +590,7 @@ const FetchUrlResult = union(enum) {
 /// `query` object on the init. The base URL stays a compile-time literal so
 /// the contract proves the egress host; the query object carries the dynamic,
 /// possibly user-supplied values (e.g. weather coordinates), percent-encoded
-/// here. Mirrors the appendServiceQuery encoding used by zigttp:service.
+/// here. Mirrors the appendServiceQuery encoding used by zttp:service.
 ///
 /// Returns an owned slice on `rt.allocator` (a copy of the base when there is
 /// no query, for uniform caller ownership), or a JS error response if `query`
@@ -1029,7 +1029,7 @@ const ServiceRoute = struct {
     path_pattern: []const u8,
 };
 
-/// `zigttp:fetch.fetch(url, init?)` callback. Without `init.durable`
+/// `zttp:fetch.fetch(url, init?)` callback. Without `init.durable`
 /// this delegates straight to `fetchSync` so trace recording, replay
 /// mode, and outbound-host policy enforcement all behave identically
 /// across the two surfaces. With `init.durable = { key, retries?,
@@ -1073,7 +1073,7 @@ fn fetchModuleReplay(rt: *Runtime) !zq.JSValue {
     };
     const entry_opt = if (replayNextIs(state, "http", "fetchSync")) blk: {
         const inner = state.nextIO("http", "fetchSync");
-        // Traced zigttp:fetch records fetchSync first, then the outer module
+        // Traced zttp:fetch records fetchSync first, then the outer module
         // wrapper. Replay executes the module implementation directly, so it
         // must consume both rows to keep the cursor aligned.
         if (replayNextIs(state, "fetch", "fetch")) {
@@ -1082,7 +1082,7 @@ fn fetchModuleReplay(rt: *Runtime) !zq.JSValue {
         break :blk inner;
     } else state.nextIO("fetch", "fetch");
     const entry = entry_opt orelse {
-        return createFetchErrorResponse(rt, "ReplayMiss", "no recorded zigttp:fetch response");
+        return createFetchErrorResponse(rt, "ReplayMiss", "no recorded zttp:fetch response");
     };
 
     const status_raw = zq.trace.findJsonIntValue(entry.result_json, "\"status\"") orelse 200;
@@ -1467,7 +1467,7 @@ fn persistResponseToCache(
 }
 
 // ===========================================================================
-// Workflow runtime callbacks (zigttp:workflow)
+// Workflow runtime callbacks (zttp:workflow)
 // ===========================================================================
 
 /// Owned request view parts parsed from a `{ method?, path?, body?, headers? }`

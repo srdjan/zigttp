@@ -66,16 +66,16 @@ bash scripts/test-install-archive-safety.sh
 step "policy hash unchanged  (ci.yml: Assert policy hash unchanged)"
 if [ ! -f policy-hash.txt ]; then
   echo "error: policy-hash.txt is missing - the policy hash baseline must be committed" >&2
-  echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt" >&2
+  echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt" >&2
   exit 1
 fi
 EXPECTED=$(cat policy-hash.txt)
-ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
+ACTUAL=$(./zig-out/bin/zts describe-rule --hash)
 if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "error: policy hash mismatch - rules changed without updating policy-hash.txt" >&2
   echo "Expected: $EXPECTED" >&2
   echo "Actual:   $ACTUAL" >&2
-  echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt" >&2
+  echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt" >&2
   exit 1
 fi
 echo "policy hash OK: $ACTUAL"
@@ -88,7 +88,7 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required for the expert-subsystem check (matches ci.yml)" >&2
   exit 1
 fi
-META=$(./zig-out/bin/zigts meta --json)
+META=$(./zig-out/bin/zts meta --json)
 echo "$META" | jq -e '.rule_count >= 25' >/dev/null
 echo "$META" | jq -e '.policy_hash | length == 64' >/dev/null
 echo "expert subsystem OK"

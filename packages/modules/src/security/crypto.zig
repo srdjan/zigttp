@@ -1,4 +1,4 @@
-//! zigttp:crypto - Cryptographic functions
+//! zttp:crypto - Cryptographic functions
 //!
 //! Exports:
 //!   sha256(data: string) -> string          Hex-encoded SHA-256 hash
@@ -7,10 +7,10 @@
 //!   base64Decode(data: string) -> string    Decoded base64 string
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:crypto",
+    .specifier = "zttp:crypto",
     .name = "crypto",
     .required_capabilities = &.{.crypto},
     .exports = &.{

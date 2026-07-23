@@ -1,6 +1,6 @@
 # Release Checklist
 
-Reusable checklist for cutting a zigttp release. Fill in the metadata, run the
+Reusable checklist for cutting a zttp release. Fill in the metadata, run the
 gates, and keep release notes user-facing.
 
 ## Metadata
@@ -25,7 +25,7 @@ gates, and keep release notes user-facing.
 - [ ] `zig build -Doptimize=ReleaseFast`
 - [ ] `bash scripts/check-semantics-spec.sh`
 - [ ] `zig build bench-check` (advisory; if a single benchmark misses once, rerun immediately and block only if it fails twice)
-- [ ] `./zig-out/bin/zigttp doctor --release --json`
+- [ ] `./zig-out/bin/zttp doctor --release --json`
 
 ## Cross-Compile
 
@@ -35,7 +35,7 @@ cross-compile without Docker.
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu -Dstrip`
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu -Dstrip`
 - [ ] Check release binary sizes with `ls -lh zig-out/bin/`. The release workflow
-      builds with `-Dstrip`; stripped `zigttp` is roughly 8-9 MB (vs ~50 MB
+      builds with `-Dstrip`; stripped `zttp` is roughly 8-9 MB (vs ~50 MB
       unstripped). A debug-sized artifact in the release means `-Dstrip` was dropped.
 
 ## Documentation
@@ -51,10 +51,10 @@ cross-compile without Docker.
 ## Tag And Publish
 
 - [ ] Confirm `build.zig.zon` `.version` matches the intended release.
-- [ ] Confirm `packages/zigts/src/root.zig` `version.string` matches the intended release.
+- [ ] Confirm `packages/zts/src/root.zig` `version.string` matches the intended release.
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` to `[X.Y.Z] - <date>`, open a fresh `[Unreleased]` section, and update the bottom compare-link anchors (`[Unreleased]` base + a new `[X.Y.Z]` link).
 - [ ] Draft release notes from `CHANGELOG.md` and `.github/RELEASE_NOTES_TEMPLATE.md`.
-- [ ] `git tag -a vX.Y.Z -m "zigttp vX.Y.Z"`
+- [ ] `git tag -a vX.Y.Z -m "zttp vX.Y.Z"`
 - [ ] `git push origin vX.Y.Z`
 
 Pushing a tag triggers `.github/workflows/release.yml`, which runs tests,

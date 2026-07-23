@@ -10,37 +10,37 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
-    const enable_studio_opt = b.option(bool, "studio", "Compile the browser proof workbench (zigttp studio) into the dev CLI") orelse false;
-    const enable_edge_opt = b.option(bool, "edge", "Compile the in-process edge runtime (zigttp edge) into the binaries") orelse false;
+    const enable_studio_opt = b.option(bool, "studio", "Compile the browser proof workbench (zttp studio) into the dev CLI") orelse false;
+    const enable_edge_opt = b.option(bool, "edge", "Compile the in-process edge runtime (zttp edge) into the binaries") orelse false;
 
-    const zigts_dep = b.dependency("zigts", .{
+    const zts_dep = b.dependency("zts", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const zigts_mod = zigts_dep.module("zigts");
+    const zts_mod = zts_dep.module("zts");
 
-    const tools_dep = b.dependency("zigttp_tools", .{
+    const tools_dep = b.dependency("zttp_tools", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const zigts_cli_mod = tools_dep.module("zigts_cli");
+    const zts_cli_mod = tools_dep.module("zts_cli");
     const project_config_mod = tools_dep.module("project_config");
 
-    const pi_dep = b.dependency("zigttp_pi", .{
+    const pi_dep = b.dependency("zttp_pi", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
     const pi_app_mod = pi_dep.module("pi_app");
 
-    const proof_review_dep = b.dependency("zigttp_proof_review", .{
+    const proof_review_dep = b.dependency("zttp_proof_review", .{
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram,
     });
-    const proof_review_mod = proof_review_dep.module("zigttp_proof_review");
+    const proof_review_mod = proof_review_dep.module("zttp_proof_review");
 
     const runtime_features = runtimeFeatureOptions(b, .{
         .enable_live_reload = false,
@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    runtime_main.addImport("zigts", zigts_mod);
+    runtime_main.addImport("zts", zts_mod);
     runtime_main.addImport("project_config", project_config_mod);
     runtime_main.addOptions("runtime_feature_options", runtime_features);
 
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    runtime_main_tests.addImport("zigts", zigts_mod);
+    runtime_main_tests.addImport("zts", zts_mod);
     runtime_main_tests.addImport("project_config", project_config_mod);
     runtime_main_tests.addOptions("runtime_feature_options", runtime_features);
 
@@ -78,11 +78,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    cli_main.addImport("zigts", zigts_mod);
-    cli_main.addImport("zigts_cli", zigts_cli_mod);
+    cli_main.addImport("zts", zts_mod);
+    cli_main.addImport("zts_cli", zts_cli_mod);
     cli_main.addImport("pi_app", pi_app_mod);
     cli_main.addImport("project_config", project_config_mod);
-    cli_main.addImport("zigttp_proof_review", proof_review_mod);
+    cli_main.addImport("zttp_proof_review", proof_review_mod);
     cli_main.addOptions("runtime_feature_options", cli_features);
 
     const cli_main_tests = b.addModule("cli_main_tests", .{
@@ -90,11 +90,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    cli_main_tests.addImport("zigts", zigts_mod);
-    cli_main_tests.addImport("zigts_cli", zigts_cli_mod);
+    cli_main_tests.addImport("zts", zts_mod);
+    cli_main_tests.addImport("zts_cli", zts_cli_mod);
     cli_main_tests.addImport("pi_app", pi_app_mod);
     cli_main_tests.addImport("project_config", project_config_mod);
-    cli_main_tests.addImport("zigttp_proof_review", proof_review_mod);
+    cli_main_tests.addImport("zttp_proof_review", proof_review_mod);
     cli_main_tests.addOptions("runtime_feature_options", cli_features);
 
     const zruntime = b.addModule("zruntime", .{
@@ -102,12 +102,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    zruntime.addImport("zigts", zigts_mod);
+    zruntime.addImport("zts", zts_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 
     // test-server: integration suite rooted at server_test.zig. It pulls in
     // server.zig (and transitively engine_adapter -> zruntime / runtime_pool),
-    // so it needs the same imports the runtime template uses: zigts, the
+    // so it needs the same imports the runtime template uses: zts, the
     // feature options, and (attached by the top-level build) the
     // embedded_handler anon import.
     const server_tests = b.addModule("server_tests", .{
@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    server_tests.addImport("zigts", zigts_mod);
+    server_tests.addImport("zts", zts_mod);
     server_tests.addOptions("runtime_feature_options", runtime_features);
 
     const benchmark = b.addModule("benchmark", .{
@@ -125,7 +125,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    benchmark.addImport("zigts", zigts_mod);
+    benchmark.addImport("zts", zts_mod);
     benchmark.addOptions("runtime_feature_options", runtime_features);
 
     const compile_benchmark = b.addModule("compile_benchmark", .{
@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    compile_benchmark.addImport("zigts", zigts_mod);
+    compile_benchmark.addImport("zts", zts_mod);
 }
 
 fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {

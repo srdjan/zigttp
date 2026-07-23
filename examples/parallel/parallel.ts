@@ -1,7 +1,7 @@
-import { parallel } from "zigttp:io";
-import { jwtVerify } from "zigttp:auth";
-import { env } from "zigttp:env";
-import { fetch } from "zigttp:fetch";
+import { parallel } from "zttp:io";
+import { jwtVerify } from "zttp:auth";
+import { env } from "zttp:env";
+import { fetch } from "zttp:fetch";
 
 function handler(req: Request): Response {
   const token = req.headers.get("authorization");

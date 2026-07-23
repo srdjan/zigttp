@@ -1,5 +1,5 @@
 // Should pass: if/else both return
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"result_safe">;
 

@@ -12,13 +12,13 @@
 //! Caps keep the loader bounded: per-file cap prevents a single enormous
 //! AGENTS.md from dominating the prompt budget; total cap is a final guard
 //! before the caller's own persona-cap truncation kicks in. Callers should
-//! treat a `FileTooBig` from `zigts.file_io.readFile` as a signal to skip
+//! treat a `FileTooBig` from `zts.file_io.readFile` as a signal to skip
 //! that file rather than abort the whole load - the caller's prompt cap
 //! still enforces the final envelope.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const file_io = zts.file_io;
 
 pub const Options = struct {
     /// Primary filename checked at each level before the alternate.

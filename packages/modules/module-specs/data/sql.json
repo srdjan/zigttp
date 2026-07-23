@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:sql",
+  "specifier": "zttp:sql",
   "source": "packages/modules/src/data/sql.zig",
   "requiredCapabilities": [
     "sqlite",

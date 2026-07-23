@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Handler verification diagnostics exercised through the current zigttp CLI.
+# Handler verification diagnostics exercised through the current zttp CLI.
 # Run from the project root: bash tests/verify/run_tests.sh
 
 set -u
 
 ZIG="${ZIG:-zig}"
-ZIGTTP="${ZIGTTP:-./zig-out/bin/zigttp}"
+ZTTP="${ZTTP:-./zig-out/bin/zttp}"
 CHECK_TIMEOUT_SECONDS="${CHECK_TIMEOUT_SECONDS:-30}"
 PASS=0
 FAIL=0
 TESTS=0
 
-if [ ! -x "$ZIGTTP" ]; then
+if [ ! -x "$ZTTP" ]; then
     "$ZIG" build >/dev/null
 fi
 
 run_check() {
     perl -e 'my $timeout = shift @ARGV; alarm $timeout; exec @ARGV' \
-        "$CHECK_TIMEOUT_SECONDS" "$ZIGTTP" check "$1" 2>&1
+        "$CHECK_TIMEOUT_SECONDS" "$ZTTP" check "$1" 2>&1
 }
 
 check_pass() {

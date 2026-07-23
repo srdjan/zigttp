@@ -777,7 +777,7 @@ fn emitNotification(
 
 const testing = std.testing;
 const turn = @import("turn.zig");
-const meta_tool = @import("tools/zigts_expert_meta.zig");
+const meta_tool = @import("tools/zts_expert_meta.zig");
 
 const CannedClient = struct {
     reply: turn.AssistantReply,
@@ -1072,7 +1072,7 @@ test "rpc: tools.list returns registered tool names" {
     );
 
     buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "zigts_expert_meta") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "zts_expert_meta") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"effect\":\"analyze\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "test_workspace_writer") == null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "test_process_runner") == null);
@@ -1229,7 +1229,7 @@ test "rpc: tools.invoke with known tool returns {ok, body}" {
 
     try driveWith(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zigts_expert_meta\"}}\n" ++
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zts_expert_meta\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
         &aw,
     );

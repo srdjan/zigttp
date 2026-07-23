@@ -1,13 +1,13 @@
-//! zigts Performance Benchmark Runner
+//! zts Performance Benchmark Runner
 //!
 //! Runs JavaScript benchmarks and times them individually from Zig side.
 //!
 //! Usage: zig build bench
 
 const std = @import("std");
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 const zruntime = @import("zruntime.zig");
-const zq = @import("zigts");
+const zq = @import("zts");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const PerfStats = zq.interpreter.PerfStats;
@@ -183,7 +183,7 @@ const Options = struct {
 };
 
 const usage =
-    "Usage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>] [--bench]\n" ++
+    "Usage: zttp-bench [--json] [--quiet] [--no-compare] [--script <path>] [--bench]\n" ++
     "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
 
 fn writeStdout(data: []const u8) void {
@@ -696,7 +696,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (!options.quiet and !options.json) {
         println("");
-        println("=== zigts JavaScript Engine Benchmarks ===");
+        println("=== zts JavaScript Engine Benchmarks ===");
         println("");
     }
 
@@ -802,7 +802,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
 
     if (!options.quiet and options.compare) {
-        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zigts", "baseline", "Ratio" });
+        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
         println("------------------------------------------------------------");
     }
 

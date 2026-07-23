@@ -2,10 +2,10 @@ function HomePage(): JSX.Element {
     return (
         <html>
             <head>
-                <title>zigttp-server</title>
+                <title>zttp-server</title>
             </head>
             <body>
-                <h1>zigttp-server</h1>
+                <h1>zttp-server</h1>
                 <p>A tiny JavaScript runtime for HTTP handlers.</p>
                 <h2>Endpoints:</h2>
                 <ul>

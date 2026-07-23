@@ -19,7 +19,7 @@
 //! durable `autoloop_outcome` event so the ledger has a receipt either way.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
@@ -690,13 +690,13 @@ fn applyPlans(
         const absolute = try tools_common.resolveInsideWorkspace(allocator, options.workspace_root, options.file);
         defer allocator.free(absolute);
 
-        const before = zigts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
+        const before = zts.file_io.readFile(allocator, absolute, 16 * 1024 * 1024) catch |err| switch (err) {
             error.FileNotFound => try allocator.alloc(u8, 0),
             else => return err,
         };
         defer allocator.free(before);
 
-        zigts.file_io.writeFile(allocator, absolute, candidate.proposed_content) catch {
+        zts.file_io.writeFile(allocator, absolute, candidate.proposed_content) catch {
             return error.FileWriteFailed;
         };
 
@@ -785,7 +785,7 @@ fn applyPlans(
             // transcript as an audit record of the attempt; the autoloop
             // signals regression_blocked up to drive() so the session
             // stops rather than keep trying past a property demotion.
-            zigts.file_io.writeFile(allocator, absolute, before) catch {
+            zts.file_io.writeFile(allocator, absolute, before) catch {
                 return error.FileWriteFailed;
             };
             if (options.events_path) |path| {

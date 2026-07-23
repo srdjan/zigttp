@@ -6,7 +6,7 @@ module: self-extract runtime attestation
 problem_type: security_issue
 component: tooling
 symptoms:
-  - "An artifact editor could widen the runtime capability policy, recompute the CRC-32 trailer, and preserve a valid Zigttp-Attest envelope."
+  - "An artifact editor could widen the runtime capability policy, recompute the CRC-32 trailer, and preserve a valid Zttp-Attest envelope."
   - "The signed claims covered the analyzer policy registry and capability matrix but not the section-4 bytes used for runtime enforcement."
 root_cause: missing_validation
 resolution_type: code_fix
@@ -28,11 +28,11 @@ tags:
 
 ## Problem
 
-A self-extracting Zigttp artifact stores the capability policy it will enforce as section 4 of its appended payload. Loading checks the appended payload with CRC-32, while artifact creation writes a freshly computed checksum into the trailer (`packages/runtime/src/self_extract.zig:90-115`, `packages/runtime/src/self_extract.zig:151-166`). CRC detects accidental corruption, but an attacker who can edit the artifact can change section 4 and recompute the checksum.
+A self-extracting Zttp artifact stores the capability policy it will enforce as section 4 of its appended payload. Loading checks the appended payload with CRC-32, while artifact creation writes a freshly computed checksum into the trailer (`packages/runtime/src/self_extract.zig:90-115`, `packages/runtime/src/self_extract.zig:151-166`). CRC detects accidental corruption, but an attacker who can edit the artifact can change section 4 and recompute the checksum.
 
 The Ed25519 JWS did not commit to those section-4 bytes. Two existing claims sounded related but represented different data: `policySha256` is the diagnostic rule-registry hash, and `capabilityHash` is the contract capability-matrix hash (`packages/runtime/src/attest/build_receipt.zig:72-81`). Neither covered the serialized env names, egress hosts, cache namespaces, or SQL query policy consumed by the deployed runtime.
 
-That left a gap between what the attestation vouched for and what the artifact enforced. An attacker could widen the embedded policy, recompute CRC-32, and preserve a valid `Zigttp-Attest` envelope.
+That left a gap between what the attestation vouched for and what the artifact enforced. An attacker could widen the embedded policy, recompute CRC-32, and preserve a valid `Zttp-Attest` envelope.
 
 This was an artifact data-authenticity failure, not a weakness in Ed25519: integrity-sensitive enforcement bytes were omitted from the signed claims, while CRC-32 provided only accidental-corruption detection.
 

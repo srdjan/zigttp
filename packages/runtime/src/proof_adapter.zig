@@ -16,7 +16,7 @@
 //! are not cached - the key cannot capture the headers those responses vary on.
 
 const std = @import("std");
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 
@@ -347,7 +347,7 @@ pub const ProofCache = struct {
         }
 
         // Mark as cache hit
-        try response.putHeaderBorrowed("X-Zigttp-Proof-Cache", "hit");
+        try response.putHeaderBorrowed("X-Zttp-Proof-Cache", "hit");
 
         return response;
     }
@@ -483,7 +483,7 @@ test "put and get round-trip" {
             try std.testing.expectEqualStrings("application/json", h.value);
             found_content_type = true;
         }
-        if (std.ascii.eqlIgnoreCase(h.key, "X-Zigttp-Proof-Cache")) {
+        if (std.ascii.eqlIgnoreCase(h.key, "X-Zttp-Proof-Cache")) {
             try std.testing.expectEqualStrings("hit", h.value);
             found_proof_cache = true;
         }

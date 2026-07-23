@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:http",
+  "specifier": "zttp:http",
   "source": "packages/modules/src/http/http_mod.zig",
   "requiredCapabilities": [],
   "exports": [

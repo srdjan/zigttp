@@ -1,9 +1,9 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const precompile = @import("precompile.zig");
-const handler_contract = zigts.handler_contract;
-const system_linker = zigts.system_linker;
+const handler_contract = zts.handler_contract;
+const system_linker = zts.system_linker;
 
 pub const CompiledSystem = struct {
     analysis: system_linker.SystemAnalysis,
@@ -20,7 +20,7 @@ pub fn loadCompiledSystem(
     allocator: std.mem.Allocator,
     system_path: []const u8,
 ) !CompiledSystem {
-    const system_json = try zigts.file_io.readFile(allocator, system_path, 1024 * 1024);
+    const system_json = try zts.file_io.readFile(allocator, system_path, 1024 * 1024);
     defer allocator.free(system_json);
 
     var config = try system_linker.parseSystemConfig(allocator, system_json);

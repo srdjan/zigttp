@@ -8,14 +8,14 @@
 const std = @import("std");
 
 /// `dev` and `studio` need the developer CLI because live reload and Studio
-/// are intentionally not linked into `zigttp-runtime`. Re-entering the same
+/// are intentionally not linked into `zttp-runtime`. Re-entering the same
 /// binary with `serve` is safe: `serve` dispatches directly to runtime_cli.
 pub fn resolveDeveloperServeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
     if (program_path.len > 0) return try allocator.dupe(u8, program_path);
-    return try allocator.dupe(u8, "zigttp");
+    return try allocator.dupe(u8, "zttp");
 }
 
-/// `zigttp demo` changes into the generated workspace before re-entering the
+/// `zttp demo` changes into the generated workspace before re-entering the
 /// CLI. Keep bare names bare so PATH lookup still works, but resolve
 /// cwd-relative executable paths while the original cwd is still known.
 pub fn resolveReentryBinaryAfterChdir(
@@ -28,7 +28,7 @@ pub fn resolveReentryBinaryAfterChdir(
     return try std.fs.path.resolve(allocator, &.{ original_cwd, program_path });
 }
 
-/// Find the `zigttp` runtime binary.
+/// Find the `zttp` runtime binary.
 /// Strategy: adjacent to this CLI binary (same directory), then PATH fallback.
 pub fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -39,7 +39,7 @@ pub fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const 
     // invoked us. Dir.access handles both, so we don't need to canonicalize.
     const dir_name = std.fs.path.dirname(program_path) orelse ".";
     const cwd = std.Io.Dir.cwd();
-    const candidates = [_][]const u8{ "zigttp-runtime", "zigttp" };
+    const candidates = [_][]const u8{ "zttp-runtime", "zttp" };
     for (candidates) |name| {
         const candidate = try std.fs.path.join(allocator, &.{ dir_name, name });
         errdefer allocator.free(candidate);
@@ -54,5 +54,5 @@ pub fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const 
         return candidate;
     }
 
-    return try allocator.dupe(u8, "zigttp-runtime");
+    return try allocator.dupe(u8, "zttp-runtime");
 }

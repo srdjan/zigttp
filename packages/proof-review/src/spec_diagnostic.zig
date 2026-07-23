@@ -1,16 +1,16 @@
-//! Shared projection from `zigts.HandlerContract.spec_diagnostics` into the
+//! Shared projection from `zts.HandlerContract.spec_diagnostics` into the
 //! `review.SpecState` shape used by the proof HUD, the studio JSON, the
 //! deploy review card, and the proof ledger. Consumed by both
 //! `live_reload.zig` (per-recompile) and `deploy.zig` (per-deploy review).
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const review = @import("review.zig");
 
 /// Build a transient SpecState for a single declared spec name. Strings
 /// borrow from the contract (zero-allocation); `ReviewFacts.fromProvenFacts`
 /// dupes them when persisting.
-pub fn specStateFor(contract: *const zigts.HandlerContract, name: []const u8) review.SpecState {
+pub fn specStateFor(contract: *const zts.HandlerContract, name: []const u8) review.SpecState {
     for (contract.spec_diagnostics.items) |d| {
         // Author-declared Specs carry one diagnostic per spec_name. The
         // implicit-default profile collapses its undischarged properties into a
@@ -53,7 +53,7 @@ test "joinedSetContains matches a token in the collapsed spec_name set" {
     try std.testing.expect(joinedSetContains("pure", "pure"));
 }
 
-fn specDiagnosticMessage(d: zigts.SpecDiagnostic) []const u8 {
+fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
     return switch (d.kind) {
         .not_discharged => d.suggestion orelse "property not discharged",
         .incompatible_with_import => d.incompatible_module orelse "spec contradicts a virtual-module import",

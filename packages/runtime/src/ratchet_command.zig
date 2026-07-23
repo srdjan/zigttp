@@ -1,4 +1,4 @@
-//! `zigttp ratchet` — Spec-derived monotonicity gate for proven properties.
+//! `zttp ratchet` — Spec-derived monotonicity gate for proven properties.
 //!
 //! Slice 4 of the attest program. The compiler already infers and signs
 //! every handler's proven-property set (`provenSpecs` in contract.json,
@@ -18,17 +18,17 @@
 //! JSON has been retired: the obligation set lives in the compiled
 //! contract, with source `Spec<...>` acting as a narrowing override.
 //!
-//! Waiver signing (a signed file under `.zigttp/waivers/` that lets the
+//! Waiver signing (a signed file under `.zttp/waivers/` that lets the
 //! operator accept a regression with a recorded reason) lands in a
 //! follow-up. The current `check` exits 1 on any unmet declaration; that
 //! is the mechanically-correct default for a ratchet.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const zigts_cli = @import("zigts_cli");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const cli_args = @import("cli_args.zig");
-const precompile = zigts_cli.precompile;
-const HandlerProperties = zigts.handler_contract.HandlerProperties;
+const precompile = zts_cli.precompile;
+const HandlerProperties = zts.handler_contract.HandlerProperties;
 
 /// Source-file size cap for `ratchet show`/`check`. Handlers are
 /// authored, not generated, so 10 MB is generous; this keeps the limit
@@ -62,7 +62,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
         return error.MissingArgument;
     }
     const sub = parseSub(argv[0]) orelse {
-        std.debug.print("zigttp ratchet: unknown subcommand `{s}`\n\n", .{argv[0]});
+        std.debug.print("zttp ratchet: unknown subcommand `{s}`\n\n", .{argv[0]});
         printHelp();
         return error.UnknownSubcommand;
     };
@@ -87,14 +87,14 @@ fn runShow(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
     for (argv) |arg| {
         if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print(
-                "zigttp ratchet show: unknown flag `{s}` (this subcommand takes no flags)\n",
+                "zttp ratchet show: unknown flag `{s}` (this subcommand takes no flags)\n",
                 .{arg},
             );
             return error.UnknownFlag;
         }
         if (handler_path != null) {
             std.debug.print(
-                "zigttp ratchet show: multiple handler paths given (`{s}` then `{s}`)\n",
+                "zttp ratchet show: multiple handler paths given (`{s}` then `{s}`)\n",
                 .{ handler_path.?, arg },
             );
             return error.TooManyArguments;
@@ -103,7 +103,7 @@ fn runShow(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
     }
 
     const handler = handler_path orelse {
-        std.debug.print("zigttp ratchet show: handler path required\n", .{});
+        std.debug.print("zttp ratchet show: handler path required\n", .{});
         return error.MissingArgument;
     };
 
@@ -148,13 +148,13 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
             // (in either `--baseline x` or `--baseline=x` form) wants a
             // loud failure with a pointer to the new shape.
             std.debug.print(
-                \\zigttp ratchet check: `--baseline` has been removed.
+                \\zttp ratchet check: `--baseline` has been removed.
                 \\The baseline is now the active spec set in the compiled
-                \\contract. Drop the flag; use `Spec` from "zigttp:types"
+                \\contract. Drop the flag; use `Spec` from "zttp:types"
                 \\on the handler return type only when you need to narrow
                 \\the default supported set, e.g.
                 \\
-                \\    import type {{ Spec }} from "zigttp:types";
+                \\    import type {{ Spec }} from "zttp:types";
                 \\    type Guardrails = Spec<"pure" | "deterministic">;
                 \\    function handler(req: Request): Response & Guardrails {{ ... }}
                 \\
@@ -163,15 +163,15 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
         }
         if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print(
-                "zigttp ratchet check: unknown flag `{s}`. " ++
-                    "This subcommand takes no flags — see `zigttp ratchet --help`.\n",
+                "zttp ratchet check: unknown flag `{s}`. " ++
+                    "This subcommand takes no flags — see `zttp ratchet --help`.\n",
                 .{arg},
             );
             return error.UnknownFlag;
         }
         if (handler_path != null) {
             std.debug.print(
-                "zigttp ratchet check: multiple handler paths given (`{s}` then `{s}`). " ++
+                "zttp ratchet check: multiple handler paths given (`{s}` then `{s}`). " ++
                     "Ratchet check takes exactly one handler.\n",
                 .{ handler_path.?, arg },
             );
@@ -181,7 +181,7 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
     }
 
     const handler = handler_path orelse {
-        std.debug.print("zigttp ratchet check: handler path required\n", .{});
+        std.debug.print("zttp ratchet check: handler path required\n", .{});
         return error.MissingArgument;
     };
 
@@ -312,7 +312,7 @@ const SpecSets = struct {
 };
 
 fn collectSpecSets(allocator: std.mem.Allocator, handler_path: []const u8) RatchetError!SpecSets {
-    const source = zigts.file_io.readFile(allocator, handler_path, handler_source_limit) catch |err| {
+    const source = zts.file_io.readFile(allocator, handler_path, handler_source_limit) catch |err| {
         std.debug.print("ratchet: failed to read {s}: {s}\n", .{ handler_path, @errorName(err) });
         return error.HandlerCompileFailed;
     };
@@ -386,7 +386,7 @@ test "runCheck holds when every declared spec is proven" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "held.ts",
         .data =
-        \\import type { Spec } from "zigttp:types";
+        \\import type { Spec } from "zttp:types";
         \\type Guardrails = Spec<"pure" | "deterministic">;
         \\function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
@@ -415,7 +415,7 @@ test "runCheck fails when a declared spec is not proven" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "regress.ts",
         .data =
-        \\import type { Spec } from "zigttp:types";
+        \\import type { Spec } from "zttp:types";
         \\type Guardrails = Spec<"fault_covered">;
         \\function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
@@ -531,7 +531,7 @@ test "runCheck fails NonRatchetableSpec when every declared name is non-monotoni
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "egress.ts",
         .data =
-        \\import type { Spec } from "zigttp:types";
+        \\import type { Spec } from "zttp:types";
         \\type Egress = Spec<"has_egress">;
         \\function handler(req: Request): Response & Egress {
         \\    return Response.json({ ok: true });
@@ -563,7 +563,7 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "pure.ts",
         .data =
-        \\import type { Spec } from "zigttp:types";
+        \\import type { Spec } from "zttp:types";
         \\type G = Spec<"pure">;
         \\function handler(req: Request): Response & G {
         \\    return Response.json({ ok: true });
@@ -585,25 +585,25 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
 
 fn printHelp() void {
     std.debug.print(
-        \\zigttp ratchet — Spec-derived monotonicity gate (slice 4 of attest)
+        \\zttp ratchet — Spec-derived monotonicity gate (slice 4 of attest)
         \\
         \\Usage:
-        \\  zigttp ratchet show <handler.ts>
+        \\  zttp ratchet show <handler.ts>
         \\      Compile the handler and print the property set it currently proves.
         \\
-        \\  zigttp ratchet check <handler.ts>
+        \\  zttp ratchet check <handler.ts>
         \\      Compile the handler and diff the active spec obligations against
         \\      the proven property set. Exits 1 if any active spec is not proven.
         \\      A handler with no `Spec<...>` activates every supported spec.
         \\
         \\Declaring obligations:
         \\
-        \\    import type {{ Spec }} from "zigttp:types";
+        \\    import type {{ Spec }} from "zttp:types";
         \\    type Guardrails = Spec<"pure" | "deterministic">;
         \\    function handler(req: Request): Response & Guardrails {{ ... }}
         \\
         \\The proven set is also written to contract.json under `provenSpecs`
-        \\and rides inside the signed Zigttp-Attest JWS, so cross-build diffs
+        \\and rides inside the signed Zttp-Attest JWS, so cross-build diffs
         \\are mechanical and attestable. The active set appears alongside it
         \\under `declaredSpecs`.
         \\

@@ -4,14 +4,14 @@
 # serve subsequent requests. Uses the internal --_debug-panic-path test hook to
 # trigger a real panic on a specific request path inside callHandlerGuarded.
 #
-# Usage: bash scripts/test-panic-isolation.sh [--skip-build] [--zigttp PATH]
+# Usage: bash scripts/test-panic-isolation.sh [--skip-build] [--zttp PATH]
 
 set -euo pipefail
 
 SKIP_BUILD=0
 ZIG="${ZIG:-zig}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ZIGTTP="${ZIGTTP:-$REPO_ROOT/zig-out/bin/zigttp}"
+ZTTP="${ZTTP:-$REPO_ROOT/zig-out/bin/zttp}"
 PORT=$((RANDOM % 1000 + 14000))
 
 while [ "$#" -gt 0 ]; do
@@ -20,9 +20,9 @@ while [ "$#" -gt 0 ]; do
             SKIP_BUILD=1
             shift
             ;;
-        --zigttp)
-            [ "$#" -ge 2 ] || { printf '[panic-isolation] FAIL: --zigttp requires a path\n' >&2; exit 1; }
-            ZIGTTP="$2"
+        --zttp)
+            [ "$#" -ge 2 ] || { printf '[panic-isolation] FAIL: --zttp requires a path\n' >&2; exit 1; }
+            ZTTP="$2"
             shift 2
             ;;
         *)
@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-TMP_DIR=$(mktemp -d -t zigttp-panic-XXXXXX)
+TMP_DIR=$(mktemp -d -t zttp-panic-XXXXXX)
 APP_DIR="$TMP_DIR/panic-app"
 SERVER_LOG="$TMP_DIR/server.log"
 SRV_PID=""
@@ -59,19 +59,19 @@ fail() {
 }
 
 if [ "$SKIP_BUILD" = "1" ]; then
-    step "use existing $ZIGTTP"
+    step "use existing $ZTTP"
 else
-    step "build $ZIGTTP"
+    step "build $ZTTP"
     (cd "$REPO_ROOT" && $ZIG build) || fail "zig build failed"
 fi
-[ -x "$ZIGTTP" ] || fail "missing $ZIGTTP after build"
+[ -x "$ZTTP" ] || fail "missing $ZTTP after build"
 
 step "init test app"
-(cd "$TMP_DIR" && "$ZIGTTP" init "panic-app" >/dev/null) || fail "init failed"
+(cd "$TMP_DIR" && "$ZTTP" init "panic-app" >/dev/null) || fail "init failed"
 [ -f "$APP_DIR/src/handler.ts" ] || fail "handler.ts not created by init"
 
 cat > "$APP_DIR/src/handler.ts" <<'HANDLER'
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "deterministic"
@@ -91,7 +91,7 @@ function handler(req: Request): Response & Guardrails {
 HANDLER
 
 step "start server on :$PORT with panic injection path /crash"
-"$ZIGTTP" serve "$APP_DIR/src/handler.ts" -p "$PORT" --_debug-panic-path /crash \
+"$ZTTP" serve "$APP_DIR/src/handler.ts" -p "$PORT" --_debug-panic-path /crash \
     >"$SERVER_LOG" 2>&1 &
 SRV_PID=$!
 

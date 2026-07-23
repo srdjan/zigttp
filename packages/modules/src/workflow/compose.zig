@@ -1,4 +1,4 @@
-//! zigttp:compose - handler composition primitives.
+//! zttp:compose - handler composition primitives.
 //!
 //! Exports:
 //!   guard(fn) -> fn  (identity at runtime; parser-desugared at compile time)
@@ -7,10 +7,10 @@
 //! Both are compile-time constructs. The parser replaces all usage; the
 //! native fns exist only so `import` resolves.
 
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:compose",
+    .specifier = "zttp:compose",
     .name = "compose",
     .comptime_only = true,
     .exports = &.{

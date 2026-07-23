@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
 const session_events = @import("session/events.zig");
 const session_id_mod = @import("session/session_id.zig");
@@ -7,8 +7,8 @@ const session_paths = @import("session/paths.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
 const ui_payload = @import("ui_payload.zig");
 
-const marker_relpath = ".zigttp/proof-passport-session";
-const dir_marker_relpath = ".zigttp/proof-passport-session-dir";
+const marker_relpath = ".zttp/proof-passport-session";
+const dir_marker_relpath = ".zttp/proof-passport-session-dir";
 
 pub const Step = enum {
     baseline,
@@ -62,8 +62,8 @@ pub fn ensureSession(
     const meta_path = try std.fs.path.join(allocator, &.{ session_dir, "meta.json" });
     errdefer allocator.free(meta_path);
 
-    if (!zigts.file_io.fileExists(allocator, meta_path)) {
-        const policy_hash = zigts.rule_registry.policyHash();
+    if (!zts.file_io.fileExists(allocator, meta_path)) {
+        const policy_hash = zts.rule_registry.policyHash();
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = session_id,
             .workspace_realpath = realpath,
@@ -106,7 +106,7 @@ pub fn resetToBaseline(
 ) !SessionInfo {
     var info = try ensureSession(allocator, workspace_root);
     errdefer info.deinit(allocator);
-    try zigts.file_io.writeFile(allocator, info.events_path, "");
+    try zts.file_io.writeFile(allocator, info.events_path, "");
     try appendBaseline(allocator, info.events_path);
     return info;
 }
@@ -150,7 +150,7 @@ fn appendVerifiedPatch(
 ) !void {
     const before = options.before orelse return error.MissingBeforeSource;
     const after = options.after orelse return error.MissingAfterSource;
-    const policy_hash = zigts.rule_registry.policyHash();
+    const policy_hash = zts.rule_registry.policyHash();
 
     var patch = try proof_enrichment.buildVerifiedPatchPayload(allocator, .{
         .workspace_root = options.workspace_root,
@@ -176,10 +176,10 @@ fn appendDeployed(
     events_path: []const u8,
     deploy_artifact: ?[]const u8,
 ) !void {
-    const artifact = deploy_artifact orelse ".zigttp/deploy/<service>";
+    const artifact = deploy_artifact orelse ".zttp/deploy/<service>";
     const body = try std.fmt.allocPrint(
         allocator,
-        "Proof Passport deploy receipt: ledger .zigttp/proofs.jsonl and local artifact {s} are present.",
+        "Proof Passport deploy receipt: ledger .zttp/proofs.jsonl and local artifact {s} are present.",
         .{artifact},
     );
     defer allocator.free(body);
@@ -193,7 +193,7 @@ fn readOrCreateSessionId(
     const marker_path = try std.fs.path.join(allocator, &.{ workspace_root, marker_relpath });
     defer allocator.free(marker_path);
 
-    if (zigts.file_io.readFile(allocator, marker_path, 4096)) |raw| {
+    if (zts.file_io.readFile(allocator, marker_path, 4096)) |raw| {
         defer allocator.free(raw);
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len > 0) return try allocator.dupe(u8, trimmed);
@@ -203,7 +203,7 @@ fn readOrCreateSessionId(
     errdefer allocator.free(id);
     const line = try std.fmt.allocPrint(allocator, "{s}\n", .{id});
     defer allocator.free(line);
-    try zigts.file_io.writeFile(allocator, marker_path, line);
+    try zts.file_io.writeFile(allocator, marker_path, line);
     return id;
 }
 
@@ -215,7 +215,7 @@ fn readOrCreateSessionDir(
     const marker_path = try std.fs.path.join(allocator, &.{ workspace_root, dir_marker_relpath });
     defer allocator.free(marker_path);
 
-    if (zigts.file_io.readFile(allocator, marker_path, 4096)) |raw| {
+    if (zts.file_io.readFile(allocator, marker_path, 4096)) |raw| {
         defer allocator.free(raw);
         const trimmed = std.mem.trim(u8, raw, " \t\r\n");
         if (trimmed.len > 0) return try allocator.dupe(u8, trimmed);
@@ -225,7 +225,7 @@ fn readOrCreateSessionDir(
     errdefer allocator.free(session_dir);
     const line = try std.fmt.allocPrint(allocator, "{s}\n", .{session_dir});
     defer allocator.free(line);
-    try zigts.file_io.writeFile(allocator, marker_path, line);
+    try zts.file_io.writeFile(allocator, marker_path, line);
     return session_dir;
 }
 
@@ -244,7 +244,7 @@ fn buildExpertCommand(
     defer allocator.free(quoted_root);
     const quoted_id = try shellQuote(allocator, session_id);
     defer allocator.free(quoted_id);
-    return try std.fmt.allocPrint(allocator, "cd {s} && zigttp expert --session-id {s}", .{ quoted_root, quoted_id });
+    return try std.fmt.allocPrint(allocator, "cd {s} && zttp expert --session-id {s}", .{ quoted_root, quoted_id });
 }
 
 fn shellQuote(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
@@ -274,5 +274,5 @@ test "demo passport expert command shell-quotes workspace and session" {
     const allocator = testing.allocator;
     const command = try buildExpertCommand(allocator, "/tmp/proof demo", "abc'123");
     defer allocator.free(command);
-    try testing.expectEqualStrings("cd '/tmp/proof demo' && zigttp expert --session-id 'abc'\\''123'", command);
+    try testing.expectEqualStrings("cd '/tmp/proof demo' && zttp expert --session-id 'abc'\\''123'", command);
 }

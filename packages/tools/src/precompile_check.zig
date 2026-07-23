@@ -4,9 +4,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zigts = @import("zigts");
+const zts = @import("zts");
 
-const handler_contract = zigts.handler_contract;
+const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
 const json_diag = @import("json_diagnostics.zig");
 
@@ -94,7 +94,7 @@ pub const CheckResult = struct {
 
 /// Walk the flow_checker diagnostics, materialise a counterexample witness
 /// for each one that maps to a tracked PropertyTag, and persist it to
-/// `.zigttp/witnesses/<short_hash>/`. Failures here never block the
+/// `.zttp/witnesses/<short_hash>/`. Failures here never block the
 /// analysis result; the corpus is best-effort persistence. Returns the
 /// number of pinned witnesses re-fired by this build, which the live
 /// reload HUD surfaces as a regression toast.
@@ -104,8 +104,8 @@ pub const CheckResult = struct {
 /// branch below, keeping the `witness_corpus` subtree out of the module graph.
 pub fn persistFlowWitnesses(
     allocator: std.mem.Allocator,
-    flow_diags: []const zigts.flow_checker.Diagnostic,
-    ir_view: zigts.parser.IrView,
+    flow_diags: []const zts.flow_checker.Diagnostic,
+    ir_view: zts.parser.IrView,
     handler_path: []const u8,
 ) usize {
     if (comptime builtin.target.os.tag != .freestanding) {
@@ -116,26 +116,26 @@ pub fn persistFlowWitnesses(
 
 fn persistFlowWitnessesNative(
     allocator: std.mem.Allocator,
-    flow_diags: []const zigts.flow_checker.Diagnostic,
-    ir_view: zigts.parser.IrView,
+    flow_diags: []const zts.flow_checker.Diagnostic,
+    ir_view: zts.parser.IrView,
     handler_path: []const u8,
 ) usize {
     if (flow_diags.len == 0) return 0;
 
-    const corpus_dir = zigts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
+    const corpus_dir = zts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
     defer allocator.free(corpus_dir);
-    zigts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return 0;
+    zts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return 0;
 
     var pinned_regressions: usize = 0;
     for (flow_diags) |diag| {
-        const tag = zigts.flow_checker.propertyTagForKind(diag.kind) orelse continue;
+        const tag = zts.flow_checker.propertyTagForKind(diag.kind) orelse continue;
         const loc = ir_view.getLoc(diag.node) orelse continue;
-        const constraints: []const zigts.counterexample.WitnessConstraint =
+        const constraints: []const zts.counterexample.WitnessConstraint =
             if (diag.witness) |wit| wit.path_constraints else &.{};
-        const io_calls: []const zigts.counterexample.TrackedIoCall =
+        const io_calls: []const zts.counterexample.TrackedIoCall =
             if (diag.witness) |wit| wit.io_calls else &.{};
 
-        var witness = zigts.counterexample.solve(allocator, .{
+        var witness = zts.counterexample.solve(allocator, .{
             .property = tag,
             .origin = .{ .line = loc.line, .column = loc.column },
             .sink = .{ .line = loc.line, .column = loc.column },
@@ -145,14 +145,14 @@ fn persistFlowWitnessesNative(
         }) catch continue;
         defer witness.deinit(allocator);
 
-        if (zigts.witness_corpus.persist(allocator, corpus_dir, witness)) |pres| {
+        if (zts.witness_corpus.persist(allocator, corpus_dir, witness)) |pres| {
             var owned = pres;
             defer owned.deinit(allocator);
             // .refreshed means the witness was already persisted on a prior
             // build. If the author had pinned it, this build re-fires a
             // regression they explicitly chose to defend against.
             if (owned.outcome == .refreshed and
-                zigts.witness_corpus.isPinned(allocator, corpus_dir, owned.key))
+                zts.witness_corpus.isPinned(allocator, corpus_dir, owned.key))
             {
                 pinned_regressions += 1;
             }
@@ -292,7 +292,7 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
     // clone (rather than a move) keeps `contract.spec_diagnostics` intact
     // until the swap, so an OOM mid-loop leaves both lists individually
     // consistent.
-    var refreshed = try zigts.spec_discharge.dischargeSpecs(
+    var refreshed = try zts.spec_discharge.dischargeSpecs(
         allocator,
         contract.declared_specs.items,
         contract.properties,
@@ -473,7 +473,7 @@ fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
 }
 
 fn isCanonicalDiagnostic(code: []const u8) bool {
-    return zigts.rule_registry.isCanonicalProfileCode(code);
+    return zts.rule_registry.isCanonicalProfileCode(code);
 }
 
 fn hasCanonicalDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {
@@ -521,7 +521,7 @@ fn writeCostBound(writer: anytype, r: *const CheckResult) void {
 
 /// Generate TypeScript type definitions for all virtual modules.
 pub fn generateTypeDefs(writer: anytype) void {
-    writer.print("// Generated by: zigts check --types\n// Do not edit manually.\n\n", .{}) catch return;
+    writer.print("// Generated by: zts check --types\n// Do not edit manually.\n\n", .{}) catch return;
 
     // Request and Response globals
     writer.print(
@@ -561,7 +561,7 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\
     , .{}) catch return;
 
-    const modules = @import("zigts").builtin_modules;
+    const modules = @import("zts").builtin_modules;
     for (modules.all) |binding| {
         writer.print("declare module \"{s}\" {{\n", .{binding.specifier}) catch return;
         for (binding.exports) |func| {
@@ -578,7 +578,7 @@ pub fn generateTypeDefs(writer: anytype) void {
     }
 }
 
-fn returnKindToTs(kind: @import("zigts").module_binding.ReturnKind) []const u8 {
+fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
     return switch (kind) {
         .boolean => "boolean",
         .number => "number",

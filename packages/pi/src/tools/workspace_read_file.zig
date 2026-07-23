@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
@@ -61,7 +61,7 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const content = try zigts.file_io.readFile(allocator, relative, common.default_output_limit);
+    const content = try zts.file_io.readFile(allocator, relative, common.default_output_limit);
     defer allocator.free(content);
 
     var line_no: usize = 1;

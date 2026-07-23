@@ -1,0 +1,1840 @@
+//! Contract data types for `HandlerContract`. Extracted from
+//! handler_contract.zig as the third step of the split. handler_contract.zig
+//! re-exports every public name from this file so existing callers
+//! (`handler_contract.HandlerContract`, `handler_contract.ApiRouteInfo`, etc.)
+//! continue to resolve. Constructors that are tightly coupled to the types
+//! they build (`emptyApiInfo`, `emptySqlInfo`, `emptyContract`,
+//! `computeCapabilityMatrix`) live here too.
+
+const std = @import("std");
+const module_binding = @import("module_binding.zig");
+const builtin_modules = @import("builtin_modules.zig");
+
+fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
+    return if (s) |v| try allocator.dupe(u8, v) else null;
+}
+
+pub const HandlerLoc = struct {
+    path: []const u8, // owned
+    line: u32,
+    column: u32,
+};
+
+pub const RouteInfo = struct {
+    pattern: []const u8, // owned
+    route_type: []const u8, // static literal, not owned
+    field: []const u8, // static literal, not owned
+    status: u16,
+    content_type: []const u8, // static literal, not owned
+    aot: bool,
+};
+
+pub const EnvInfo = struct {
+    literal: std.ArrayList([]const u8), // each entry owned
+    dynamic: bool,
+};
+
+pub const EgressInfo = struct {
+    hosts: std.ArrayList([]const u8), // each entry owned
+    urls: std.ArrayList([]const u8) = .empty, // full fetchSync URLs, each entry owned
+    dynamic: bool,
+};
+
+/// Bucket of partner-extracted literals for one declared category.
+pub const ExtensionCategoryBucket = struct {
+    literals: std.ArrayList([]const u8) = .empty, // each entry owned
+    dynamic: bool = false,
+
+    pub fn deinit(self: *ExtensionCategoryBucket, allocator: std.mem.Allocator) void {
+        for (self.literals.items) |s| allocator.free(s);
+        self.literals.deinit(allocator);
+    }
+};
+
+/// Per-specifier proof facts derived from a partner virtual-module
+/// manifest's `contractExtractions`. Lands under `contract.json` at
+/// `extensions.<specifier>`. The keys of `categories` are the partner-declared
+/// `extension_category` tags (e.g. "payment_gateway", "llm_egress").
+pub const ExtensionContract = struct {
+    /// Per-extension copy of egress hosts. The same hosts also land in the
+    /// top-level `egress.hosts` list so runtime policy enforcement stays
+    /// uniform; this duplicate preserves provenance.
+    egress_hosts: std.ArrayList([]const u8) = .empty, // each entry owned
+    egress_dynamic: bool = false,
+    /// Partner-declared category tag -> bucket of extracted literals. Keys
+    /// are owned; lookup is structural.
+    categories: std.StringHashMapUnmanaged(ExtensionCategoryBucket) = .empty,
+    /// Optional partner-declared top-level contract section name. When non-
+    /// null, the writer mirrors this extension's category buckets under a
+    /// top-level `<name>` block, giving partners parity with built-ins like
+    /// `cache` and `durable`. Owned by the contract.
+    contract_section: ?[]u8 = null,
+
+    pub fn deinit(self: *ExtensionContract, allocator: std.mem.Allocator) void {
+        for (self.egress_hosts.items) |s| allocator.free(s);
+        self.egress_hosts.deinit(allocator);
+        var it = self.categories.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.categories.deinit(allocator);
+        if (self.contract_section) |slice| allocator.free(slice);
+    }
+};
+
+pub const CacheInfo = struct {
+    namespaces: std.ArrayList([]const u8), // each entry owned
+    dynamic: bool,
+};
+
+pub const SqlQueryInfo = struct {
+    name: []const u8, // owned
+    statement: []const u8, // owned
+    operation: []const u8 = "", // static literal after validation
+    tables: std.ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *SqlQueryInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.statement);
+        for (self.tables.items) |table| allocator.free(table);
+        self.tables.deinit(allocator);
+    }
+};
+
+pub const SqlInfo = struct {
+    backend: []const u8 = "sqlite",
+    queries: std.ArrayList(SqlQueryInfo),
+    dynamic: bool,
+
+    pub fn deinit(self: *SqlInfo, allocator: std.mem.Allocator) void {
+        for (self.queries.items) |*query| query.deinit(allocator);
+        self.queries.deinit(allocator);
+    }
+};
+
+pub const DurableKeyInfo = struct {
+    literal: std.ArrayList([]const u8), // each entry owned
+    dynamic: bool,
+};
+
+pub const DurableWorkflowProofLevel = enum {
+    none,
+    partial,
+    complete,
+
+    pub fn toString(self: DurableWorkflowProofLevel) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .partial => "partial",
+            .complete => "complete",
+        };
+    }
+
+    pub fn fromString(raw: []const u8) DurableWorkflowProofLevel {
+        if (std.mem.eql(u8, raw, "complete")) return .complete;
+        if (std.mem.eql(u8, raw, "partial")) return .partial;
+        return .none;
+    }
+};
+
+pub const DurableWorkflowNodeKind = enum {
+    branch,
+    step,
+    step_with_timeout,
+    sleep,
+    sleep_until,
+    wait_signal,
+    signal,
+    signal_at,
+    return_response,
+
+    pub fn toString(self: DurableWorkflowNodeKind) []const u8 {
+        return switch (self) {
+            .branch => "branch",
+            .step => "step",
+            .step_with_timeout => "stepWithTimeout",
+            .sleep => "sleep",
+            .sleep_until => "sleepUntil",
+            .wait_signal => "waitSignal",
+            .signal => "signal",
+            .signal_at => "signalAt",
+            .return_response => "return",
+        };
+    }
+
+    pub fn fromString(raw: []const u8) DurableWorkflowNodeKind {
+        if (std.mem.eql(u8, raw, "branch")) return .branch;
+        if (std.mem.eql(u8, raw, "step")) return .step;
+        if (std.mem.eql(u8, raw, "stepWithTimeout")) return .step_with_timeout;
+        if (std.mem.eql(u8, raw, "sleep")) return .sleep;
+        if (std.mem.eql(u8, raw, "sleepUntil")) return .sleep_until;
+        if (std.mem.eql(u8, raw, "waitSignal")) return .wait_signal;
+        if (std.mem.eql(u8, raw, "signal")) return .signal;
+        if (std.mem.eql(u8, raw, "signalAt")) return .signal_at;
+        return .return_response;
+    }
+};
+
+pub const DurableWorkflowNode = struct {
+    id: []const u8,
+    kind: DurableWorkflowNodeKind,
+    label: []const u8,
+    detail: ?[]const u8 = null,
+    status: ?u16 = null,
+
+    pub fn deinit(self: *DurableWorkflowNode, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.label);
+        if (self.detail) |detail| allocator.free(detail);
+    }
+};
+
+pub const DurableWorkflowEdge = struct {
+    from: []const u8,
+    to: []const u8,
+    condition: ?[]const u8 = null,
+
+    pub fn deinit(self: *DurableWorkflowEdge, allocator: std.mem.Allocator) void {
+        allocator.free(self.from);
+        allocator.free(self.to);
+        if (self.condition) |condition| allocator.free(condition);
+    }
+};
+
+pub const DurableWorkflowProperties = struct {
+    retry_safe: bool = false,
+    idempotent: bool = false,
+    fault_covered: bool = false,
+    reasons: std.ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *DurableWorkflowProperties, allocator: std.mem.Allocator) void {
+        for (self.reasons.items) |reason| allocator.free(reason);
+        self.reasons.deinit(allocator);
+    }
+};
+
+pub const DurableWorkflow = struct {
+    workflow_id: ?[]const u8 = null,
+    proof_level: DurableWorkflowProofLevel = .none,
+    properties: DurableWorkflowProperties = .{},
+    nodes: std.ArrayList(DurableWorkflowNode) = .empty,
+    edges: std.ArrayList(DurableWorkflowEdge) = .empty,
+
+    pub fn deinit(self: *DurableWorkflow, allocator: std.mem.Allocator) void {
+        if (self.workflow_id) |workflow_id| allocator.free(workflow_id);
+        self.properties.deinit(allocator);
+        for (self.nodes.items) |*node| node.deinit(allocator);
+        self.nodes.deinit(allocator);
+        for (self.edges.items) |*edge| edge.deinit(allocator);
+        self.edges.deinit(allocator);
+    }
+};
+
+pub const DurableInfo = struct {
+    used: bool,
+    keys: DurableKeyInfo,
+    steps: std.ArrayList([]const u8), // each entry owned
+    timers: bool = false,
+    signals: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
+    producer_keys: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
+    workflow: DurableWorkflow = .{},
+
+    pub fn deinit(self: *DurableInfo, allocator: std.mem.Allocator) void {
+        for (self.keys.literal.items) |key| {
+            allocator.free(key);
+        }
+        self.keys.literal.deinit(allocator);
+        for (self.steps.items) |step| {
+            allocator.free(step);
+        }
+        self.steps.deinit(allocator);
+        for (self.signals.literal.items) |signal| {
+            allocator.free(signal);
+        }
+        self.signals.literal.deinit(allocator);
+        for (self.producer_keys.literal.items) |key| {
+            allocator.free(key);
+        }
+        self.producer_keys.literal.deinit(allocator);
+        self.workflow.deinit(allocator);
+    }
+};
+
+pub const ScopeInfo = struct {
+    used: bool,
+    names: std.ArrayList([]const u8),
+    dynamic: bool = false,
+    max_depth: u32 = 0,
+
+    pub fn deinit(self: *ScopeInfo, allocator: std.mem.Allocator) void {
+        for (self.names.items) |name| allocator.free(name);
+        self.names.deinit(allocator);
+    }
+};
+
+/// WebSocket event-export presence. When a handler module exports any of
+/// `onOpen`, `onMessage`, `onClose`, or `onError` as top-level named
+/// functions, the contract records which ones are present. The runtime
+/// uses this to decide whether to enable the WebSocket gateway at
+/// startup; deploy manifests use it to emit per-platform WS routing.
+/// All fields are zero-initialised, so a handler with no WS exports
+/// produces `{on_open:false, on_message:false, on_close:false, on_error:false}`
+/// — the section is always present for shape stability.
+pub const WebSocketInfo = struct {
+    on_open: bool = false,
+    on_message: bool = false,
+    on_close: bool = false,
+    on_error: bool = false,
+
+    pub fn any(self: WebSocketInfo) bool {
+        return self.on_open or self.on_message or self.on_close or self.on_error;
+    }
+};
+
+pub const ApiSchemaInfo = struct {
+    name: []const u8, // owned
+    schema_json: []const u8, // owned JSON source
+};
+
+pub const ApiRequestInfo = struct {
+    schema_refs: std.ArrayList([]const u8), // each entry owned
+    dynamic: bool,
+};
+
+pub const ApiAuthInfo = struct {
+    bearer: bool,
+    jwt: bool,
+};
+
+pub const ApiParamInfo = struct {
+    name: []const u8, // owned
+    location: []const u8 = "path", // static literal
+    required: bool = false,
+    schema_json: []const u8, // owned JSON source
+
+    pub fn deinit(self: *ApiParamInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.schema_json);
+    }
+
+    pub fn dupeOwned(self: ApiParamInfo, allocator: std.mem.Allocator) !ApiParamInfo {
+        return .{
+            .name = try allocator.dupe(u8, self.name),
+            .location = self.location,
+            .required = self.required,
+            .schema_json = try allocator.dupe(u8, self.schema_json),
+        };
+    }
+};
+
+pub const SchemaSpec = union(enum) {
+    none,
+    ref: []const u8, // owned
+    inline_json: []const u8, // owned
+    dynamic,
+
+    pub fn schemaRef(self: SchemaSpec) ?[]const u8 {
+        return switch (self) {
+            .ref => |s| s,
+            else => null,
+        };
+    }
+
+    pub fn schemaJson(self: SchemaSpec) ?[]const u8 {
+        return switch (self) {
+            .inline_json => |s| s,
+            else => null,
+        };
+    }
+
+    pub fn isDynamic(self: SchemaSpec) bool {
+        return self == .dynamic;
+    }
+
+    pub fn deinitOwned(self: SchemaSpec, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .ref => |s| allocator.free(s),
+            .inline_json => |s| allocator.free(s),
+            .none, .dynamic => {},
+        }
+    }
+
+    pub fn dupeOwned(self: SchemaSpec, allocator: std.mem.Allocator) !SchemaSpec {
+        return switch (self) {
+            .none => .none,
+            .ref => |s| .{ .ref = try allocator.dupe(u8, s) },
+            .inline_json => |s| .{ .inline_json = try allocator.dupe(u8, s) },
+            .dynamic => .dynamic,
+        };
+    }
+};
+
+pub const ApiBodyInfo = struct {
+    content_type: ?[]const u8 = null, // owned when present
+    schema: SchemaSpec = .none,
+
+    pub fn deinit(self: *ApiBodyInfo, allocator: std.mem.Allocator) void {
+        if (self.content_type) |content_type| allocator.free(content_type);
+        self.schema.deinitOwned(allocator);
+    }
+
+    pub fn dupeOwned(self: ApiBodyInfo, allocator: std.mem.Allocator) !ApiBodyInfo {
+        return .{
+            .content_type = try dupeOptionalString(allocator, self.content_type),
+            .schema = try self.schema.dupeOwned(allocator),
+        };
+    }
+};
+
+pub const ApiResponseInfo = struct {
+    status: ?u16 = null,
+    content_type: ?[]const u8 = null, // owned when present
+    schema: SchemaSpec = .none,
+
+    pub fn deinit(self: *ApiResponseInfo, allocator: std.mem.Allocator) void {
+        if (self.content_type) |content_type| allocator.free(content_type);
+        self.schema.deinitOwned(allocator);
+    }
+
+    pub fn dupeOwned(self: ApiResponseInfo, allocator: std.mem.Allocator) !ApiResponseInfo {
+        return .{
+            .status = self.status,
+            .content_type = try dupeOptionalString(allocator, self.content_type),
+            .schema = try self.schema.dupeOwned(allocator),
+        };
+    }
+};
+
+pub const ApiRouteInfo = struct {
+    method: []const u8, // owned
+    path: []const u8, // owned
+    request_schema_refs: std.ArrayList([]const u8), // each entry owned
+    request_schema_dynamic: bool,
+    requires_bearer: bool,
+    requires_jwt: bool,
+    path_params: std.ArrayList(ApiParamInfo) = .empty,
+    query_params: std.ArrayList(ApiParamInfo) = .empty,
+    header_params: std.ArrayList(ApiParamInfo) = .empty,
+    query_params_dynamic: bool = false,
+    header_params_dynamic: bool = false,
+    request_bodies: std.ArrayList(ApiBodyInfo) = .empty,
+    request_bodies_dynamic: bool = false,
+    responses: std.ArrayList(ApiResponseInfo) = .empty,
+    responses_dynamic: bool = false,
+    // Legacy scalar response fields, kept for backward compatibility with
+    // older contract.json consumers. backfillApiRouteCollections bridges
+    // these into the responses collection during deserialization.
+    response_status: ?u16 = null,
+    response_content_type: ?[]const u8 = null, // owned when present
+    response_schema_ref: ?[]const u8 = null, // owned when present
+    response_schema_json: ?[]const u8 = null, // owned when present
+    response_schema_dynamic: bool = false,
+
+    pub fn deinit(self: *ApiRouteInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.method);
+        allocator.free(self.path);
+        for (self.request_schema_refs.items) |schema_ref| {
+            allocator.free(schema_ref);
+        }
+        self.request_schema_refs.deinit(allocator);
+        for (self.path_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.path_params.deinit(allocator);
+        for (self.query_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.query_params.deinit(allocator);
+        for (self.header_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.header_params.deinit(allocator);
+        for (self.request_bodies.items) |*body| {
+            body.deinit(allocator);
+        }
+        self.request_bodies.deinit(allocator);
+        for (self.responses.items) |*response| {
+            response.deinit(allocator);
+        }
+        self.responses.deinit(allocator);
+        if (self.response_content_type) |content_type| {
+            allocator.free(content_type);
+        }
+        if (self.response_schema_ref) |schema_ref| {
+            allocator.free(schema_ref);
+        }
+        if (self.response_schema_json) |schema_json| {
+            allocator.free(schema_json);
+        }
+    }
+};
+
+pub const ApiInfo = struct {
+    schemas: std.ArrayList(ApiSchemaInfo),
+    requests: ApiRequestInfo,
+    auth: ApiAuthInfo,
+    routes: std.ArrayList(ApiRouteInfo),
+    schemas_dynamic: bool,
+    routes_dynamic: bool,
+
+    pub fn deinit(self: *ApiInfo, allocator: std.mem.Allocator) void {
+        for (self.schemas.items) |schema| {
+            allocator.free(schema.name);
+            allocator.free(schema.schema_json);
+        }
+        self.schemas.deinit(allocator);
+        for (self.requests.schema_refs.items) |schema_ref| {
+            allocator.free(schema_ref);
+        }
+        self.requests.schema_refs.deinit(allocator);
+        for (self.routes.items) |*route| {
+            route.deinit(allocator);
+        }
+        self.routes.deinit(allocator);
+    }
+};
+
+pub fn emptyApiInfo() ApiInfo {
+    return .{
+        .schemas = .empty,
+        .requests = .{ .schema_refs = .empty, .dynamic = false },
+        .auth = .{ .bearer = false, .jwt = false },
+        .routes = .empty,
+        .schemas_dynamic = false,
+        .routes_dynamic = false,
+    };
+}
+
+pub fn emptySqlInfo() SqlInfo {
+    return .{
+        .backend = "sqlite",
+        .queries = .empty,
+        .dynamic = false,
+    };
+}
+
+/// Create a minimal empty contract with the given handler path (owned by caller).
+pub fn emptyContract(path: []const u8) HandlerContract {
+    return .{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+}
+
+pub const VerificationInfo = struct {
+    exhaustive_returns: bool,
+    results_safe: bool,
+    unreachable_code: bool,
+    /// Bytecode passed structural verification (opcode validity, bounds, stack discipline)
+    bytecode_verified: bool = false,
+};
+
+pub const AotInfo = struct {
+    pattern_count: u32,
+    has_default: bool,
+};
+
+pub const FaultCoverageInfo = struct {
+    total_failable: u32,
+    covered: u32,
+    warnings: u32,
+
+    pub fn isCovered(self: FaultCoverageInfo) bool {
+        return self.covered == self.total_failable and self.total_failable > 0;
+    }
+};
+
+/// Handler-level properties derived from effect classification of virtual
+/// module function calls. Computed during contract extraction by checking
+/// each imported function's EffectClass (read/write/none).
+pub const HandlerProperties = struct {
+    /// No virtual module calls. Pure function of request.
+    pure: bool,
+    /// Only read-classified functions. No state mutations.
+    read_only: bool,
+    /// Read-only AND no cacheGet. Independent of mutable state.
+    stateless: bool,
+    /// Read-only OR all writes within durable steps. Safe for Lambda retry.
+    retry_safe: bool,
+    /// No Date.now() or Math.random() usage.
+    deterministic: bool,
+    /// Uses fetchSync (conservative write).
+    has_egress: bool,
+    // --- Data flow provenance (from FlowChecker) ---
+    /// No {secret} data reaches response bodies, headers, or external egress.
+    no_secret_leakage: bool = true,
+    /// No {credential} data reaches response bodies or logs.
+    no_credential_leakage: bool = true,
+    /// All {user_input} data passes through validation before external egress.
+    input_validated: bool = true,
+    /// {user_input} data does not flow to external egress hosts.
+    pii_contained: bool = true,
+    // --- Derived properties ---
+    /// Deterministic AND (read_only OR all writes in durable steps).
+    /// Safe for at-least-once delivery and automatic retry.
+    idempotent: bool = false,
+    /// Maximum number of I/O calls on any single execution path.
+    /// Enables compile-time Lambda timeout derivation.
+    max_io_depth: ?u32 = null,
+    /// No unvalidated user input reaches sensitive sinks.
+    /// Proves SQL injection and XSS prevention.
+    injection_safe: bool = true,
+    /// No module-scope variable mutations inside handler body.
+    /// Proves cross-request data isolation.
+    state_isolated: bool = true,
+    // --- Fault coverage (from FaultCoverageChecker) ---
+    /// Every failable I/O call site has an explicit failure path.
+    fault_covered: bool = false,
+    // --- Result and optional safety (from HandlerVerifier, when -Dverify is run) ---
+    /// Proven: every result.ok access is guarded before use.
+    /// False = unproven (verification not run). True = verified safe.
+    result_safe: bool = false,
+    /// Proven: every optional value from virtual modules is narrowed before use.
+    /// False = unproven (verification not run). True = verified safe.
+    optional_safe: bool = false,
+    /// The handler's AOT route table (`routerMatch({...}, req)`) is non-empty,
+    /// statically enumerable, and every route's method is POST. False when
+    /// the route table is empty, dynamic, or mixes in a non-POST method - a
+    /// handler using an ad hoc `if (req.method !== "POST")` guard without the
+    /// `routerMatch` convention does not earn this proof for free.
+    post_only: bool = false,
+    // --- Canonical normal form (from the strict_checker ZTS6xx gate) ---
+    /// The handler source is in Canonical Normal Form: zero canonical-profile
+    /// (ZTS6xx) diagnostics. Because those diagnostics are hard `check` errors,
+    /// a contract is only ever built for an already-canonical handler, so the
+    /// contract builder sets this true unconditionally. The chip makes the
+    /// always-on gate explicit and attestable; `Spec<"canonical">` discharges
+    /// against it.
+    canonical: bool = false,
+    /// The handler's total cost bound is expressible (constant or linear):
+    /// no unbounded loop over an unidentifiable source, and path enumeration
+    /// was exhaustive. Derived from cost_envelope.total in precompile stage 9.
+    cost_bounded: bool = false,
+
+    /// Canonical list of property names that are currently proven true. The
+    /// order is stable across builds (struct-field declaration order) so
+    /// cross-build diffs surface added/dropped names instead of reordered
+    /// noise. Returns slices into static field-name strings; no allocation.
+    /// The returned count is clamped to `out.len`; callers wanting the full
+    /// set should size against `max_proven_specs`.
+    pub fn provenSpecNames(self: *const HandlerProperties, out: []?[]const u8) usize {
+        var count: usize = 0;
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name) and @field(self, field.name)) {
+                if (count < out.len) {
+                    out[count] = field.name;
+                    count += 1;
+                }
+            }
+        }
+        return count;
+    }
+
+    /// Compile-time upper bound on the proven-set size, equal to the count of
+    /// boolean fields in `HandlerProperties`. Caller-side buffers should size
+    /// against this so `provenSpecNames` never overflows.
+    pub const max_proven_specs: usize = blk: {
+        var n: usize = 0;
+        for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name)) n += 1;
+        }
+        break :blk n;
+    };
+
+    /// True when a property name belongs in monotonic proof ratchets. Positive
+    /// safety guarantees are monotonic; inverse facts such as `has_egress`
+    /// are deliberately excluded so removing risky behavior cannot regress.
+    pub fn isMonotonicProvenSpecName(name: []const u8) bool {
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (field.type == bool and isMonotonicProvenSpec(field.name) and std.mem.eql(u8, field.name, name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Translate a snake_case `HandlerProperties` field name (e.g. "read_only")
+    /// to the camelCase JSON key the writer emits (e.g. "readOnly"). Driven by
+    /// `@typeInfo` so adding a field automatically extends both the JSON
+    /// writer's emitted keys and the parser's camel-to-snake lookup. Returns
+    /// null for names that are not field names of this struct.
+    pub fn camelKeyFor(snake_field_name: []const u8) ?[]const u8 {
+        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, snake_field_name)) {
+                return comptime snakeToCamel(field.name);
+            }
+        }
+        return null;
+    }
+};
+
+fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {
+    return !std.mem.eql(u8, field_name, "has_egress");
+}
+
+/// Compile-time snake_case -> camelCase, e.g. "no_secret_leakage" -> "noSecretLeakage".
+fn snakeToCamel(comptime snake: []const u8) []const u8 {
+    comptime {
+        var buf: [snake.len]u8 = undefined;
+        var len: usize = 0;
+        var upper_next = false;
+        for (snake) |c| {
+            if (c == '_') {
+                upper_next = true;
+                continue;
+            }
+            buf[len] = if (upper_next and c >= 'a' and c <= 'z') c - 32 else c;
+            len += 1;
+            upper_next = false;
+        }
+        const out = buf[0..len].*;
+        return &out;
+    }
+}
+
+test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
+    const props = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = true,
+    };
+
+    var buf: [HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+    const count = props.provenSpecNames(&buf);
+    try std.testing.expect(count > 0);
+    for (buf[0..count]) |name_opt| {
+        try std.testing.expect(!std.mem.eql(u8, name_opt.?, "has_egress"));
+    }
+    try std.testing.expect(!HandlerProperties.isMonotonicProvenSpecName("has_egress"));
+    try std.testing.expect(HandlerProperties.isMonotonicProvenSpecName("no_secret_leakage"));
+}
+
+test "Bound.addBorrowed degrades mixed linear sources to unbounded" {
+    const first = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+    const second = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 8, .column = 2, .desc = "for...of over `names`" },
+    } };
+
+    const combined = Bound.addBorrowed(first, second);
+    try std.testing.expectEqual(BoundClass.unbounded, combined.class());
+    try std.testing.expectEqualStrings("for...of over `names`", combined.unbounded.desc);
+}
+
+test "Bound.maxBorrowed picks the wider class" {
+    const constant = Bound{ .constant = 4 };
+    const linear = Bound{ .linear = .{
+        .coefficient = 1,
+        .base = 0,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+    const unbounded = Bound{ .unbounded = .{ .line = 9, .column = 1, .desc = "unknown" } };
+
+    try std.testing.expectEqual(BoundClass.linear, Bound.maxBorrowed(constant, linear).class());
+    try std.testing.expectEqual(BoundClass.unbounded, Bound.maxBorrowed(linear, unbounded).class());
+}
+
+test "Bound.worstCaseAt evaluates linear at a body limit" {
+    const bound = Bound{ .linear = .{
+        .coefficient = 3,
+        .base = 2,
+        .source = .{ .line = 4, .column = 2, .desc = "for...of over `ids`" },
+    } };
+
+    try std.testing.expectEqual(@as(?u64, 20), bound.worstCaseAt(10));
+    try std.testing.expectEqual(@as(?u64, null), (Bound{ .unbounded = .{} }).worstCaseAt(10));
+}
+
+pub const RateLimitInfo = struct {
+    namespace: []const u8, // aliases into cache.namespaces (not separately owned)
+    dynamic: bool,
+};
+
+/// Why a handler property was demoted from its optimistic default. Captured
+/// at the classifier site that decided to clear a boolean in
+/// `HandlerProperties` so the live-reload HUD can name both the file:line
+/// and the construct that caused the regression. Snippet is borrowed
+/// (typically a static const string like "Date.now()"); the contract owns
+/// no extra allocation.
+pub const PropertyCause = struct {
+    line: u32,
+    column: u32,
+    snippet: []const u8, // borrowed; static literal or arena-tied
+};
+
+/// Per-property source provenance. All fields default to null; populated
+/// only at the clearing site for properties that were demoted from their
+/// optimistic default. Lives alongside `HandlerProperties` on the contract;
+/// not serialized into contract.json (purely a build-time artifact for the
+/// proof HUD's regression line).
+pub const PropertyProvenance = struct {
+    deterministic: ?PropertyCause = null,
+
+    /// Single dispatch over the field set so the live HUD and the
+    /// counterexample pipeline never drift on which provenance fields exist.
+    /// Returns null for fields the verifier does not yet record causes for.
+    pub fn causeFor(self: *const PropertyProvenance, field: []const u8) ?PropertyCause {
+        if (std.mem.eql(u8, field, "deterministic")) return self.deterministic;
+        return null;
+    }
+};
+
+test "PropertyProvenance.causeFor round-trips deterministic" {
+    const p = PropertyProvenance{
+        .deterministic = .{ .line = 14, .column = 9, .snippet = "Date.now()" },
+    };
+    const got = p.causeFor("deterministic").?;
+    try std.testing.expectEqual(@as(u32, 14), got.line);
+    try std.testing.expectEqualStrings("Date.now()", got.snippet);
+}
+
+test "PropertyProvenance.causeFor returns null for unset and unknown" {
+    const empty = PropertyProvenance{};
+    try std.testing.expect(empty.causeFor("deterministic") == null);
+
+    const p = PropertyProvenance{
+        .deterministic = .{ .line = 1, .column = 1, .snippet = "x" },
+    };
+    try std.testing.expect(p.causeFor("read_only") == null);
+    try std.testing.expect(p.causeFor("") == null);
+}
+
+/// One discharge result per declared spec. Produced by
+/// `spec_discharge.dischargeSpecs` and stored on `HandlerContract`. Owned
+/// strings are tagged on the field. Lives in contract_types.zig (not
+/// spec_discharge.zig) to avoid an import cycle: spec_discharge needs
+/// HandlerProperties from this file.
+pub const SpecDiagnostic = struct {
+    kind: Kind,
+    /// Owned copy of the declared spec name.
+    spec_name: []const u8,
+    /// For .not_discharged with a known cause, the file:line:snippet captured
+    /// at the classifier site that demoted the property. Borrowed; must not
+    /// outlive the contract that owns the underlying snippet (which itself
+    /// is typically a static string literal).
+    cause: ?PropertyCause = null,
+    /// For .incompatible_with_import: the offending module specifier
+    /// (owned). null for the other kinds.
+    incompatible_module: ?[]const u8 = null,
+    /// For .not_discharged on a cause-only property: a per-property
+    /// suggestion string the HUD renders as `Try: <suggestion>`. Owned when
+    /// present.
+    suggestion: ?[]const u8 = null,
+    /// For capsule diagnostics (helper ZTS500 / ZTS502, and ZTS606): the
+    /// name of the user-defined function the diagnostic is attributed to.
+    /// Owned when present; null for handler-level Spec diagnostics, where
+    /// the handler is implied.
+    function: ?[]const u8 = null,
+    /// True when this diagnostic comes from the IMPLICIT default spec set:
+    /// the handler declared no `Spec<...>`, so the full v1 profile is active
+    /// and every unsatisfiable property trips ZTS500/ZTS501. Lets downstream
+    /// surfaces explain that no Spec was authored and recommend declaring a
+    /// narrow one, instead of claiming the author "declared" a spec they
+    /// never wrote. Transient: not serialized to contract.json; recomputed
+    /// on each fresh check.
+    implicit_default: bool = false,
+
+    pub const Severity = enum { err, warn };
+
+    pub const Kind = enum {
+        /// ZTS500: the corresponding property is false (handler Spec) or the
+        /// declared capsule property does not hold (helper Proof).
+        not_discharged,
+        /// ZTS501: the spec contradicts a virtual-module import the
+        /// handler declared.
+        incompatible_with_import,
+        /// ZTS502: the spec / capsule property name is not in the v1 set.
+        unknown_name,
+        /// ZTS606: a handler-reachable helper breaks a property the
+        /// handler's Spec demands and carries no `Proof<...>` capsule
+        /// declaring it. The proof cannot compose across the call boundary.
+        missing_capsule,
+        /// ZTS503: a function reaches a capability outside its declared
+        /// `Effects<...>` ceiling.
+        effect_undeclared,
+        /// ZTS504: an `Effects<...>` ceiling names an unknown capability.
+        effect_unknown_capability,
+        /// ZTS505 (warning): an `Effects<...>` ceiling names a capability the
+        /// function never reaches.
+        effect_over_declared,
+        /// ZTS506: the handler reaches a capability directly that is outside
+        /// its declared `Effects<...>` budget.
+        budget_exceeded,
+        /// ZTS607: a handler-reachable helper reaches a capability outside
+        /// the handler's declared `Effects<...>` budget.
+        helper_budget_exceeded,
+        /// ZTS507 (warning): an exported helper carries no `Effects<...>`
+        /// capsule. Emitted only under the opt-in docs mode.
+        missing_effects_capsule,
+        /// ZTS508 (warning): an exported helper carries no `Proof<...>`
+        /// capsule. Emitted only under the opt-in docs mode.
+        missing_proof_capsule_export,
+        /// ZTS509: `workflow.call`/`saga`/`fanout`/`follow` is used inside a
+        /// `durable.step()` callback. These exports only durably record at
+        /// step depth 0 (runtime_workflow.zig); nested inside a user
+        /// `step()` they silently lose durability at runtime. Unconditional:
+        /// fires regardless of any declared `Spec<...>`/`Effects<...>`.
+        workflow_call_in_step,
+        /// ZTS510: a statically-analyzable `saga([...])` has a non-last step
+        /// with no `compensate`, leaving a partial-rollback hole - if a
+        /// later step fails, this step's completed side effect is never
+        /// undone. The last step may omit `compensate` (it never completed
+        /// if it's the one that failed, and nothing runs after it to
+        /// trigger a rollback). Only fires for statically-analyzable sagas;
+        /// see `SagaCallInfo.dynamic`.
+        saga_step_missing_compensate,
+
+        pub fn code(self: Kind) []const u8 {
+            return switch (self) {
+                .not_discharged => "ZTS500",
+                .incompatible_with_import => "ZTS501",
+                .unknown_name => "ZTS502",
+                .missing_capsule => "ZTS606",
+                .effect_undeclared => "ZTS503",
+                .effect_unknown_capability => "ZTS504",
+                .effect_over_declared => "ZTS505",
+                .budget_exceeded => "ZTS506",
+                .helper_budget_exceeded => "ZTS607",
+                .missing_effects_capsule => "ZTS507",
+                .missing_proof_capsule_export => "ZTS508",
+                .workflow_call_in_step => "ZTS509",
+                .saga_step_missing_compensate => "ZTS510",
+            };
+        }
+
+        /// Diagnostic severity. Over-declaration and the docs-mode
+        /// missing-capsule prompts are advisory; everything else is an error.
+        pub fn severity(self: Kind) Severity {
+            return switch (self) {
+                .effect_over_declared,
+                .missing_effects_capsule,
+                .missing_proof_capsule_export,
+                => .warn,
+                else => .err,
+            };
+        }
+    };
+
+    pub fn deinit(self: *SpecDiagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.spec_name);
+        if (self.incompatible_module) |m| allocator.free(m);
+        if (self.suggestion) |s| allocator.free(s);
+        if (self.function) |f| allocator.free(f);
+        // cause snippet is borrowed; do not free.
+    }
+
+    /// Deep-copy. The caller owns the result and must `deinit` it. Used to
+    /// lift capsule diagnostics out of a transient table and to carry them
+    /// across a spec-diagnostic refresh.
+    pub fn clone(self: SpecDiagnostic, allocator: std.mem.Allocator) !SpecDiagnostic {
+        const spec_name = try allocator.dupe(u8, self.spec_name);
+        errdefer allocator.free(spec_name);
+        const incompatible_module = try dupeOptionalString(allocator, self.incompatible_module);
+        errdefer if (incompatible_module) |m| allocator.free(m);
+        const suggestion = try dupeOptionalString(allocator, self.suggestion);
+        errdefer if (suggestion) |s| allocator.free(s);
+        const function = try dupeOptionalString(allocator, self.function);
+        return .{
+            .kind = self.kind,
+            .spec_name = spec_name,
+            .cause = self.cause,
+            .incompatible_module = incompatible_module,
+            .suggestion = suggestion,
+            .function = function,
+            .implicit_default = self.implicit_default,
+        };
+    }
+};
+
+// -------------------------------------------------------------------------
+// Behavioral contract types
+// -------------------------------------------------------------------------
+
+/// A condition that distinguishes one execution path from another.
+/// Conditions are derived from branch points in the handler's IR tree.
+pub const PathCondition = struct {
+    kind: Kind,
+    module: ?[]const u8 = null, // for io conditions (owned)
+    func: ?[]const u8 = null, // for io conditions (owned)
+    value: ?[]const u8 = null, // for req conditions (owned)
+
+    pub const Kind = enum {
+        io_ok,
+        io_fail,
+        req_method,
+        req_url,
+    };
+
+    pub fn deinit(self: *PathCondition, allocator: std.mem.Allocator) void {
+        if (self.module) |m| allocator.free(m);
+        if (self.func) |f| allocator.free(f);
+        if (self.value) |v| allocator.free(v);
+    }
+
+    pub fn dupeOwned(self: PathCondition, allocator: std.mem.Allocator) !PathCondition {
+        return .{
+            .kind = self.kind,
+            .module = try dupeOptionalString(allocator, self.module),
+            .func = try dupeOptionalString(allocator, self.func),
+            .value = try dupeOptionalString(allocator, self.value),
+        };
+    }
+};
+
+/// A single I/O call in a behavior path's sequence.
+pub const PathIoCall = struct {
+    module: []const u8, // owned
+    func: []const u8, // owned
+    /// Canonical argument signature used by the behavior-path canonicalizer.
+    /// Pipe-delimited, one token per argument position:
+    ///   "lit:<raw>"   - string literal
+    ///   "int:<raw>"   - integer literal
+    ///   "bool:true"   - boolean literal
+    ///   "bool:false"
+    ///   "?"           - dynamic or unknown
+    /// `null` means the path generator did not record arguments for this
+    /// call (older contracts, or a call site where we could not walk the
+    /// arguments). A null signature disables all rewrites on this call.
+    arg_signature: ?[]const u8 = null, // owned when non-null
+
+    pub fn deinit(self: *PathIoCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.module);
+        allocator.free(self.func);
+        if (self.arg_signature) |sig| allocator.free(sig);
+    }
+
+    pub fn dupeOwned(self: PathIoCall, allocator: std.mem.Allocator) !PathIoCall {
+        return .{
+            .module = try allocator.dupe(u8, self.module),
+            .func = try allocator.dupe(u8, self.func),
+            .arg_signature = try dupeOptionalString(allocator, self.arg_signature),
+        };
+    }
+};
+
+/// One exhaustively-enumerated execution path through the handler.
+/// Each path is a unique combination of (route, I/O outcomes, response).
+pub const BehaviorPath = struct {
+    route_method: []const u8, // owned
+    route_pattern: []const u8, // owned
+    conditions: std.ArrayList(PathCondition),
+    io_sequence: std.ArrayList(PathIoCall),
+    response_status: u16,
+    io_depth: u32,
+    is_failure_path: bool,
+
+    pub fn deinit(self: *BehaviorPath, allocator: std.mem.Allocator) void {
+        allocator.free(self.route_method);
+        allocator.free(self.route_pattern);
+        for (self.conditions.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.conditions.deinit(allocator);
+        for (self.io_sequence.items) |*io| {
+            @constCast(io).deinit(allocator);
+        }
+        self.io_sequence.deinit(allocator);
+    }
+
+    pub fn dupeOwned(self: *const BehaviorPath, allocator: std.mem.Allocator) !BehaviorPath {
+        var conditions: std.ArrayList(PathCondition) = .empty;
+        errdefer {
+            for (conditions.items) |*c| @constCast(c).deinit(allocator);
+            conditions.deinit(allocator);
+        }
+        try conditions.ensureTotalCapacity(allocator, self.conditions.items.len);
+        for (self.conditions.items) |c| {
+            conditions.appendAssumeCapacity(try c.dupeOwned(allocator));
+        }
+
+        var io_sequence: std.ArrayList(PathIoCall) = .empty;
+        errdefer {
+            for (io_sequence.items) |*io| @constCast(io).deinit(allocator);
+            io_sequence.deinit(allocator);
+        }
+        try io_sequence.ensureTotalCapacity(allocator, self.io_sequence.items.len);
+        for (self.io_sequence.items) |io| {
+            io_sequence.appendAssumeCapacity(try io.dupeOwned(allocator));
+        }
+
+        return .{
+            .route_method = try allocator.dupe(u8, self.route_method),
+            .route_pattern = try allocator.dupe(u8, self.route_pattern),
+            .conditions = conditions,
+            .io_sequence = io_sequence,
+            .response_status = self.response_status,
+            .io_depth = self.io_depth,
+            .is_failure_path = self.is_failure_path,
+        };
+    }
+};
+
+// --- Cost contract types ---
+
+/// Widening order for cost bounds. Used by contract_diff's cost lane:
+/// constant -> linear -> unbounded only ever widens.
+pub const BoundClass = enum(u2) {
+    constant = 0,
+    linear = 1,
+    unbounded = 2,
+
+    pub fn widerThan(self: BoundClass, other: BoundClass) bool {
+        return @intFromEnum(self) > @intFromEnum(other);
+    }
+
+    pub fn asString(self: BoundClass) []const u8 {
+        return switch (self) {
+            .constant => "constant",
+            .linear => "linear",
+            .unbounded => "unbounded",
+        };
+    }
+};
+
+/// Names the source construct a non-constant bound depends on. CostEnvelope
+/// owns provenance desc strings; every other Bound value borrows them.
+pub const BoundProvenance = struct {
+    line: u32 = 0,
+    column: u32 = 0,
+    desc: []const u8 = "",
+};
+
+/// A symbolic worst-path call-count bound.
+pub const Bound = union(enum) {
+    /// Exactly this many calls on the worst path.
+    constant: u32,
+    /// `base + coefficient * |source|` calls for one undischarged collection.
+    linear: Linear,
+    /// No expressible bound.
+    unbounded: BoundProvenance,
+
+    pub const Linear = struct {
+        coefficient: u32,
+        base: u32 = 0,
+        source: BoundProvenance,
+    };
+
+    pub fn class(self: Bound) BoundClass {
+        return switch (self) {
+            .constant => .constant,
+            .linear => .linear,
+            .unbounded => .unbounded,
+        };
+    }
+
+    /// Sequential composition along one path. Non-allocating; the result
+    /// borrows provenance from the inputs. Saturating u32 arithmetic.
+    pub fn addBorrowed(a: Bound, b: Bound) Bound {
+        return switch (a) {
+            .constant => |av| switch (b) {
+                .constant => |bv| .{ .constant = saturatingAddU32(av, bv) },
+                .linear => |bl| .{ .linear = .{
+                    .coefficient = bl.coefficient,
+                    .base = saturatingAddU32(bl.base, av),
+                    .source = bl.source,
+                } },
+                .unbounded => |bp| .{ .unbounded = bp },
+            },
+            .linear => |al| switch (b) {
+                .constant => |bv| .{ .linear = .{
+                    .coefficient = al.coefficient,
+                    .base = saturatingAddU32(al.base, bv),
+                    .source = al.source,
+                } },
+                .linear => |bl| if (sameProvenance(al.source, bl.source)) .{ .linear = .{
+                    .coefficient = saturatingAddU32(al.coefficient, bl.coefficient),
+                    .base = saturatingAddU32(al.base, bl.base),
+                    .source = al.source,
+                } } else .{ .unbounded = bl.source },
+                .unbounded => |bp| .{ .unbounded = bp },
+            },
+            .unbounded => |ap| .{ .unbounded = ap },
+        };
+    }
+
+    /// Worst-of across alternative paths (or handlers). Non-allocating,
+    /// borrows provenance. Wider class wins.
+    pub fn maxBorrowed(a: Bound, b: Bound) Bound {
+        const ac = a.class();
+        const bc = b.class();
+        if (ac.widerThan(bc)) return a;
+        if (bc.widerThan(ac)) return b;
+
+        return switch (a) {
+            .constant => |av| .{ .constant = @max(av, b.constant) },
+            .linear => |al| blk: {
+                const bl = b.linear;
+                if (bl.coefficient > al.coefficient) break :blk b;
+                if (bl.coefficient == al.coefficient and bl.base > al.base) break :blk b;
+                break :blk a;
+            },
+            .unbounded => a,
+        };
+    }
+
+    /// Deep copy that owns its desc strings.
+    pub fn dupeOwned(self: Bound, allocator: std.mem.Allocator) !Bound {
+        return switch (self) {
+            .constant => |v| .{ .constant = v },
+            .linear => |l| .{ .linear = .{
+                .coefficient = l.coefficient,
+                .base = l.base,
+                .source = try dupeProvenance(allocator, l.source),
+            } },
+            .unbounded => |p| .{ .unbounded = try dupeProvenance(allocator, p) },
+        };
+    }
+
+    /// Free desc strings. Call ONLY on owned bounds.
+    pub fn deinitOwned(self: *Bound, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .constant => {},
+            .linear => |l| allocator.free(l.source.desc),
+            .unbounded => |p| allocator.free(p.desc),
+        }
+    }
+
+    /// Concrete worst case at a request-body byte limit.
+    pub fn worstCaseAt(self: Bound, body_limit_bytes: u64) ?u64 {
+        return switch (self) {
+            .constant => |v| v,
+            .linear => |l| blk: {
+                const source_ceiling = body_limit_bytes / 2 + 1;
+                const product = std.math.mul(u64, l.coefficient, source_ceiling) catch std.math.maxInt(u64);
+                break :blk std.math.add(u64, l.base, product) catch std.math.maxInt(u64);
+            },
+            .unbounded => null,
+        };
+    }
+};
+
+fn saturatingAddU32(a: u32, b: u32) u32 {
+    const sum, const overflow = @addWithOverflow(a, b);
+    return if (overflow != 0) std.math.maxInt(u32) else sum;
+}
+
+fn sameProvenance(a: BoundProvenance, b: BoundProvenance) bool {
+    return a.line == b.line and
+        a.column == b.column and
+        std.mem.eql(u8, a.desc, b.desc);
+}
+
+fn dupeProvenance(allocator: std.mem.Allocator, p: BoundProvenance) !BoundProvenance {
+    return .{
+        .line = p.line,
+        .column = p.column,
+        .desc = try allocator.dupe(u8, p.desc),
+    };
+}
+
+/// One module's worst-path bound.
+pub const CostEntry = struct {
+    module: []const u8, // owned
+    bound: Bound, // owned
+};
+
+/// Per-handler cost envelope: worst-path call bounds per virtual module,
+/// plus the combined total.
+pub const CostEnvelope = struct {
+    entries: std.ArrayList(CostEntry) = .empty,
+    total: Bound = .{ .constant = 0 },
+    /// Mirrors behaviors_exhaustive: false when PathGenerator hit MAX_PATHS.
+    exhaustive: bool = true,
+
+    pub fn find(self: *const CostEnvelope, module: []const u8) ?*const Bound {
+        for (self.entries.items) |*entry| {
+            if (std.mem.eql(u8, entry.module, module)) return &entry.bound;
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *CostEnvelope, allocator: std.mem.Allocator) void {
+        for (self.entries.items) |*entry| {
+            allocator.free(entry.module);
+            entry.bound.deinitOwned(allocator);
+        }
+        self.entries.deinit(allocator);
+        self.total.deinitOwned(allocator);
+    }
+
+    pub fn dupeOwned(self: *const CostEnvelope, allocator: std.mem.Allocator) !CostEnvelope {
+        var copy = CostEnvelope{
+            .entries = .empty,
+            .total = try self.total.dupeOwned(allocator),
+            .exhaustive = self.exhaustive,
+        };
+        errdefer copy.deinit(allocator);
+
+        try copy.entries.ensureTotalCapacity(allocator, self.entries.items.len);
+        for (self.entries.items) |entry| {
+            const module = try allocator.dupe(u8, entry.module);
+            errdefer allocator.free(module);
+            const bound = try entry.bound.dupeOwned(allocator);
+            copy.entries.appendAssumeCapacity(.{
+                .module = module,
+                .bound = bound,
+            });
+        }
+        return copy;
+    }
+};
+
+pub const ServiceCallInfo = struct {
+    service: []const u8, // owned
+    route_pattern: []const u8, // owned
+    /// Service or route_pattern is computed at runtime. When true, the
+    /// per-surface fields below carry no useful information.
+    dynamic: bool = false,
+    path_params: KnownList = .{ .complete = .empty },
+    query_keys: KnownList = .{ .complete = .empty },
+    header_keys: KnownList = .{ .complete = .empty },
+    body: BodySpec = .none,
+
+    /// A statically-enumerated list of string keys, or "opaque" when the
+    /// analyzer could not prove the set is complete. The system linker
+    /// treats `.dynamic` as "cannot prove" and fails closed on required keys.
+    pub const KnownList = union(enum) {
+        complete: std.ArrayList([]const u8), // each entry owned
+        dynamic,
+
+        pub fn isDynamic(self: KnownList) bool {
+            return self == .dynamic;
+        }
+
+        pub fn items(self: KnownList) []const []const u8 {
+            return switch (self) {
+                .complete => |list| list.items,
+                .dynamic => &.{},
+            };
+        }
+
+        pub fn deinitOwned(self: *KnownList, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .complete => |*list| {
+                    for (list.items) |s| allocator.free(s);
+                    list.deinit(allocator);
+                },
+                .dynamic => {},
+            }
+        }
+
+        pub fn markDynamic(self: *KnownList, allocator: std.mem.Allocator) void {
+            self.deinitOwned(allocator);
+            self.* = .dynamic;
+        }
+    };
+
+    /// Three-state body presence: no body field, body present (statically
+    /// inspectable), or body present but opaque at compile time. Replaces the
+    /// prior `has_body: bool` + `body_dynamic: bool` pair where some
+    /// combinations were meaningless.
+    pub const BodySpec = union(enum) {
+        none,
+        present,
+        dynamic,
+
+        pub fn isDynamic(self: BodySpec) bool {
+            return self == .dynamic;
+        }
+
+        pub fn isPresent(self: BodySpec) bool {
+            return self != .none;
+        }
+    };
+
+    pub fn markAllDynamic(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
+        self.path_params.markDynamic(allocator);
+        self.query_keys.markDynamic(allocator);
+        self.header_keys.markDynamic(allocator);
+        self.body = .dynamic;
+    }
+
+    pub fn deinit(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.service);
+        allocator.free(self.route_pattern);
+        self.path_params.deinitOwned(allocator);
+        self.query_keys.deinitOwned(allocator);
+        self.header_keys.deinitOwned(allocator);
+    }
+};
+
+/// One `zttp:workflow` `call(name, init?)`/`saga([...])`/`fanout([...])`
+/// dispatch target: a named co-located sub-handler reached in-process via a
+/// `--system` bundle. The system linker resolves `target` against the
+/// bundle's handler names and `route_pattern` against the target's own
+/// routes, the same way `ServiceCallInfo` is resolved - but simpler, since
+/// `init` has no path-param-templating or required-query/header convention
+/// to prove (the path is matched directly, like an `EmittedAffordance` href).
+pub const WorkflowCallInfo = struct {
+    target: []const u8, // owned
+    /// Synthesized "METHOD /path" (defaults: GET, /) from `init.method`/
+    /// `init.path` when present and literal.
+    route_pattern: []const u8, // owned
+    /// True when `target` or `init.method`/`init.path` is not a compile-time
+    /// literal. A dynamic call is counted, never resolved, and downgrades
+    /// the bundle proof - fail-closed exactly like `ServiceCallInfo`.
+    dynamic: bool = false,
+
+    pub fn deinit(self: *WorkflowCallInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.target);
+        allocator.free(self.route_pattern);
+    }
+};
+
+/// One hypermedia affordance emitted by a `resource(data, affordances)` call:
+/// the single source of truth the system linker resolves to a bundle route
+/// (Subsystem 4 in the workflow/hypermedia design). Extracted strict-literal
+/// and fail-closed exactly like `ServiceCallInfo`: a non-literal `href` (or a
+/// computed `affordances` argument) sets `dynamic` so the linker never claims a
+/// dynamic link resolved.
+pub const EmittedAffordance = struct {
+    rel: []const u8, // owned
+    /// HTTP method, defaulting to "GET" when the affordance omits one (a HAL
+    /// navigation `_links` entry). Owned.
+    method: []const u8, // owned
+    href: []const u8, // owned
+    /// True when `href` carries a `{param}` placeholder (a HAL-FORMS templated
+    /// link). The linker normalizes `{param}` -> `:param` before route matching.
+    templated: bool = false,
+    /// True when `href` (or the enclosing affordance value) was not a compile
+    /// time literal. A dynamic affordance is counted, never resolved, and
+    /// downgrades the bundle proof.
+    dynamic: bool = false,
+
+    pub fn deinit(self: *EmittedAffordance, allocator: std.mem.Allocator) void {
+        allocator.free(self.rel);
+        allocator.free(self.method);
+        allocator.free(self.href);
+    }
+};
+
+/// Aggregate of module capabilities required by a handler's imports.
+/// Stable SHA-256 hash over the canonically-ordered tag names lets the
+/// runtime detect drift between the embedded contract and the linked
+/// module registry.
+pub const CapabilityMatrix = struct {
+    items: [module_binding.capability_count]module_binding.ModuleCapability = undefined,
+    len: u8 = 0,
+    hash: [32]u8 = [_]u8{0} ** 32,
+
+    pub const empty: CapabilityMatrix = .{};
+
+    pub fn slice(self: *const CapabilityMatrix) []const module_binding.ModuleCapability {
+        return self.items[0..self.len];
+    }
+
+    pub fn has(self: *const CapabilityMatrix, cap: module_binding.ModuleCapability) bool {
+        for (self.slice()) |c| {
+            if (c == cap) return true;
+        }
+        return false;
+    }
+};
+
+/// Union `required_capabilities` across every module resolved from
+/// `specifiers`. Unknown specifiers (third-party modules not in the linked
+/// registry) are silently skipped.
+pub fn computeCapabilityMatrix(specifiers: []const []const u8) CapabilityMatrix {
+    var matrix: CapabilityMatrix = .{};
+    var seen = [_]bool{false} ** module_binding.capability_count;
+    for (specifiers) |spec| {
+        const binding = builtin_modules.fromSpecifier(spec) orelse continue;
+        for (binding.required_capabilities) |c| {
+            seen[@intFromEnum(c)] = true;
+        }
+    }
+    var n: u8 = 0;
+    for (std.enums.values(module_binding.ModuleCapability)) |c| {
+        if (seen[@intFromEnum(c)]) {
+            matrix.items[n] = c;
+            n += 1;
+        }
+    }
+    matrix.len = n;
+    matrix.hash = module_binding.capabilityHash(matrix.slice());
+    return matrix;
+}
+
+/// Author-declared intent assertions. Extracted from a static-literal
+/// `export const intent = { assertions: [...] }` in the handler module.
+/// Lives **outside** the proof boundary: assertions are runnable examples,
+/// not new compiler obligations. They are extracted into the contract
+/// (`HandlerContract.intent.assertions`) at build time; executing each entry
+/// through the handler test path is deferred.
+///
+/// Dynamic forms (function, spread, computed) must fail extraction rather
+/// than degrading to "unknown", to preserve the deterministic-extraction
+/// guardrail.
+pub const IntentExpectedHeader = struct {
+    name: []const u8, // owned
+    value: []const u8, // owned
+
+    pub fn deinit(self: *IntentExpectedHeader, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.value);
+    }
+};
+
+pub const IntentAssertion = struct {
+    /// Author-supplied label, used in the runner's pass/fail report.
+    name: []const u8, // owned
+    /// HTTP method, e.g. "GET". Uppercased at extraction.
+    method: []const u8, // owned
+    /// Request path including any query string.
+    path: []const u8, // owned
+    /// Optional raw JSON body (as written in the literal). Owned; the
+    /// runner parses this when constructing the synthetic request.
+    request_body_json: ?[]const u8 = null,
+    /// Optional expected response status; null means no status assertion.
+    expected_status: ?u16 = null,
+    /// Optional raw JSON body fragment expected in the response. Subset
+    /// matching at runtime (every key in expected_body_json must appear
+    /// with the same value in the actual response).
+    expected_body_json: ?[]const u8 = null,
+    /// Optional headers expected on the response, each compared
+    /// case-insensitively by name.
+    expected_headers: std.ArrayList(IntentExpectedHeader) = .empty,
+    /// One-based source span pointing at the assertion literal, used by
+    /// the runner's failure messages and by the contract diff viewer.
+    source_line: u32 = 0,
+    source_column: u32 = 0,
+
+    pub fn deinit(self: *IntentAssertion, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.method);
+        allocator.free(self.path);
+        if (self.request_body_json) |b| allocator.free(b);
+        if (self.expected_body_json) |b| allocator.free(b);
+        for (self.expected_headers.items) |*h| h.deinit(allocator);
+        self.expected_headers.deinit(allocator);
+    }
+};
+
+pub const IntentInfo = struct {
+    assertions: std.ArrayList(IntentAssertion) = .empty,
+    /// True when the author declared `intent` but the value was dynamic.
+    /// Set by the extractor; surfaces as `intent.dynamic = true` in the
+    /// contract and a per-section verdict on the contract diff (Stream B).
+    dynamic: bool = false,
+
+    pub fn deinit(self: *IntentInfo, allocator: std.mem.Allocator) void {
+        for (self.assertions.items) |*a| a.deinit(allocator);
+        self.assertions.deinit(allocator);
+    }
+};
+
+/// One step of a `saga([...])` call, as extracted by `saga_extractor.zig`.
+pub const SagaStep = struct {
+    /// Owned copy of the step's literal `name`.
+    name: []const u8,
+    /// True when the step object carries a `compensate` key (any value
+    /// shape - only presence is checked, not whether it correctly undoes
+    /// `run`; see ZTS510's scope note).
+    has_compensate: bool,
+
+    pub fn deinit(self: *SagaStep, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+    }
+};
+
+/// One `saga([...])` call site, as extracted by `saga_extractor.zig`.
+/// `dynamic = true` means the argument was not a fully static array of
+/// object literals (spread, computed step, identifier reference, unknown
+/// sibling key, etc.) - `steps` is then empty and no proof is attempted,
+/// mirroring `IntentInfo`'s dynamic-implies-empty invariant.
+pub const SagaCallInfo = struct {
+    steps: std.ArrayList(SagaStep) = .empty,
+    dynamic: bool = false,
+    source_line: u32 = 0,
+    source_column: u32 = 0,
+
+    pub fn deinit(self: *SagaCallInfo, allocator: std.mem.Allocator) void {
+        for (self.steps.items) |*s| s.deinit(allocator);
+        self.steps.deinit(allocator);
+    }
+
+    /// True when every step but possibly the last declares `compensate`
+    /// (KTD6's scope: structural presence, static sagas only).
+    pub fn compensationProven(self: SagaCallInfo) bool {
+        if (self.dynamic or self.steps.items.len == 0) return false;
+        for (self.steps.items[0 .. self.steps.items.len - 1]) |step| {
+            if (!step.has_compensate) return false;
+        }
+        return true;
+    }
+};
+
+/// One helper function's proof capsule, projected for the `proofCapsules`
+/// JSON envelope. Plain data so it carries no import dependency on the
+/// capsule discharge driver. Transient: populated during build, consumed by
+/// `zts check --json` / verify-paths, never serialized into contract.json
+/// and never part of the signed attestation surface.
+pub const CapsuleSummary = struct {
+    /// Owned copy of the function name.
+    function: []const u8,
+    /// 1-based source line of the function declaration.
+    line: u32,
+    /// Owned, de-duplicated capsule property names declared via `Proof<...>`.
+    declared: std.ArrayList([]const u8) = .empty,
+    proven_total: bool = false,
+    proven_pure: bool = false,
+    proven_read_only: bool = false,
+    proven_deterministic: bool = false,
+    /// True when the function declared a capsule and every property held.
+    discharged: bool = false,
+    /// True when the helper is exported. Used by the opt-in docs mode.
+    exported: bool = false,
+    /// True when the handler can reach this helper through the analyzed call
+    /// graph. Used by canonical diagnostics so unrelated exported helpers do
+    /// not break a handler proof.
+    handler_reachable: bool = false,
+
+    pub fn deinit(self: *CapsuleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.function);
+        for (self.declared.items) |s| allocator.free(s);
+        self.declared.deinit(allocator);
+    }
+};
+
+/// One helper function's effect capsule, projected for the `effectCapsules`
+/// JSON envelope. Transient: populated during build, consumed by
+/// `zts check --json`, never serialized into contract.json.
+pub const EffectCapsuleSummary = struct {
+    /// Owned copy of the function name.
+    function: []const u8,
+    /// 1-based source line of the function declaration.
+    line: u32,
+    /// Owned capability names declared via `Effects<...>`.
+    declared: std.ArrayList([]const u8) = .empty,
+    /// Owned capability names effect inference computed for the function.
+    inferred: std.ArrayList([]const u8) = .empty,
+    /// True when the function declared a ceiling and every reached
+    /// capability fell inside it.
+    discharged: bool = false,
+    /// True when the helper is exported. Used by the opt-in docs mode.
+    exported: bool = false,
+    /// True when the handler can reach this helper through the analyzed call
+    /// graph.
+    handler_reachable: bool = false,
+
+    pub fn deinit(self: *EffectCapsuleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.function);
+        for (self.declared.items) |s| allocator.free(s);
+        self.declared.deinit(allocator);
+        for (self.inferred.items) |s| allocator.free(s);
+        self.inferred.deinit(allocator);
+    }
+};
+
+pub const HandlerContract = struct {
+    version: u32 = 17,
+    handler: HandlerLoc,
+    routes: std.ArrayList(RouteInfo),
+    modules: std.ArrayList([]const u8), // each entry owned
+    functions: std.ArrayList(FunctionEntry),
+    env: EnvInfo,
+    egress: EgressInfo,
+    service_calls: std.ArrayList(ServiceCallInfo) = .empty,
+    /// Every `zttp:workflow` `call`/`saga`/`fanout` dispatch target found in
+    /// the handler module. The system linker resolves each non-dynamic entry
+    /// against a `--system` bundle, mirroring `service_calls` resolution.
+    workflow_calls: std.ArrayList(WorkflowCallInfo) = .empty,
+    /// Hypermedia affordances emitted by `resource(data, affordances)` calls.
+    /// The system linker resolves each non-dynamic affordance to a bundle route
+    /// (`all_affordances_resolved`). Owned; each entry's `deinit` runs at free.
+    affordances: std.ArrayList(EmittedAffordance) = .empty,
+    /// True when a `resource()` call passed a computed (non-literal) affordances
+    /// argument, so the emitted affordance set cannot be enumerated. Counted as
+    /// a dynamic link: downgrades the bundle proof, never claimed resolved.
+    affordances_dynamic: bool = false,
+    cache: CacheInfo,
+    sql: SqlInfo,
+    durable: DurableInfo,
+    scope: ScopeInfo,
+    websocket: WebSocketInfo = .{},
+    api: ApiInfo,
+    verification: ?VerificationInfo,
+    aot: ?AotInfo,
+    fault_coverage: ?FaultCoverageInfo = null,
+    rate_limiting: ?RateLimitInfo = null,
+    properties: ?HandlerProperties = null,
+    /// Author-declared intent assertions. Null when the handler module
+    /// has no `export const intent` literal. See `IntentInfo` for shape.
+    intent: ?IntentInfo = null,
+    /// Every `saga([...])` call site found in the handler module. See
+    /// `SagaCallInfo` for shape and `saga_extractor.zig` for extraction.
+    sagas: std.ArrayList(SagaCallInfo) = .empty,
+    /// In-memory provenance for demoted properties. Not serialized; populated
+    /// during build for the live-reload HUD's "Why" line. Snippets are
+    /// borrowed static strings, so deinit is a no-op.
+    property_provenance: PropertyProvenance = .{},
+    /// Active handler specs. An explicit `Response & Spec<"name" | ...>` on
+    /// the handler return type narrows this set; without one, every supported
+    /// v1 spec is active by default. Each entry is an owned spec name string.
+    /// The verifier emits ZTS500 for any member whose corresponding
+    /// `HandlerProperties` field is false.
+    declared_specs: std.ArrayList([]const u8) = .empty,
+    /// True when `declared_specs` is the IMPLICIT default profile (the
+    /// handler return type carried no `Spec<...>`), rather than an
+    /// author-declared set. Drives the actionable "declare a narrow Spec"
+    /// diagnostic. Transient: not serialized; recomputed each build.
+    declared_specs_implicit: bool = false,
+    /// Per-specifier proof facts produced by partner virtual-module manifest
+    /// `contractExtractions`. Keys are owned specifier strings (e.g.
+    /// `"zttp-ext:stripe"`); values own all nested data. Emitted under
+    /// `extensions` in contract.json.
+    extensions: std.StringHashMapUnmanaged(ExtensionContract) = .empty,
+    /// Per-spec discharge diagnostics produced by `spec_discharge.dischargeSpecs`.
+    /// Empty when every declared spec is satisfied. Owned by the contract;
+    /// each entry's deinit must run before the contract is freed.
+    spec_diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
+    /// Per-helper proof capsules (`Proof<...>` discharge results). Transient
+    /// analysis output: populated during build, rendered as `proofCapsules`
+    /// in the `--json` analysis envelope. NOT serialized into contract.json
+    /// and NOT part of the signed attestation surface - the json writer
+    /// skips it. Owned by the contract.
+    function_capsules: std.ArrayList(CapsuleSummary) = .empty,
+    /// Per-helper effect capsules (`Effects<...>` discharge results).
+    /// Transient analysis output: populated during build, rendered as
+    /// `effectCapsules` in the `--json` analysis envelope. NOT serialized
+    /// into contract.json. Owned by the contract.
+    function_effect_capsules: std.ArrayList(EffectCapsuleSummary) = .empty,
+    behaviors: std.ArrayList(BehaviorPath) = .empty,
+    behaviors_exhaustive: bool = false,
+    /// Per-module worst-path cost bounds derived from path enumeration.
+    /// Null when no handler function was found (mirrors properties == null).
+    cost_envelope: ?CostEnvelope = null,
+    capabilities: CapabilityMatrix = .empty,
+    /// The capability budget the handler declared via `Effects<...>` on its
+    /// return type. Empty when the handler declares no budget. Serialized
+    /// into contract.json under `sandbox.declaredBudget`.
+    capability_budget: CapabilityMatrix = .empty,
+    /// SHA-256 of the compiled handler bytecode. Stamped by the build
+    /// pipeline after compile and verified at runtime startup.
+    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    /// SHA-256 of the zts rule registry used to extract this contract.
+    /// Populated in `build()`; verified at runtime against the registry the
+    /// running binary was linked with.
+    policy_hash: [32]u8 = [_]u8{0} ** 32,
+    /// SHA-256 of the embedded Wasm policy artifact (Phase 2). All-zeros
+    /// means no Wasm policy is present; the runtime falls back to the
+    /// in-process LocalPolicyChecker. Non-zero values are verified at startup
+    /// against the artifact on disk before the WasmPool is populated.
+    wasm_policy_hash: [32]u8 = [_]u8{0} ** 32,
+
+    pub const FunctionEntry = struct {
+        module: []const u8, // owned
+        names: std.ArrayList([]const u8), // each entry owned
+    };
+
+    pub fn deinit(self: *HandlerContract, allocator: std.mem.Allocator) void {
+        allocator.free(self.handler.path);
+        for (self.routes.items) |route| {
+            allocator.free(route.pattern);
+        }
+        self.routes.deinit(allocator);
+        for (self.modules.items) |m| {
+            allocator.free(m);
+        }
+        self.modules.deinit(allocator);
+        for (self.functions.items) |*entry| {
+            allocator.free(entry.module);
+            for (entry.names.items) |n| {
+                allocator.free(n);
+            }
+            entry.names.deinit(allocator);
+        }
+        self.functions.deinit(allocator);
+        for (self.env.literal.items) |s| {
+            allocator.free(s);
+        }
+        self.env.literal.deinit(allocator);
+        for (self.egress.hosts.items) |s| {
+            allocator.free(s);
+        }
+        self.egress.hosts.deinit(allocator);
+        for (self.egress.urls.items) |s| {
+            allocator.free(s);
+        }
+        self.egress.urls.deinit(allocator);
+        for (self.service_calls.items) |*call| {
+            call.deinit(allocator);
+        }
+        self.service_calls.deinit(allocator);
+        for (self.workflow_calls.items) |*call| {
+            call.deinit(allocator);
+        }
+        self.workflow_calls.deinit(allocator);
+        for (self.affordances.items) |*aff| {
+            aff.deinit(allocator);
+        }
+        self.affordances.deinit(allocator);
+        for (self.cache.namespaces.items) |s| {
+            allocator.free(s);
+        }
+        self.cache.namespaces.deinit(allocator);
+        self.sql.deinit(allocator);
+        self.durable.deinit(allocator);
+        self.scope.deinit(allocator);
+        self.api.deinit(allocator);
+        for (self.behaviors.items) |*b| {
+            @constCast(b).deinit(allocator);
+        }
+        self.behaviors.deinit(allocator);
+        if (self.cost_envelope) |*envelope| envelope.deinit(allocator);
+        for (self.declared_specs.items) |s| {
+            allocator.free(s);
+        }
+        self.declared_specs.deinit(allocator);
+        for (self.spec_diagnostics.items) |*d| {
+            @constCast(d).deinit(allocator);
+        }
+        self.spec_diagnostics.deinit(allocator);
+        for (self.function_capsules.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.function_capsules.deinit(allocator);
+        for (self.function_effect_capsules.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.function_effect_capsules.deinit(allocator);
+        var ext_it = self.extensions.iterator();
+        while (ext_it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        self.extensions.deinit(allocator);
+        if (self.intent) |*i| i.deinit(allocator);
+        for (self.sagas.items) |*s| s.deinit(allocator);
+        self.sagas.deinit(allocator);
+    }
+};

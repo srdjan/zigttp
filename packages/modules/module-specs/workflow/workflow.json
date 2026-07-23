@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:workflow",
-  "source": "packages/zigts/src/modules/workflow/workflow.zig",
+  "specifier": "zttp:workflow",
+  "source": "packages/zts/src/modules/workflow/workflow.zig",
   "requiredCapabilities": [
     "runtime_callback"
   ],

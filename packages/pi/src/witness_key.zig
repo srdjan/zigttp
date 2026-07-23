@@ -12,8 +12,8 @@
 //! returns an owned hex-string slice - what the ledger payload stores.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const counterexample = zigts.counterexample;
+const zts = @import("zts");
+const counterexample = zts.counterexample;
 
 /// Allocate the stable-key hex string for a witness. Caller owns the
 /// returned slice.

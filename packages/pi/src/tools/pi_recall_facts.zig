@@ -1,7 +1,7 @@
 //! pi_recall_facts - read back the project-scoped fact corpus.
 //!
 //! Companion to `pi_remember_fact`. Returns the persisted entries from
-//! `<project_root>/.zigttp/memory.jsonl`, pinned-first then most-recent
+//! `<project_root>/.zttp/memory.jsonl`, pinned-first then most-recent
 //! unpinned, capped by an optional `limit`. The persona already injects a
 //! budgeted selection at session start; this tool is for the agent to
 //! reach into the rest of the corpus on demand (e.g. when the user
@@ -21,11 +21,11 @@
 //! whether to widen its query.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const memory_store = @import("../memory_store.zig");
-const json_utils = zigts.json_utils;
+const json_utils = zts.json_utils;
 
 const name = "pi_recall_facts";
 const default_limit: usize = 20;
@@ -36,7 +36,7 @@ pub const tool: registry_mod.ToolDef = .{
     .effect = .read_workspace,
     .description =
     \\Read back the persisted project memory corpus from
-    \\.zigttp/memory.jsonl. Pinned facts come first (chronological), then
+    \\.zttp/memory.jsonl. Pinned facts come first (chronological), then
     \\unpinned facts most-recent first. `limit` caps the response (default
     \\20). `pinned_only` filters to just the pinned set. A missing corpus
     \\is not an error: the response is { "ok": true, "returned": 0,

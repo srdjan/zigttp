@@ -1,5 +1,5 @@
 //! Curated compile-time model registry. Capability metadata describes what a
-//! model can support; request policy describes what zigttp intentionally asks
+//! model can support; request policy describes what zttp intentionally asks
 //! for. Selection is exact and provider-aware.
 
 const std = @import("std");

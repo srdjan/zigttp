@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zigts");
+const zq = @import("zts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
@@ -777,7 +777,7 @@ test "durable recovery: full dead-run lifecycle - quarantine writes a record, re
 
 test "durable recovery: the untracked startup path honors a standing dead-run record" {
     // Regression for a bug caught in code review: the null-tracker wrapper
-    // `recoverIncompleteOplogs` (the one `zigttp serve --durable <dir>`
+    // `recoverIncompleteOplogs` (the one `zttp serve --durable <dir>`
     // actually calls at process startup, before the scheduler's tracked
     // poll loop even starts) must also skip a quarantined/discarded run.
     // Every other dead-run test in this file drives `recoverIncompleteOplogsTracked`
@@ -887,7 +887,7 @@ test "durable recovery: recoverOne completes real JS execution without double-fr
     try zq.file_io.writeFile(allocator, oplog_path, oplog);
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  return run("recover:complete-execution", () => {
         \\    const v = step("s", () => 1);

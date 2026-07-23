@@ -2,20 +2,20 @@
 //!
 //! Converts internal diagnostics from the parser, BoolChecker, TypeChecker,
 //! and HandlerVerifier into machine-readable JSON for the compiler-in-the-loop
-//! workflow. `zigts expert` calls `zigts check --json` and parses these
+//! workflow. `zts expert` calls `zts check --json` and parses these
 //! diagnostics to fix handler code using the `suggestion` field.
 //!
 //! Architecture: each checker's Diagnostic -> JsonDiagnostic -> JSON on stdout
 
 const std = @import("std");
-const zigts = @import("zigts");
-const parser = zigts.parser;
-const bool_checker = zigts.bool_checker;
-const type_checker = zigts.type_checker;
-const strict_checker = zigts.strict_checker;
-const handler_verifier = zigts.handler_verifier;
-const flow_checker = zigts.flow_checker;
-const handler_contract = zigts.handler_contract;
+const zts = @import("zts");
+const parser = zts.parser;
+const bool_checker = zts.bool_checker;
+const type_checker = zts.type_checker;
+const strict_checker = zts.strict_checker;
+const handler_verifier = zts.handler_verifier;
+const flow_checker = zts.flow_checker;
+const handler_contract = zts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
 pub const IrView = parser.IrView;
@@ -228,7 +228,7 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
 }
 
 /// Type stripper error codes: ZTS04x (continues the parser ZTS0xx range).
-fn stripErrorCode(kind: zigts.StripDiagnosticKind) []const u8 {
+fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
     return switch (kind) {
         .any_type => "ZTS041",
         .as_assertion => "ZTS042",
@@ -237,9 +237,9 @@ fn stripErrorCode(kind: zigts.StripDiagnosticKind) []const u8 {
 }
 
 /// Map a TypeScript stripper rejection to a structured diagnostic so `--json`
-/// consumers and the `zigts expert` agent see a ZTS code, location, and
+/// consumers and the `zts expert` agent see a ZTS code, location, and
 /// suggestion instead of a swallowed `error.StripFailed`.
-pub fn fromStripError(diag: zigts.StripDiagnostic, file: []const u8) JsonDiagnostic {
+pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnostic {
     const parts = splitSuggestion(diag.kind.message());
     return .{
         .code = stripErrorCode(diag.kind),
@@ -249,7 +249,7 @@ pub fn fromStripError(diag: zigts.StripDiagnostic, file: []const u8) JsonDiagnos
         .line = diag.line,
         // Clamp instead of @intCast: a strip error past column 65535 (a minified
         // single-line bundle is one long line) would otherwise panic
-        // `zigttp check --json`.
+        // `zttp check --json`.
         .column = @intCast(@min(diag.column, std.math.maxInt(u16))),
         .suggestion = parts.suggestion,
     };
@@ -601,7 +601,7 @@ fn writeEffectCapsulesJson(writer: anytype, items: anytype) !void {
 // -------------------------------------------------------------------------
 
 pub fn writeModulesJson(writer: anytype) !void {
-    const builtin_modules = zigts.builtin_modules;
+    const builtin_modules = zts.builtin_modules;
     try writer.writeByte('[');
     for (builtin_modules.all, 0..) |binding, i| {
         if (i > 0) try writer.writeByte(',');
@@ -635,7 +635,7 @@ pub fn writeModulesJson(writer: anytype) !void {
 }
 
 pub fn writeModulesText(writer: anytype) !void {
-    const builtin_modules = zigts.builtin_modules;
+    const builtin_modules = zts.builtin_modules;
     for (builtin_modules.all) |binding| {
         try writer.print("{s}\n", .{binding.specifier});
         for (binding.exports) |func| {
@@ -825,7 +825,7 @@ const features = [_]Feature{
         .alternative = "use string methods (includes, startsWith, etc.)",
         .blocked_reason = "regex literals describe an opaque accept set the validator cannot reason about.",
         .failure_class = "opaque accept set and catastrophic backtracking",
-        .proof_unlocked = "shape-checkable validation via zigttp:validate schemas",
+        .proof_unlocked = "shape-checkable validation via zttp:validate schemas",
     },
     .{
         .name = "delete",
@@ -1079,12 +1079,12 @@ pub fn writeRestrictionsMarkdown(writer: anytype) !void {
         \\# Restrictions to Proofs
         \\
         \\This document is generated from `packages/tools/src/json_diagnostics.zig`.
-        \\It maps each zigts language restriction to the failure class it eliminates
-        \\and the proof it unlocks. Run `zigts restrictions` for the live table.
+        \\It maps each zts language restriction to the failure class it eliminates
+        \\and the proof it unlocks. Run `zts restrictions` for the live table.
         \\
         \\Every entry is a deliberate cut from JavaScript or TypeScript that buys
         \\a specific soundness guarantee. The author-declared intent assertions
-        \\(extracted with `-Dcontract`) and the contract diff (`zigttp proofs show`)
+        \\(extracted with `-Dcontract`) and the contract diff (`zttp proofs show`)
         \\live above these cuts; the cuts themselves are what make those
         \\higher-level claims possible.
         \\
@@ -1227,7 +1227,7 @@ test "writeRestrictionsMarkdown mentions every blocked feature" {
 }
 
 test "fromStripError maps any-type to ZTS041 with a suggestion" {
-    const diag = zigts.StripDiagnostic{ .line = 3, .column = 12, .kind = .any_type };
+    const diag = zts.StripDiagnostic{ .line = 3, .column = 12, .kind = .any_type };
     const jd = fromStripError(diag, "handler.ts");
     try std.testing.expectEqualStrings("ZTS041", jd.code);
     try std.testing.expectEqualStrings("error", jd.severity);

@@ -5,4 +5,4 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 zig build -Doptimize=ReleaseFast -Dhandler=examples/handler/handler-full.tsx &&
-./zig-out/bin/zigttp serve -p 3000
+./zig-out/bin/zttp serve -p 3000

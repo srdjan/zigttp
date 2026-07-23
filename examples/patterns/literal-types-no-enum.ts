@@ -1,12 +1,12 @@
 // Literal union types instead of enums, plus template literal types.
 //
-// zigts does not support `enum` (use a literal union: a finite set of
+// zts does not support `enum` (use a literal union: a finite set of
 // string literals joined with `|`). It also rejects `as const`: a `const`
 // binding already preserves its literal type from the annotation, so no
 // assertion is needed. Template literal types constrain a string to a
 // pattern, here any path under `/api/`.
 
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Method = "GET" | "POST" | "DELETE";
 type ApiRoute = `/api/${string}`;

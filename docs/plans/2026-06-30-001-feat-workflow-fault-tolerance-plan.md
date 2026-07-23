@@ -29,9 +29,9 @@ semantics, then re-running the verification gates.
 
 ## Goal Capsule
 
-Complete Zigttp's workflow and fault-tolerance work so durable execution is not just available, but proven, replay-safe, operable after crashes, and clearly documented.
+Complete Zttp's workflow and fault-tolerance work so durable execution is not just available, but proven, replay-safe, operable after crashes, and clearly documented.
 
-The product anchor is the current Strategy: solo developers should be able to let AI write serverless handlers while Zigttp gives them compile-time and runtime evidence about safety, determinism, and deployment behavior.
+The product anchor is the current Strategy: solo developers should be able to let AI write serverless handlers while Zttp gives them compile-time and runtime evidence about safety, determinism, and deployment behavior.
 For this plan, "fault tolerant" means the durable workflow surface has honest semantics across retry, timeout, crash recovery, signals, queue dispatch, receipts, and docs.
 
 Execution profile:
@@ -47,7 +47,7 @@ Execution profile:
 ### Summary
 
 This plan covers the full brainstorm scope: finish the workflow/fault-tolerance capability that already exists in pieces, make the proof system the authority for retry and idempotency claims, and close the testing/docs gaps around crash behavior.
-It deliberately treats adjacent `zigttp:queue` actor work as a boundary to document, not as a durable-workflow persistence target.
+It deliberately treats adjacent `zttp:queue` actor work as a boundary to document, not as a durable-workflow persistence target.
 
 The plan resolves the open brainstorm questions conservatively:
 
@@ -58,7 +58,7 @@ The plan resolves the open brainstorm questions conservatively:
 
 ### Problem Frame
 
-Zigttp now has a broad workflow surface: durable runs, steps, sleeps, signals, fanout, follow, saga, workflow queue dispatch, durable fetch retry for transport failures, and proof/receipt foundations.
+Zttp now has a broad workflow surface: durable runs, steps, sleeps, signals, fanout, follow, saga, workflow queue dispatch, durable fetch retry for transport failures, and proof/receipt foundations.
 The remaining risk is that those pieces can look "done" while still being under-specified in the exact failure modes users care about: crashes between file moves, stuck signals, retry safety, timeout behavior, dead-letter handling, and proof receipts that do not explain the guarantee.
 
 The desired outcome is a system where a user can inspect a handler and answer three questions without reading runtime internals:
@@ -86,7 +86,7 @@ The desired outcome is a system where a user can inspect a handler and answer th
 **User-facing completion**
 
 - **R9 - Queue/saga boundaries are honest**: saga under workflow queue remains rejected and documented in this plan; lifting that limitation requires separate proof and runtime design.
-- **R10 - Actor queue remains adjacent**: `zigttp:queue` continues to be documented as a process-local actor mailbox with retries/dead letters, not as the durable workflow guarantee.
+- **R10 - Actor queue remains adjacent**: `zttp:queue` continues to be documented as a process-local actor mailbox with retries/dead letters, not as the durable workflow guarantee.
 - **R11 - Examples and docs make crash behavior reproducible**: the repo must include workflow examples, mock fixtures, a first durable-workflow tutorial, and a crash drill that exercise the shipped behavior.
 
 ### Success Criteria
@@ -113,7 +113,7 @@ Out of scope:
 
 - General-purpose interpreter preemption for arbitrary CPU-bound user code.
 - Full saga execution through `--workflow-queue`.
-- Durable persistence for the process-local `zigttp:queue` actor module.
+- Durable persistence for the process-local `zttp:queue` actor module.
 - Hosted/cloud workflow orchestration.
 - Automatic default pruning that deletes durable history or queue state without an explicit operator action.
 - Full Node/V8 fidelity or broad JavaScript runtime expansion.
@@ -128,7 +128,7 @@ The plan is grounded in the current checkout:
 - `packages/runtime/src/workflow_queue.zig` has pending/leased/done/dead lanes and lease reclaim, but only narrow queue tests.
 - `packages/runtime/src/durable_store.zig` documents the current signal claim/resume crash window.
 - `packages/runtime/src/runtime_workflow.zig` already rejects saga under workflow queue and preserves `workflow.parallel#N` step names for replay compatibility.
-- `packages/zigts/src/contract_types.zig` already models durable workflow nodes, edges, and proof level.
+- `packages/zts/src/contract_types.zig` already models durable workflow nodes, edges, and proof level.
 - `docs/user-guide.md` and `docs/virtual-modules/README.md` describe the current workflow, durable, and queue surfaces but do not yet provide the tutorial/crash-drill level guide.
 
 ## Planning Contract
@@ -148,7 +148,7 @@ The only scope decisions added by planning are conservative resolutions to the b
 - **KTD6 - Saga queue guardrail**: keep the current saga-under-queue rejection as a tested, documented guardrail; queue-addressable saga compensation is future work.
 - **KTD7 - Retention safety**: add inspection and explicit cleanup controls, but do not introduce default background deletion of durable state.
 - **KTD8 - Replay compatibility**: preserve response-part replay, `workflow.parallel#N` internal step keys, `workflow.follow` receipt alignment, and portable `system_hash` identity.
-- **KTD9 - Actor queue boundary**: keep `zigttp:queue` as process-local actor messaging; do not blend its semantics with durable workflow state.
+- **KTD9 - Actor queue boundary**: keep `zttp:queue` as process-local actor messaging; do not blend its semantics with durable workflow state.
 
 ### High-Level Technical Design
 
@@ -306,14 +306,14 @@ Teach the proof layer to emit useful retry/idempotency/fault-coverage claims wit
 
 **Files**
 
-- `packages/zigts/src/contract_types.zig`
-- `packages/zigts/src/contract_builder.zig`
-- `packages/zigts/src/contract_json_writer.zig`
-- `packages/zigts/src/contract_json_parser.zig`
-- `packages/zigts/src/flow_checker.zig`
-- `packages/zigts/src/proof_trace.zig`
-- `packages/zigts/src/system_linker.zig`
-- `packages/zigts/src/handler_contract.zig`
+- `packages/zts/src/contract_types.zig`
+- `packages/zts/src/contract_builder.zig`
+- `packages/zts/src/contract_json_writer.zig`
+- `packages/zts/src/contract_json_parser.zig`
+- `packages/zts/src/flow_checker.zig`
+- `packages/zts/src/proof_trace.zig`
+- `packages/zts/src/system_linker.zig`
+- `packages/zts/src/handler_contract.zig`
 
 **Approach**
 
@@ -347,7 +347,7 @@ Connect proof properties to runtime behavior so the system fails closed when a w
 - `packages/runtime/src/durable_store.zig`
 - `packages/runtime/src/runtime_workflow.zig`
 - `packages/runtime/src/zruntime.zig`
-- `packages/zigts/src/modules/workflow/durable.zig`
+- `packages/zts/src/modules/workflow/durable.zig`
 
 **Approach**
 
@@ -380,9 +380,9 @@ Make workflow/fault-tolerance guarantees visible in the artifacts users already 
 - `packages/tools/src/deploy_manifest.zig`
 - `packages/runtime/src/attest/build_receipt.zig`
 - `packages/runtime/src/attest/header_strings.zig`
-- `packages/zigts/src/hypermedia_receipt.zig`
-- `packages/zigts/src/contract_json_writer.zig`
-- `packages/zigts/src/proof_trace.zig`
+- `packages/zts/src/hypermedia_receipt.zig`
+- `packages/zts/src/contract_json_writer.zig`
+- `packages/zts/src/proof_trace.zig`
 - `packages/pi/src/proof_enrichment.zig`
 - `packages/pi/src/expert_workflow.zig`
 - `packages/tools/tests/fixtures/expert/`
@@ -428,7 +428,7 @@ Turn the runtime/proof behavior into runnable examples and user-facing documenta
 - Extend the example test script to run workflow fixtures.
 - Add a durable workflows guide that explains proof vs runtime guarantees.
 - Add a first-workflow tutorial with a crash drill.
-- Document the `zigttp:queue` actor boundary separately from durable workflow queue semantics.
+- Document the `zttp:queue` actor boundary separately from durable workflow queue semantics.
 - Keep saga queue behavior documented as unsupported for now.
 
 **Tests**
@@ -477,7 +477,7 @@ Run focused gates during implementation, then close with the aggregate gates.
 |---|---|
 | Format | `zig fmt --check build.zig packages/` |
 | Runtime workflow tests | `zig build test-zruntime` |
-| ZigTS/proof tests | `zig build test-zigts` |
+| ZigTS/proof tests | `zig build test-zts` |
 | CLI tests | `zig build test-cli` |
 | Examples | `bash scripts/test-examples.sh` |
 | Docs | `zig build test-docs-drift test-doc-links` |

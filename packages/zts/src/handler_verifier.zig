@@ -1,0 +1,1766 @@
+//! Compile-Time Handler Verifier
+//!
+//! Statically proves handler functions cannot fail in production by verifying:
+//! 1. Every code path returns a Response (exhaustive return analysis)
+//! 2. Result values are checked before access (result safety)
+//! 3. No unreachable code after unconditional returns
+//! 4. No unused variable declarations
+//! 5. Match expressions are provably exhaustive or have default arms
+//! 6. Optional values from virtual modules are checked before use
+//!
+//! This is possible because zttp's JS subset bans most non-trivial control flow:
+//! no while/do-while (no back-edges), no try/catch (no exceptional paths).
+//! break/continue are allowed within for-of only (forward jumps, no new back-edges).
+//! The IR tree IS the control flow graph.
+//! Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+
+const std = @import("std");
+const ir = @import("parser/ir.zig");
+const object = @import("object.zig");
+const context = @import("context.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
+const type_checker_mod = @import("type_checker.zig");
+const bool_checker_mod = @import("bool_checker.zig");
+const match_analysis_mod = @import("match_analysis.zig");
+const repair_intent_mod = @import("repair_intent.zig");
+
+pub const RepairIntent = repair_intent_mod.RepairIntent;
+
+const Node = ir.Node;
+const NodeIndex = ir.NodeIndex;
+const NodeTag = ir.NodeTag;
+const IrView = ir.IrView;
+const null_node = ir.null_node;
+const TypeEnv = type_env_mod.TypeEnv;
+const TypeChecker = type_checker_mod.TypeChecker;
+const TypeIndex = type_pool_mod.TypeIndex;
+const null_type_idx = type_pool_mod.null_type_idx;
+
+// ---------------------------------------------------------------------------
+// Diagnostic types
+// ---------------------------------------------------------------------------
+
+pub const Severity = enum {
+    err,
+    warning,
+
+    pub fn label(self: Severity) []const u8 {
+        return switch (self) {
+            .err => "error",
+            .warning => "warning",
+        };
+    }
+};
+
+pub const DiagnosticKind = enum {
+    // Return analysis (Check 1)
+    missing_return_else,
+    missing_return_default,
+    missing_return_path,
+
+    // Result checking (Check 2)
+    unchecked_result_value,
+
+    // Unreachable code (Check 3)
+    unreachable_after_return,
+
+    // Dead variables (Check 4)
+    unused_variable,
+    unused_import,
+
+    // Match expression (Check 5)
+    non_exhaustive_match,
+
+    // Optional checking (Check 6)
+    unchecked_optional_use,
+    unchecked_optional_access,
+
+    // State isolation (Check 7)
+    module_scope_mutation,
+
+    // WebSocket event exports (Check 8)
+    /// Handler imports `zttp:websocket` but does not export
+    /// `onMessage`. The module surface is useless without at least
+    /// one event handler — the import almost certainly reflects an
+    /// unfinished refactor.
+    websocket_import_without_events,
+    /// Handler exports at least one of `onOpen` / `onMessage` /
+    /// `onClose` but does not import `zttp:websocket`. The exports
+    /// would be dispatched by the runtime but `send`/`close`/etc.
+    /// are unreachable without the import.
+    websocket_events_without_import,
+
+    // Author-declared spec discharge (Check 9)
+    /// The author declared `Spec<"name">` but the corresponding
+    /// `HandlerProperties` field is false. The compiler refuses to
+    /// build because the handler does not satisfy its own stated
+    /// obligation.
+    spec_not_discharged,
+    /// The author declared a spec that contradicts an import already
+    /// present in the contract (e.g. `Spec<"read_only">` while
+    /// importing a writing function from `zttp:cache`). Failing
+    /// fast keeps the autoloop from burning turns trying to remove
+    /// the user's actual feature.
+    spec_incompatible_with_import,
+    /// The author declared a spec name not in the v1 set. Surfaced
+    /// with the list of valid names so the author can correct the
+    /// typo or pick a defined spec.
+    spec_unknown_name,
+};
+
+pub const Diagnostic = struct {
+    severity: Severity,
+    kind: DiagnosticKind,
+    node: NodeIndex,
+    message: []const u8,
+    help: ?[]const u8,
+    /// For unchecked_result_value: the virtual module that produced the result.
+    /// Borrowed from the module binding registry - always valid.
+    source_module: ?[]const u8 = null,
+    /// For unchecked_result_value: the function that produced the result.
+    /// Borrowed from the module binding registry - always valid.
+    source_func: ?[]const u8 = null,
+    /// Typed repair primitive the agent uses to pick an apply step directly.
+    /// `null` when no single canonical
+    /// repair applies (e.g. unused_variable — needs a free-form delete).
+    repair_intent: ?RepairIntent = null,
+};
+
+/// Return status for a statement or block - used by exhaustive return analysis.
+const ReturnStatus = enum {
+    always, // every path through this node returns
+    never, // no path through this node returns
+    sometimes, // some paths return, some don't
+};
+
+/// Pure path-return analysis for an arbitrary function body. Returns true
+/// when every path through `body` reaches a `return`. Unlike the verifier's
+/// `stmtReturns`, this emits no diagnostics and needs no `HandlerVerifier`
+/// instance, so capsule discharge can call it per-helper to settle the
+/// `total` proof property. Expression-bodied arrows count as total: the
+/// expression is itself the return value.
+pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
+    const tag = ir_view.getTag(body) orelse return false;
+    return switch (tag) {
+        .block, .program => pureBlockReturns(ir_view, body) == .always,
+        .return_stmt => true,
+        .if_stmt => pureStmtReturns(ir_view, body) == .always,
+        .for_of_stmt,
+        .var_decl,
+        .expr_stmt,
+        .empty_stmt,
+        .import_decl,
+        .export_decl,
+        .function_decl,
+        .break_stmt,
+        .continue_stmt,
+        => false,
+        // Anything else is an expression-bodied arrow; the expression is the
+        // return value, so every path returns.
+        else => true,
+    };
+}
+
+fn pureStmtReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const tag = ir_view.getTag(node) orelse return .never;
+    return switch (tag) {
+        .return_stmt => .always,
+        .block, .program => pureBlockReturns(ir_view, node),
+        .if_stmt => pureIfReturns(ir_view, node),
+        else => .never,
+    };
+}
+
+fn pureBlockReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const block = ir_view.getBlock(node) orelse return .never;
+    if (block.stmts_count == 0) return .never;
+    var last_status: ReturnStatus = .never;
+    var i: u16 = 0;
+    while (i < block.stmts_count) : (i += 1) {
+        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
+        const status = pureStmtReturns(ir_view, stmt_idx);
+        if (status == .always) return .always;
+        last_status = status;
+    }
+    return last_status;
+}
+
+fn pureIfReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
+    const if_stmt = ir_view.getIfStmt(node) orelse return .never;
+    const then_status = pureStmtReturns(ir_view, if_stmt.then_branch);
+    if (if_stmt.else_branch == null_node) {
+        return if (then_status == .always) .sometimes else .never;
+    }
+    const else_status = pureStmtReturns(ir_view, if_stmt.else_branch);
+    if (then_status == .always and else_status == .always) return .always;
+    if (then_status == .never and else_status == .never) return .never;
+    return .sometimes;
+}
+
+/// Tracks a local binding for result checking and dead variable detection.
+const BindingState = struct {
+    scope_id: ir.ScopeId, // scope that owns this binding
+    slot: u16,
+    is_result: bool,
+    ok_checked: bool,
+    ref_count: u16,
+    decl_node: NodeIndex,
+    name_idx: u16, // string constant index for the name (0 = unknown)
+    /// For result bindings: the virtual module specifier (e.g. "zttp:auth").
+    /// Borrowed from module binding registry string - always valid.
+    source_module: ?[]const u8 = null,
+    /// For result bindings: the function name (e.g. "jwtVerify").
+    /// Borrowed from module binding registry string - always valid.
+    source_func: ?[]const u8 = null,
+
+    fn key(self: BindingState) u32 {
+        return bindingKey(self.scope_id, self.slot);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Known tracked functions from virtual modules
+// ---------------------------------------------------------------------------
+
+const OptionalKind = enum { optional_string, optional_object };
+
+/// What a virtual module function produces that requires caller-side checking.
+const FunctionProduces = enum {
+    result, // Result object - must check .ok before .value
+    optional_string, // string | undefined - must narrow before use
+    optional_object, // object | undefined - must narrow before use
+
+    fn toOptionalKind(self: FunctionProduces) ?OptionalKind {
+        return switch (self) {
+            .optional_string => .optional_string,
+            .optional_object => .optional_object,
+            .result => null,
+        };
+    }
+};
+
+const builtin_modules = @import("builtin_modules.zig");
+const mb = @import("module_binding.zig");
+
+/// Look up whether a function produces a value requiring caller-side checking.
+/// Reads from the module binding registry instead of a hardcoded table.
+fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?FunctionProduces {
+    const entry = builtin_modules.findExport(module_specifier, name) orelse return null;
+    return switch (entry.func.returns) {
+        .result => .result,
+        .optional_string => .optional_string,
+        .optional_object => .optional_object,
+        else => null,
+    };
+}
+
+const bindingKey = bool_checker_mod.packBindingKey;
+
+const OptionalFnSlot = struct {
+    slot: u16,
+    kind: OptionalKind,
+};
+
+const OptionalBindingState = struct {
+    scope_id: ir.ScopeId,
+    slot: u16,
+    kind: OptionalKind,
+    narrowed: bool,
+    decl_node: NodeIndex,
+
+    fn key(self: OptionalBindingState) u32 {
+        return bindingKey(self.scope_id, self.slot);
+    }
+};
+
+/// Associates a local binding slot with the virtual module function that produced it.
+/// Strings are borrowed from the module binding registry (program lifetime).
+const ResultFnSlot = struct {
+    slot: u16,
+    func_name: []const u8,
+    module_name: []const u8,
+};
+
+const NarrowingBranch = enum { then, then_returns_early };
+
+const NarrowingInfo = struct {
+    slot: u16,
+    scope_id: ir.ScopeId,
+    branch: NarrowingBranch,
+};
+
+// ---------------------------------------------------------------------------
+// HandlerVerifier
+// ---------------------------------------------------------------------------
+
+pub const HandlerVerifier = struct {
+    allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: ?*context.AtomTable,
+    type_env: ?*const TypeEnv,
+    type_checker: ?*const TypeChecker,
+    diagnostics: std.ArrayList(Diagnostic),
+
+    // Result checking state
+    result_bindings: std.ArrayList(BindingState),
+    // Import-to-module mapping: local binding slot -> result-producing function identity
+    result_function_slots: std.ArrayList(ResultFnSlot),
+
+    // Optional checking state (Check 6)
+    optional_bindings: std.ArrayList(OptionalBindingState),
+    optional_function_slots: std.ArrayList(OptionalFnSlot),
+
+    // Dead variable tracking
+    all_bindings: std.ArrayList(BindingState),
+
+    // State isolation (Check 7)
+    handler_scope_id: ?ir.ScopeId = null,
+    has_module_mutation: bool = false,
+    /// Sticky failure for every tracked binding and diagnostic. These are
+    /// proof inputs, so a partial verifier result must never escape.
+    allocation_failed: bool = false,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        type_env: ?*const TypeEnv,
+        type_checker: ?*const TypeChecker,
+    ) HandlerVerifier {
+        return .{
+            .allocator = allocator,
+            .ir_view = ir_view,
+            .atoms = atoms,
+            .type_env = type_env,
+            .type_checker = type_checker,
+            .diagnostics = .empty,
+            .result_bindings = .empty,
+            .result_function_slots = .empty,
+            .optional_bindings = .empty,
+            .optional_function_slots = .empty,
+            .all_bindings = .empty,
+            .allocation_failed = false,
+        };
+    }
+
+    pub fn deinit(self: *HandlerVerifier) void {
+        self.diagnostics.deinit(self.allocator);
+        self.result_bindings.deinit(self.allocator);
+        self.result_function_slots.deinit(self.allocator);
+        self.optional_bindings.deinit(self.allocator);
+        self.optional_function_slots.deinit(self.allocator);
+        self.all_bindings.deinit(self.allocator);
+    }
+
+    // -----------------------------------------------------------------------
+    // Public API
+    // -----------------------------------------------------------------------
+
+    /// Run all verification checks on a handler function node.
+    /// Returns the number of error-severity diagnostics.
+    pub fn verify(self: *HandlerVerifier, handler_func: NodeIndex) !u32 {
+        if (self.type_checker) |tc| try tc.ensureHealthy();
+        // Phase 1: Scan imports for result-producing function bindings
+        self.scanImports();
+
+        // Phase 2: Exhaustive return analysis on the handler body
+        const func = self.ir_view.getFunction(handler_func) orelse {
+            if (self.allocation_failed) return error.OutOfMemory;
+            return 0;
+        };
+        self.handler_scope_id = func.scope_id;
+        const body_status = self.stmtReturns(func.body);
+        if (body_status != .always) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_return_path,
+                .node = handler_func,
+                .message = "not all code paths return a Response",
+                .help = "ensure every branch (if/else, switch/default) ends with a return statement",
+                .repair_intent = .add_trailing_return,
+            });
+        }
+
+        // Phase 3: Walk body for result checking and ref counting
+        self.walkForResultsAndRefs(func.body);
+
+        // Phase 4: Report unchecked result accesses (already emitted during walk)
+
+        // Phase 5: Report unused variables (scope-aware tracking)
+        self.reportUnusedVariables();
+        if (self.type_checker) |tc| try tc.ensureHealthy();
+        if (self.allocation_failed) return error.OutOfMemory;
+
+        // Count errors
+        var error_count: u32 = 0;
+        for (self.diagnostics.items) |diag| {
+            if (diag.severity == .err) error_count += 1;
+        }
+        return error_count;
+    }
+
+    /// Get all diagnostics.
+    pub fn getDiagnostics(self: *const HandlerVerifier) []const Diagnostic {
+        return self.diagnostics.items;
+    }
+
+    /// Format diagnostics to a writer. Requires source text for context lines.
+    pub fn formatDiagnostics(
+        self: *const HandlerVerifier,
+        source: []const u8,
+        writer: anytype,
+    ) !void {
+        for (self.diagnostics.items) |diag| {
+            const loc = self.ir_view.getLoc(diag.node) orelse continue;
+
+            // Header
+            try writer.print("verify {s}: {s}\n", .{ diag.severity.label(), diag.message });
+
+            // Location
+            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
+
+            // Source context line
+            if (getSourceLine(source, loc.line)) |line| {
+                try writer.print("   |\n", .{});
+                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
+                try writer.print("   | ", .{});
+                var col: u16 = 1;
+                while (col < loc.column) : (col += 1) {
+                    try writer.writeByte(' ');
+                }
+                try writer.writeAll("^\n");
+            }
+
+            // Help text
+            if (diag.help) |help| {
+                try writer.print("   = help: {s}\n", .{help});
+            }
+            try writer.writeByte('\n');
+        }
+    }
+
+    /// Returns true if there are any error-severity diagnostics.
+    pub fn hasErrors(self: *const HandlerVerifier) bool {
+        for (self.diagnostics.items) |diag| {
+            if (diag.severity == .err) return true;
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 1: Exhaustive Return Analysis
+    // -----------------------------------------------------------------------
+
+    /// Determine whether a statement node always, never, or sometimes returns.
+    fn stmtReturns(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
+        const tag = self.ir_view.getTag(node) orelse return .never;
+        return switch (tag) {
+            .return_stmt => .always,
+
+            .block, .program => self.blockReturns(node),
+
+            .if_stmt => self.ifReturns(node),
+
+            .for_of_stmt => self.forOfReturns(node),
+
+            .var_decl,
+            .expr_stmt,
+            .empty_stmt,
+            .import_decl,
+            .export_decl,
+            .function_decl,
+            .break_stmt,
+            .continue_stmt,
+            => .never,
+
+            else => .never,
+        };
+    }
+
+    /// Analyze return status of a block. Also detects unreachable code.
+    fn blockReturns(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
+        const block = self.ir_view.getBlock(node) orelse return .never;
+        if (block.stmts_count == 0) return .never;
+
+        var last_status: ReturnStatus = .never;
+        var i: u16 = 0;
+        while (i < block.stmts_count) : (i += 1) {
+            const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
+            const status = self.stmtReturns(stmt_idx);
+
+            if (status == .always) {
+                // Check for unreachable statements after this one
+                if (i + 1 < block.stmts_count) {
+                    const next_stmt = self.ir_view.getListIndex(block.stmts_start, i + 1);
+                    // Skip function declarations - they're hoisted logically
+                    const next_tag = self.ir_view.getTag(next_stmt);
+                    if (next_tag != null and next_tag.? != .function_decl) {
+                        self.addDiagnostic(.{
+                            .severity = .warning,
+                            .kind = .unreachable_after_return,
+                            .node = next_stmt,
+                            .message = "unreachable code after return statement",
+                            .help = "remove the unreachable code, or restructure the control flow",
+                        });
+                    }
+                }
+                return .always;
+            }
+            last_status = status;
+        }
+
+        return last_status;
+    }
+
+    /// Analyze return status of an if statement.
+    fn ifReturns(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
+        const if_stmt = self.ir_view.getIfStmt(node) orelse return .never;
+
+        const then_status = self.stmtReturns(if_stmt.then_branch);
+
+        // No else clause: can never guarantee return
+        if (if_stmt.else_branch == null_node) {
+            if (then_status == .always) {
+                // The then branch always returns, but there's no else.
+                // This is only a problem if this if-stmt is in a terminal position.
+                // We report it as "sometimes" and let the parent block handle it.
+                return .sometimes;
+            }
+            return .never;
+        }
+
+        // Has else clause: combine both branches
+        const else_status = self.stmtReturns(if_stmt.else_branch);
+
+        if (then_status == .always and else_status == .always) return .always;
+        if (then_status == .never and else_status == .never) return .never;
+        return .sometimes;
+    }
+
+    /// Analyze return status of a switch statement.
+    /// for-of body returns .never because the iterable could be empty.
+    fn forOfReturns(_: *HandlerVerifier, _: NodeIndex) ReturnStatus {
+        return .never;
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 2: Result Checking
+    // -----------------------------------------------------------------------
+
+    /// Scan top-level import declarations to identify which local bindings
+    /// map to tracked virtual module functions (result-producing or optional-producing).
+    fn scanImports(self: *HandlerVerifier) void {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .import_decl) continue;
+
+            const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
+            const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
+
+            // Check if this module has any tracked functions (result/optional returns)
+            var module_has_tracked = false;
+            for (builtin_modules.all) |b| {
+                if (std.mem.eql(u8, b.specifier, module_str)) {
+                    for (b.exports) |f| {
+                        if (f.returns == .result or f.returns == .optional_string or f.returns == .optional_object) {
+                            module_has_tracked = true;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (!module_has_tracked) continue;
+
+            // Scan specifiers to find which local bindings map to tracked functions
+            var j: u8 = 0;
+            while (j < import_decl.specifiers_count) : (j += 1) {
+                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
+                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+
+                const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
+                const produces = lookupTrackedFunction(module_str, imported_name) orelse continue;
+
+                switch (produces) {
+                    .result => {
+                        self.result_function_slots.append(self.allocator, .{
+                            .slot = spec.local_binding.slot,
+                            .func_name = imported_name,
+                            .module_name = module_str,
+                        }) catch {
+                            self.markAllocationFailure();
+                            continue;
+                        };
+                    },
+                    .optional_string, .optional_object => {
+                        self.optional_function_slots.append(self.allocator, .{
+                            .slot = spec.local_binding.slot,
+                            .kind = produces.toOptionalKind().?,
+                        }) catch {
+                            self.markAllocationFailure();
+                            continue;
+                        };
+                    },
+                }
+            }
+        }
+    }
+
+    /// Walk the handler body to track result bindings and reference counts.
+    fn walkForResultsAndRefs(self: *HandlerVerifier, node: NodeIndex) void {
+        const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .block, .program => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
+                    self.walkForResultsAndRefs(stmt_idx);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+
+                // Track this binding for dead variable detection (scope-aware)
+                self.all_bindings.append(self.allocator, .{
+                    .scope_id = decl.binding.scope_id,
+                    .slot = decl.binding.slot,
+                    .is_result = false,
+                    .ok_checked = false,
+                    .ref_count = 0,
+                    .decl_node = node,
+                    .name_idx = 0,
+                }) catch self.markAllocationFailure();
+
+                // Check if the init expression is a call to a result-producing function
+                if (decl.init != null_node) {
+                    self.walkExprForRefs(decl.init);
+
+                    if (self.resultProducingCallSource(decl.init)) |rfs| {
+                        self.result_bindings.append(self.allocator, .{
+                            .scope_id = decl.binding.scope_id,
+                            .slot = decl.binding.slot,
+                            .is_result = true,
+                            .ok_checked = false,
+                            .ref_count = 0,
+                            .decl_node = node,
+                            .name_idx = 0,
+                            .source_func = rfs.func_name,
+                            .source_module = rfs.module_name,
+                        }) catch self.markAllocationFailure();
+                    }
+
+                    // Check 6: track optional-producing calls
+                    // Skip if RHS is `optionalCall() ?? default` (nullish coalesce resolves)
+                    if (!self.isNullishCoalesceWithOptionalCall(decl.init)) {
+                        if (self.isOptionalProducingCall(decl.init)) |kind| {
+                            self.optional_bindings.append(self.allocator, .{
+                                .scope_id = decl.binding.scope_id,
+                                .slot = decl.binding.slot,
+                                .kind = kind,
+                                .narrowed = false,
+                                .decl_node = node,
+                            }) catch self.markAllocationFailure();
+                        }
+                    }
+                }
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+
+                // Always walk the condition for ref-counting (identifiers in
+                // conditions must be counted regardless of which extraction path
+                // matches). The extraction helpers are read-only so order is safe.
+                self.walkExprForRefs(if_stmt.condition);
+
+                // Check if condition is a result.ok check
+                const checked_slot = self.extractResultOkCheck(if_stmt.condition);
+
+                if (checked_slot) |binding| {
+                    // Mark the result as checked in the then-branch scope
+                    self.setResultChecked(binding, true);
+                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    self.setResultChecked(binding, false);
+
+                    // In the else branch, .ok is known to be false
+                    if (if_stmt.else_branch != null_node) {
+                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                    }
+                } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |binding| {
+                    // Negated pattern: if (!result.ok) { return ...; }
+                    self.walkForResultsAndRefs(if_stmt.then_branch);
+
+                    // If the then branch always returns, code after is the ok path
+                    const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
+                    if (then_returns == .always) {
+                        self.setResultChecked(binding, true);
+                    }
+
+                    if (if_stmt.else_branch != null_node) {
+                        self.setResultChecked(binding, true);
+                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                        // Only reset if then-branch did NOT always return: when
+                        // then_returns == .always the early-return guard means all
+                        // post-if code (including after the else) is the ok path.
+                        if (then_returns != .always) {
+                            self.setResultChecked(binding, false);
+                        }
+                    }
+                } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
+                    // Check 6: optional narrowing via if (val) or if (val !== undefined)
+                    switch (info.branch) {
+                        .then => {
+                            // if (val) - narrowed in then-branch only
+                            self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                            self.walkForResultsAndRefs(if_stmt.then_branch);
+                            self.setOptionalNarrowed(info.slot, info.scope_id, false);
+                            if (if_stmt.else_branch != null_node) {
+                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                            }
+                        },
+                        .then_returns_early => {
+                            // if (!val) { return ...; } - code after is narrowed
+                            self.walkForResultsAndRefs(if_stmt.then_branch);
+
+                            const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
+                            if (then_returns == .always) {
+                                // Then branch always returns, so subsequent code is narrowed
+                                self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                            }
+
+                            if (if_stmt.else_branch != null_node) {
+                                self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                                // Don't restore if then_returns - leave narrowed for subsequent code
+                                if (then_returns != .always) {
+                                    self.setOptionalNarrowed(info.slot, info.scope_id, false);
+                                }
+                            }
+                        },
+                    }
+                } else {
+                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    if (if_stmt.else_branch != null_node) {
+                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                    }
+                }
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.walkExprForRefs(for_iter.iterable);
+                self.walkForResultsAndRefs(for_iter.body);
+            },
+            .return_stmt => {
+                const opt_val = self.ir_view.getOptValue(node);
+                if (opt_val) |val| {
+                    self.walkExprForRefs(val);
+                }
+            },
+            .expr_stmt => {
+                const opt_val = self.ir_view.getOptValue(node);
+                if (opt_val) |val| {
+                    self.walkExprForRefs(val);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Walk an expression for reference counting and result access checking.
+    fn walkExprForRefs(self: *HandlerVerifier, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return;
+                self.incrementRefCount(binding);
+            },
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExprForRefs(member.object);
+                self.checkResultValueAccess(member, node);
+
+                // optional_chain (val?.prop) safely handles undefined - skip optional check
+                if (tag == .member_access) {
+                    self.checkOptionalObjectAccess(member, node);
+                }
+            },
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node) orelse return;
+                self.walkExprForRefs(binary.left);
+                self.walkExprForRefs(binary.right);
+
+                // Check 6: optional used in non-nullish, non-comparison binary ops
+                if (binary.op != .nullish and
+                    binary.op != .strict_eq and binary.op != .strict_neq and
+                    binary.op != .eq and binary.op != .neq)
+                {
+                    self.checkOptionalUse(binary.left);
+                    self.checkOptionalUse(binary.right);
+                }
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node) orelse return;
+                self.walkExprForRefs(unary.operand);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return;
+                self.walkExprForRefs(call.callee);
+                var i: u8 = 0;
+                while (i < call.args_count) : (i += 1) {
+                    const arg_idx = self.ir_view.getListIndex(call.args_start, i);
+                    self.walkExprForRefs(arg_idx);
+                    // Check 6: optional passed as argument
+                    self.checkOptionalUse(arg_idx);
+                }
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return;
+                self.walkExprForRefs(ternary.condition);
+                self.walkExprForRefs(ternary.then_branch);
+                self.walkExprForRefs(ternary.else_branch);
+            },
+            .match_expr => {
+                const match_e = self.ir_view.getMatchExpr(node) orelse return;
+                self.walkExprForRefs(match_e.discriminant);
+                var mi: u8 = 0;
+                while (mi < match_e.arms_count) : (mi += 1) {
+                    const arm_idx = self.ir_view.getListIndex(match_e.arms_start, mi);
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    self.walkExprForRefs(arm.body);
+                }
+                if (!self.isMatchExhaustive(match_e)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .non_exhaustive_match,
+                        .node = node,
+                        .message = "match expression without default arm may not produce a value",
+                        .help = "add 'default:' or 'when _:' arm to handle all cases",
+                        .repair_intent = .add_trailing_return,
+                    });
+                }
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return;
+                self.walkExprForRefs(assign.target);
+                self.walkExprForRefs(assign.value);
+
+                // Check 6: reassignment to non-optional clears tracking
+                self.handleOptionalReassignment(assign);
+
+                // Check 7: detect mutation of module-scope bindings
+                self.checkModuleScopeMutation(assign.target, node);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    const elem = self.ir_view.getListIndex(arr.elements_start, i);
+                    self.walkExprForRefs(elem);
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return;
+                var i: u16 = 0;
+                while (i < obj.properties_count) : (i += 1) {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    self.walkExprForRefs(prop.value);
+                    // Check 6: optional used as property value
+                    self.checkOptionalUse(prop.value);
+                }
+            },
+            .template_literal => {
+                const tmpl = self.ir_view.getTemplate(node) orelse return;
+                var i: u8 = 0;
+                while (i < tmpl.parts_count) : (i += 1) {
+                    const part_idx = self.ir_view.getListIndex(tmpl.parts_start, i);
+                    const part_tag = self.ir_view.getTag(part_idx) orelse continue;
+                    if (part_tag == .template_part_expr) {
+                        const opt_val = self.ir_view.getOptValue(part_idx);
+                        if (opt_val) |val| {
+                            self.walkExprForRefs(val);
+                            // Check 6: optional in template literal
+                            self.checkOptionalUse(val);
+                        }
+                    }
+                }
+            },
+            .spread => {
+                const unary = self.ir_view.getUnary(node) orelse return;
+                self.walkExprForRefs(unary.operand);
+            },
+            .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExprForRefs(member.object);
+                if (member.computed != null_node) {
+                    self.walkExprForRefs(member.computed);
+                }
+                // Bracket access must satisfy the same soundness proofs as dot
+                // access: `r["value"]` is an unchecked-Result read, and `m["x"]`
+                // on an un-narrowed optional is an unchecked-optional access.
+                // Without this, bracket notation launders both past the verdict.
+                // An optional computed access (`val?.[k]`) safely handles
+                // undefined, so the optional check is skipped for it.
+                self.checkResultValueAccessComputed(member, node);
+                if (!member.is_optional) {
+                    self.checkOptionalObjectAccess(member, node);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Return the ResultFnSlot for a result-producing call, or null if not one.
+    fn resultProducingCallSource(self: *HandlerVerifier, node: NodeIndex) ?ResultFnSlot {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .call and tag != .method_call) return null;
+
+        const call = self.ir_view.getCall(node) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+
+        if (callee_tag == .identifier) {
+            const binding = self.ir_view.getBinding(call.callee) orelse return null;
+            for (self.result_function_slots.items) |rfs| {
+                if (rfs.slot == binding.slot) return rfs;
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract the binding slot from a `result.ok` condition check.
+    /// Recognizes: `result.ok`, `result.ok === true`, `result.ok !== false`,
+    ///             `result.isOk()` (method call on member access)
+    fn extractResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
+        const tag = self.ir_view.getTag(cond_node) orelse return null;
+
+        // Direct: result.ok or result.isOk
+        if (tag == .member_access or tag == .optional_chain) {
+            return self.extractResultMemberSlot(cond_node, &ok_atoms);
+        }
+
+        // Method call: result.isOk()
+        if (tag == .call or tag == .method_call) {
+            const call = self.ir_view.getCall(cond_node) orelse return null;
+            if (call.args_count == 0) {
+                return self.extractResultMemberSlot(call.callee, &ok_atoms);
+            }
+        }
+
+        // Comparison: result.ok === true, etc.
+        if (tag == .binary_op) {
+            const binary = self.ir_view.getBinary(cond_node) orelse return null;
+            if (binary.op == .strict_eq or binary.op == .eq) {
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| return binding;
+                if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |binding| return binding;
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract the binding slot from `!result.ok`, `result.ok === false`,
+    /// or `result.isErr()`.
+    fn extractNegatedResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
+        const tag = self.ir_view.getTag(cond_node) orelse return null;
+
+        // Negation: !result.ok
+        if (tag == .unary_op) {
+            const unary = self.ir_view.getUnary(cond_node) orelse return null;
+            if (unary.op == .not) {
+                return self.extractResultOkCheck(unary.operand);
+            }
+        }
+
+        // Method call: result.isErr()
+        if (tag == .call or tag == .method_call) {
+            const call = self.ir_view.getCall(cond_node) orelse return null;
+            if (call.args_count == 0) {
+                return self.extractResultMemberSlot(call.callee, &err_atoms);
+            }
+        }
+
+        // Comparison: result.ok === false, result.ok !== true
+        if (tag == .binary_op) {
+            const binary = self.ir_view.getBinary(cond_node) orelse return null;
+            if (binary.op == .strict_neq or binary.op == .neq) {
+                // result.ok !== true
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
+                    if (self.isTrueLiteral(binary.right)) return binding;
+                }
+            }
+            if (binary.op == .strict_eq or binary.op == .eq) {
+                // result.ok === false
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
+                    if (self.isFalseLiteral(binary.right)) return binding;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// Find a result binding by (scope_id, slot), or null if not tracked.
+    /// Keying on the slot alone would let a `.ok` check in one branch clear the
+    /// unchecked-value state of a same-slot binding in a sibling scope, yielding
+    /// a false "verified" verdict.
+    fn findResultBinding(self: *HandlerVerifier, binding: ir.BindingRef) ?*BindingState {
+        const want = bindingKey(binding.scope_id, binding.slot);
+        for (self.result_bindings.items) |*rb| {
+            if (rb.key() == want) return rb;
+        }
+        return null;
+    }
+
+    const ok_atoms = [_]u16{ @intFromEnum(object.Atom.ok), @intFromEnum(object.Atom.isOk) };
+    const err_atoms = [_]u16{@intFromEnum(object.Atom.isErr)};
+
+    /// Given a member_access node, return the object's binding if the property
+    /// matches one of `accepted_atoms` and the object is a tracked result binding.
+    fn extractResultMemberSlot(self: *HandlerVerifier, node: NodeIndex, accepted_atoms: []const u16) ?ir.BindingRef {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .member_access and tag != .optional_chain) return null;
+
+        const member = self.ir_view.getMember(node) orelse return null;
+
+        // Check property atom against accepted list
+        var found = false;
+        for (accepted_atoms) |atom| {
+            if (member.property == atom) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
+
+        // Check object is an identifier that's a tracked result
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+
+        if (self.findResultBinding(binding)) |_| return binding;
+        return null;
+    }
+
+    fn isTrueLiteral(self: *HandlerVerifier, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag != .lit_bool) return false;
+        return self.ir_view.getBoolValue(node) orelse false;
+    }
+
+    fn isFalseLiteral(self: *HandlerVerifier, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag != .lit_bool) return false;
+        const val = self.ir_view.getBoolValue(node) orelse return false;
+        return !val;
+    }
+
+    /// Check if a member access on a result binding accesses .value/.unwrap()
+    /// without prior .ok check.
+    fn checkResultValueAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
+        // Check property - we care about .value (180), .unwrap (202) access
+        const prop = member.property;
+        const is_value_access = (prop == @intFromEnum(object.Atom.value) or
+            prop == @intFromEnum(object.Atom.unwrap));
+        if (!is_value_access) return;
+
+        // Check if the object is a result binding
+        const obj_tag = self.ir_view.getTag(member.object) orelse return;
+        if (obj_tag != .identifier) return;
+        const binding = self.ir_view.getBinding(member.object) orelse return;
+
+        const rb = self.findResultBinding(binding) orelse return;
+        if (!rb.ok_checked) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .unchecked_result_value,
+                .node = node,
+                .message = "result.value accessed without checking result.ok first",
+                .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+                .source_module = rb.source_module,
+                .source_func = rb.source_func,
+                .repair_intent = .insert_guard_before_line,
+            });
+        }
+    }
+
+    /// A computed member access with a literal string key (`r["value"]`,
+    /// `r["unwrap"]`) is equivalent to the dot access `r.value` for the
+    /// unchecked-Result-value proof. Resolve the literal key to its atom and
+    /// run the same check, so bracket notation cannot launder an unchecked
+    /// Result past the soundness verdict. A dynamic (non-literal) key is left
+    /// alone — it is handled conservatively elsewhere.
+    fn checkResultValueAccessComputed(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
+        if (member.computed == null_node) return;
+        if ((self.ir_view.getTag(member.computed) orelse return) != .lit_string) return;
+        const key_idx = self.ir_view.getStringIdx(member.computed) orelse return;
+        const key = self.ir_view.getString(key_idx) orelse return;
+        const prop: u16 = if (std.mem.eql(u8, key, "value"))
+            @intFromEnum(object.Atom.value)
+        else if (std.mem.eql(u8, key, "unwrap"))
+            @intFromEnum(object.Atom.unwrap)
+        else
+            return;
+        self.checkResultValueAccess(.{
+            .object = member.object,
+            .property = prop,
+            .computed = null_node,
+            .is_optional = member.is_optional,
+        }, node);
+    }
+
+    /// Set the ok_checked state for a result binding, keyed by (scope_id, slot).
+    fn setResultChecked(self: *HandlerVerifier, binding: ir.BindingRef, checked: bool) void {
+        if (self.findResultBinding(binding)) |rb| {
+            rb.ok_checked = checked;
+        }
+    }
+
+    fn isMatchExhaustive(self: *const HandlerVerifier, me: ir.Node.MatchExpr) bool {
+        if (match_analysis_mod.hasDefaultArm(self.ir_view, me)) return true;
+
+        const disc_type = self.resolveMatchDiscriminantType(me.discriminant);
+        if (disc_type == null_type_idx) return false;
+
+        const env = self.type_env orelse return false;
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, env.pool);
+        return analysis.isMatchExhaustive(disc_type, me);
+    }
+
+    fn resolveMatchDiscriminantType(self: *const HandlerVerifier, node: NodeIndex) TypeIndex {
+        if (self.type_checker) |tc| {
+            const inferred = tc.inferType(node);
+            if (inferred != null_type_idx) return inferred;
+        }
+
+        const env = self.type_env orelse return null_type_idx;
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        if (tag != .identifier) return null_type_idx;
+
+        const binding = self.ir_view.getBinding(node) orelse return null_type_idx;
+        if (env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |type_idx| return type_idx;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null_type_idx;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
+        return env.getVarTypeByName(name) orelse null_type_idx;
+    }
+
+    /// Increment reference count for a binding (scope-aware).
+    fn incrementRefCount(self: *HandlerVerifier, binding_ref: ir.BindingRef) void {
+        const target_key = bindingKey(binding_ref.scope_id, binding_ref.slot);
+        for (self.all_bindings.items) |*binding| {
+            if (binding.key() == target_key) {
+                binding.ref_count +|= 1;
+                return;
+            }
+        }
+    }
+
+    /// Resolve an atom index to its string name.
+    /// Uses predefined atom names or the atom table for dynamic atoms.
+    fn resolveAtomName(self: *const HandlerVerifier, atom_idx: u16) ?[]const u8 {
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        if (atom.isPredefined()) {
+            return atom.toPredefinedName();
+        }
+        if (self.atoms) |at| {
+            return at.getName(atom);
+        }
+        return null;
+    }
+
+    /// Quick return status check (without emitting diagnostics).
+    /// Intentionally separate from stmtReturns: that function is the full Check 1 analysis
+    /// pass that emits diagnostics (unreachable code, missing default, etc.). This one is a
+    /// lightweight predicate used by Check 2 and Check 6 to decide if a then-branch always
+    /// returns (enabling post-dominator narrowing). Merging them would require threading a
+    /// "suppress diagnostics" flag through the entire Check 1 call tree.
+    fn stmtReturnsQuick(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
+        const tag = self.ir_view.getTag(node) orelse return .never;
+        return switch (tag) {
+            .return_stmt => .always,
+            .block, .program => blk: {
+                const block = self.ir_view.getBlock(node) orelse break :blk .never;
+                if (block.stmts_count == 0) break :blk .never;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
+                    if (self.stmtReturnsQuick(stmt_idx) == .always) break :blk .always;
+                }
+                break :blk .never;
+            },
+            .if_stmt => blk: {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse break :blk .never;
+                const then_s = self.stmtReturnsQuick(if_stmt.then_branch);
+                if (if_stmt.else_branch == null_node) break :blk if (then_s == .always) .sometimes else .never;
+                const else_s = self.stmtReturnsQuick(if_stmt.else_branch);
+                break :blk if (then_s == .always and else_s == .always) .always else .sometimes;
+            },
+            else => .never,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 4: Dead Variables
+    // -----------------------------------------------------------------------
+
+    fn reportUnusedVariables(self: *HandlerVerifier) void {
+        for (self.all_bindings.items) |binding| {
+            if (binding.ref_count > 0) continue;
+
+            // Skip special bindings (slot 0 is typically the module scope)
+            if (binding.slot == 0) continue;
+
+            // Skip _-prefixed names (convention for intentionally unused)
+            // For global bindings, slot is the atom index
+            if (binding.scope_id == 0) {
+                if (self.resolveAtomName(binding.slot)) |name| {
+                    if (name.len > 0 and name[0] == '_') continue;
+                }
+            }
+            // For named string index
+            if (binding.name_idx != 0) {
+                if (self.ir_view.getString(binding.name_idx)) |name| {
+                    if (name.len > 0 and name[0] == '_') continue;
+                }
+            }
+
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .unused_variable,
+                .node = binding.decl_node,
+                .message = "declared variable is never used",
+                .help = "remove the unused variable, or prefix with '_' to suppress this warning",
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 6: Optional Value Checking
+    // -----------------------------------------------------------------------
+
+    /// Check if a call expression calls an optional-producing function.
+    fn isOptionalProducingCall(self: *HandlerVerifier, node: NodeIndex) ?OptionalKind {
+        const call_tag = self.ir_view.getTag(node) orelse return null;
+        if (call_tag != .call and call_tag != .method_call) return null;
+
+        const call = self.ir_view.getCall(node) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+
+        if (callee_tag == .identifier) {
+            const binding = self.ir_view.getBinding(call.callee) orelse return null;
+            for (self.optional_function_slots.items) |opt_fn| {
+                if (opt_fn.slot == binding.slot) return opt_fn.kind;
+            }
+        }
+
+        return null;
+    }
+
+    /// Check if the init is `optionalCall() ?? default` (nullish coalesce resolves optionality).
+    fn isNullishCoalesceWithOptionalCall(self: *HandlerVerifier, node: NodeIndex) bool {
+        const t = self.ir_view.getTag(node) orelse return false;
+        if (t != .binary_op) return false;
+
+        const binary = self.ir_view.getBinary(node) orelse return false;
+        if (binary.op != .nullish) return false;
+
+        // LHS must be an optional-producing call
+        return self.isOptionalProducingCall(binary.left) != null;
+    }
+
+    /// Extract optional narrowing info from an if-condition.
+    /// Recognizes: if (val), if (!val), if (val !== undefined), if (val === undefined).
+    fn extractOptionalNarrowingCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?NarrowingInfo {
+        const cond_tag = self.ir_view.getTag(cond_node) orelse return null;
+
+        // if (val) - truthiness check
+        if (cond_tag == .identifier) {
+            const binding = self.ir_view.getBinding(cond_node) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then };
+            }
+        }
+
+        // if (!val) - negated truthiness
+        if (cond_tag == .unary_op) {
+            const unary = self.ir_view.getUnary(cond_node) orelse return null;
+            if (unary.op == .not) {
+                const inner_tag = self.ir_view.getTag(unary.operand) orelse return null;
+                if (inner_tag == .identifier) {
+                    const binding = self.ir_view.getBinding(unary.operand) orelse return null;
+                    if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
+                        return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then_returns_early };
+                    }
+                }
+            }
+        }
+
+        // if (val !== undefined) or if (val === undefined)
+        if (cond_tag == .binary_op) {
+            const binary = self.ir_view.getBinary(cond_node) orelse return null;
+            if (binary.op == .strict_neq) {
+                if (self.extractUndefinedComparisonSlot(binary)) |info| {
+                    return .{ .slot = info.slot, .scope_id = info.scope_id, .branch = .then };
+                }
+            }
+            if (binary.op == .strict_eq) {
+                if (self.extractUndefinedComparisonSlot(binary)) |info| {
+                    return .{ .slot = info.slot, .scope_id = info.scope_id, .branch = .then_returns_early };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract slot from `val !== undefined` or `undefined !== val`.
+    fn extractUndefinedComparisonSlot(self: *HandlerVerifier, binary: Node.BinaryExpr) ?struct { slot: u16, scope_id: ir.ScopeId } {
+        // Check left=identifier, right=undefined
+        const left_tag = self.ir_view.getTag(binary.left) orelse return null;
+        const right_tag = self.ir_view.getTag(binary.right) orelse return null;
+
+        if (left_tag == .identifier and right_tag == .lit_undefined) {
+            const binding = self.ir_view.getBinding(binary.left) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id };
+            }
+        }
+
+        // Check left=undefined, right=identifier
+        if (left_tag == .lit_undefined and right_tag == .identifier) {
+            const binding = self.ir_view.getBinding(binary.right) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id };
+            }
+        }
+
+        return null;
+    }
+
+    /// Find an optional binding by slot and scope.
+    fn findOptionalBinding(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId) ?*OptionalBindingState {
+        const target_key = bindingKey(scope_id, slot);
+        for (self.optional_bindings.items) |*ob| {
+            if (ob.key() == target_key) return ob;
+        }
+        return null;
+    }
+
+    /// Resolve an identifier node to its un-narrowed optional binding, if any.
+    fn getUnnarrowedOptional(self: *HandlerVerifier, identifier_node: NodeIndex) ?*OptionalBindingState {
+        const binding = self.ir_view.getBinding(identifier_node) orelse return null;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return null;
+        if (ob.narrowed) return null;
+        return ob;
+    }
+
+    /// Set the narrowed state for an optional binding.
+    fn setOptionalNarrowed(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId, narrowed: bool) void {
+        if (self.findOptionalBinding(slot, scope_id)) |ob| {
+            ob.narrowed = narrowed;
+        }
+    }
+
+    /// Check if a node is an un-narrowed optional identifier, and emit diagnostic.
+    fn checkOptionalUse(self: *HandlerVerifier, node: NodeIndex) void {
+        const t = self.ir_view.getTag(node) orelse return;
+        if (t != .identifier) return;
+        if (self.getUnnarrowedOptional(node) == null) return;
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_optional_use,
+            .node = node,
+            .message = "optional value used without checking for undefined",
+            .help = "check before use: if (val !== undefined) { ... }\n           or provide a default: val ?? \"fallback\"",
+            .repair_intent = .insert_guard_before_line,
+        });
+    }
+
+    /// Check if a member_access is on an un-narrowed optional_object binding.
+    fn checkOptionalObjectAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
+        const obj_tag = self.ir_view.getTag(member.object) orelse return;
+        if (obj_tag != .identifier) return;
+
+        const ob = self.getUnnarrowedOptional(member.object) orelse return;
+        if (ob.kind != .optional_object) return;
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_optional_access,
+            .node = node,
+            .message = "property access on optional value without checking for undefined",
+            .help = "check before access: if (val) { ... val.prop ... }\n           or use optional chaining: val?.prop",
+            .repair_intent = .insert_guard_before_line,
+        });
+    }
+
+    /// Handle reassignment: if target is a tracked optional and RHS is not optional-producing,
+    /// mark as permanently narrowed.
+    fn handleOptionalReassignment(self: *HandlerVerifier, assign: Node.AssignExpr) void {
+        const target_tag = self.ir_view.getTag(assign.target) orelse return;
+        if (target_tag != .identifier) return;
+
+        const binding = self.ir_view.getBinding(assign.target) orelse return;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
+
+        // If RHS is another optional-producing call, keep tracking
+        if (self.isOptionalProducingCall(assign.value) != null) return;
+
+        // Reassignment to non-optional resolves optionality
+        ob.narrowed = true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 7: State isolation
+    // -----------------------------------------------------------------------
+
+    fn checkModuleScopeMutation(self: *HandlerVerifier, target: NodeIndex, assign_node: NodeIndex) void {
+        const handler_scope = self.handler_scope_id orelse return;
+        const target_tag = self.ir_view.getTag(target) orelse return;
+        if (target_tag != .identifier) return;
+
+        const binding = self.ir_view.getBinding(target) orelse return;
+        // Module-scope bindings have a scope_id lower than the handler's
+        if (binding.scope_id < handler_scope and binding.kind != .undeclared_global) {
+            self.has_module_mutation = true;
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .module_scope_mutation,
+                .node = assign_node,
+                .message = "handler mutates module-scope variable (breaks cross-request isolation)",
+                .help = "use const instead of let for module-scope declarations, or move state to zttp:cache",
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn addDiagnostic(self: *HandlerVerifier, diag: Diagnostic) void {
+        self.diagnostics.append(self.allocator, diag) catch self.markAllocationFailure();
+    }
+
+    fn markAllocationFailure(self: *HandlerVerifier) void {
+        self.allocation_failed = true;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
+    var current_line: u32 = 1;
+    var line_start: usize = 0;
+
+    for (source, 0..) |c, i| {
+        if (current_line == target_line) {
+            var line_end = i;
+            while (line_end < source.len and source[line_end] != '\n') {
+                line_end += 1;
+            }
+            return source[line_start..line_end];
+        }
+        if (c == '\n') {
+            current_line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    if (current_line == target_line and line_start < source.len) {
+        return source[line_start..];
+    }
+
+    return null;
+}
+
+/// Find the handler function in a parsed program.
+/// Looks for `function handler(...)` or `const handler = ...` at top level.
+pub fn findHandlerFunction(ir_view: IrView, root: NodeIndex) ?NodeIndex {
+    const tag = ir_view.getTag(root) orelse return null;
+    if (tag != .program and tag != .block) return null;
+    const block = ir_view.getBlock(root) orelse return null;
+
+    var i: u16 = 0;
+    while (i < block.stmts_count) : (i += 1) {
+        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
+        const stmt_tag = ir_view.getTag(stmt_idx) orelse continue;
+
+        // Unwrap `export function handler(...)` -> the inner function_decl/var_decl
+        const effective_stmt: NodeIndex = blk: {
+            if (stmt_tag == .export_decl) {
+                const export_decl = ir_view.getExportDecl(stmt_idx) orelse continue;
+                if (export_decl.declaration == null_node) continue;
+                break :blk export_decl.declaration;
+            }
+            break :blk stmt_idx;
+        };
+        const effective_tag = ir_view.getTag(effective_stmt) orelse continue;
+
+        if (effective_tag == .function_decl or effective_tag == .var_decl) {
+            const decl = ir_view.getVarDecl(effective_stmt) orelse continue;
+            if (decl.binding.kind != .global) continue;
+            if (decl.binding.name_atom != @intFromEnum(object.Atom.handler)) continue;
+
+            const init_tag = ir_view.getTag(decl.init) orelse continue;
+            if (init_tag == .function_expr or init_tag == .arrow_function) {
+                return decl.init;
+            }
+        }
+    }
+
+    return null;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "ReturnStatus enum" {
+    try std.testing.expectEqual(ReturnStatus.always, ReturnStatus.always);
+    try std.testing.expectEqual(ReturnStatus.never, ReturnStatus.never);
+    try std.testing.expectEqual(ReturnStatus.sometimes, ReturnStatus.sometimes);
+}
+
+test "Severity labels" {
+    try std.testing.expectEqualStrings("error", Severity.err.label());
+    try std.testing.expectEqualStrings("warning", Severity.warning.label());
+}
+
+test "DiagnosticKind enum values" {
+    // Ensure all variants are distinct
+    const kinds = [_]DiagnosticKind{
+        .missing_return_else,
+        .missing_return_default,
+        .missing_return_path,
+        .unchecked_result_value,
+        .unreachable_after_return,
+        .unused_variable,
+        .unused_import,
+        .non_exhaustive_match,
+        .unchecked_optional_use,
+        .unchecked_optional_access,
+    };
+    for (kinds, 0..) |k, i| {
+        for (kinds, 0..) |k2, j| {
+            if (i != j) {
+                try std.testing.expect(k != k2);
+            }
+        }
+    }
+}
+
+test "lookupTrackedFunction" {
+    // Result-producing
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zttp:auth", "jwtVerify").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zttp:validate", "validateJson").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zttp:validate", "validateObject").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zttp:validate", "coerceJson").?);
+    // Optional-producing
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zttp:env", "env").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zttp:cache", "cacheGet").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zttp:auth", "parseBearer").?);
+    try std.testing.expectEqual(FunctionProduces.optional_object, lookupTrackedFunction("zttp:router", "routerMatch").?);
+    // Untracked
+    try std.testing.expect(lookupTrackedFunction("zttp:crypto", "sha256") == null);
+    try std.testing.expect(lookupTrackedFunction("zttp:cache", "cacheSet") == null);
+}
+
+test "getSourceLine" {
+    const source = "line one\nline two\nline three";
+    try std.testing.expectEqualStrings("line one", getSourceLine(source, 1).?);
+    try std.testing.expectEqualStrings("line two", getSourceLine(source, 2).?);
+    try std.testing.expectEqualStrings("line three", getSourceLine(source, 3).?);
+    try std.testing.expect(getSourceLine(source, 4) == null);
+}
+
+test "verifier init and deinit" {
+    // Create a minimal IR with just a program node
+    var store = ir.IRStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    var constants = ir.ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+
+    const view = IrView.fromIRStore(&store, &constants);
+
+    var verifier = HandlerVerifier.init(std.testing.allocator, view, null, null, null);
+    defer verifier.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), verifier.getDiagnostics().len);
+    try std.testing.expect(!verifier.hasErrors());
+}
+
+test "diagnostic formatting" {
+    var store = ir.IRStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    var constants = ir.ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+
+    // Add a node with a source location
+    _ = try store.addNode(.return_stmt, .{ .line = 5, .column = 3, .offset = 42 }, .{ .a = null_node, .b = 0 });
+
+    const view = IrView.fromIRStore(&store, &constants);
+
+    var verifier = HandlerVerifier.init(std.testing.allocator, view, null, null, null);
+    defer verifier.deinit();
+
+    verifier.addDiagnostic(.{
+        .severity = .err,
+        .kind = .missing_return_path,
+        .node = 0,
+        .message = "not all code paths return a Response",
+        .help = "add return statements",
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), verifier.getDiagnostics().len);
+    try std.testing.expect(verifier.hasErrors());
+
+    // Test formatting doesn't crash
+    const source = "line 1\nline 2\nline 3\nline 4\nline 5 has code\n";
+    var output_buf: std.ArrayList(u8) = .empty;
+    defer output_buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &output_buf);
+    try verifier.formatDiagnostics(source, &aw.writer);
+    output_buf = aw.toArrayList();
+    try std.testing.expect(output_buf.items.len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error") != null);
+}
+
+test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
+    const allocator = std.testing.allocator;
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "function handler(req) {}");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var verifier = HandlerVerifier.init(failing.allocator(), view, null, null, null);
+    defer verifier.deinit();
+    try std.testing.expectError(error.OutOfMemory, verifier.verify(handler_fn));
+}
+
+fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match_warnings: u32) !void {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer type_checker.deinit();
+    _ = try type_checker.check(root);
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, null, &env, &type_checker);
+    defer verifier.deinit();
+
+    const errors = try verifier.verify(handler_fn);
+    try std.testing.expectEqual(expect_errors, errors);
+
+    var warning_count: u32 = 0;
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.severity == .warning and diag.kind == .non_exhaustive_match) {
+            warning_count += 1;
+        }
+    }
+    try std.testing.expectEqual(expect_match_warnings, warning_count);
+}
+
+test "HandlerVerifier accepts exhaustive literal union match without default" {
+    try verifyTypedHandlerSource(
+        \\const value: "a" | "b" = "a";
+        \\function handler(req) {
+        \\  const out = match (value) {
+        \\    when "a": 1,
+        \\    when "b": 2,
+        \\  };
+        \\  return Response.json({ out });
+        \\}
+    , 0, 0);
+}
+
+test "HandlerVerifier still warns on non-exhaustive union match" {
+    try verifyTypedHandlerSource(
+        \\const value: "a" | "b" = "a";
+        \\function handler(req) {
+        \\  const out = match (value) {
+        \\    when "a": 1,
+        \\  };
+        \\  return Response.json({ out });
+        \\}
+    , 0, 1);
+}
+
+test "missing_return_path diagnostic carries repair_intent = add_trailing_return" {
+    // Handler verifier diagnostics must populate the typed repair primitive
+    // so the expert agent can pick an
+    // apply step directly. The handler returns only on the truthy branch;
+    // the false branch leaves the function with no Response, which trips
+    // ZTS302 (missing_return_path). The fix the agent should pick is
+    // add_trailing_return — a `return Response.text("", { status: 500 })`
+    // tail appended to the body.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    return Response.json({ ok: true });
+        \\  }
+        \\}
+    ;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, null, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler_fn);
+
+    var saw_missing_return: bool = false;
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.kind == .missing_return_path) {
+            saw_missing_return = true;
+            try std.testing.expectEqual(
+                @as(?RepairIntent, .add_trailing_return),
+                diag.repair_intent,
+            );
+        }
+    }
+    try std.testing.expect(saw_missing_return);
+}

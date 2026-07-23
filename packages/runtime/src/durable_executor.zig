@@ -1,5 +1,5 @@
 //! Durable workflow executor: native implementations behind the
-//! `zigttp:durable` module exports (run / step / stepWithTimeout / sleepUntil /
+//! `zttp:durable` module exports (run / step / stepWithTimeout / sleepUntil /
 //! waitSignal / signal / signalAt) plus the oplog persistence and recovery
 //! helpers. Extracted from zruntime.zig to keep the request-lifecycle struct
 //! focused.
@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const ascii = std.ascii;
-const zq = @import("zigts");
+const zq = @import("zts");
 const durable_store_mod = @import("durable_store.zig");
 const runtime_config_mod = @import("runtime_config.zig");
 const natives = @import("runtime_natives.zig");

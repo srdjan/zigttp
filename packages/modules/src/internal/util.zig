@@ -1,8 +1,8 @@
 //! Shared helpers for virtual modules. Only helpers with added value
-//! live here; callers import `zigttp-sdk` directly for SDK primitives.
+//! live here; callers import `zttp-sdk` directly for SDK primitives.
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 /// Throw a TypeError with the given message.
 pub fn throwTypeError(handle: *sdk.ModuleHandle, message: []const u8) sdk.JSValue {

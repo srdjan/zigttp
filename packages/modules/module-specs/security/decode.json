@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "specifier": "zigttp:decode",
+  "specifier": "zttp:decode",
   "source": "packages/modules/src/security/decode.zig",
   "requiredCapabilities": [],
   "exports": [

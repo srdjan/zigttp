@@ -1,4 +1,4 @@
-//! zigttp:cache - In-memory key-value cache with TTL and LRU eviction.
+//! zttp:cache - In-memory key-value cache with TTL and LRU eviction.
 //!
 //! Exports:
 //!   cacheGet(namespace, key) -> string | null
@@ -12,13 +12,13 @@
 //! seconds; 0 or negative means "already expired", null means "no expiry".
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 
 const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:cache",
+    .specifier = "zttp:cache",
     .name = "cache",
     .required_capabilities = &.{ .clock, .policy_check },
     .stateful = true,

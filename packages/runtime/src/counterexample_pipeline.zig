@@ -6,9 +6,9 @@
 //! nothing and must not outlive any of those.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const review = @import("zigttp_proof_review").review;
-const PropertyProvenance = zigts.handler_contract.PropertyProvenance;
+const zts = @import("zts");
+const review = @import("zttp_proof_review").review;
+const PropertyProvenance = zts.handler_contract.PropertyProvenance;
 
 pub const Preview = review.CounterexamplePreview;
 
@@ -31,7 +31,7 @@ pub fn buildFromDelta(
                 .column = c.column,
                 .snippet = c.snippet,
                 .handler_path = handler_path,
-                .suggestion = zigts.spec_discharge.suggestionFor(demoted.name),
+                .suggestion = zts.spec_discharge.suggestionFor(demoted.name),
             };
         }
     }

@@ -18,7 +18,7 @@ Every precompilation extracts a contract from the handler's IR. Add
 - **Internal service calls** made via `serviceCall("name", "METHOD
   /path", init)`; service names, route signatures, and statically
   proven params/query/header/body keys are captured
-- **Workflow dispatch targets** made via `zigttp:workflow`'s `call`,
+- **Workflow dispatch targets** made via `zttp:workflow`'s `call`,
   `saga`, and `fanout`; target handler names and synthesized `METHOD
   /path` routes are captured (strict-literal - a non-literal target or
   init, or an unrecognized init key, is flagged dynamic)
@@ -44,11 +44,11 @@ Every precompilation extracts a contract from the handler's IR. Add
 ```json
 {
   "version": 12,
-  "modules": ["zigttp:auth", "zigttp:cache", "zigttp:scope"],
+  "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
   "functions": {
-    "zigttp:auth": ["jwtVerify", "parseBearer"],
-    "zigttp:cache": ["cacheGet", "cacheSet"],
-    "zigttp:scope": ["scope", "ensure"]
+    "zttp:auth": ["jwtVerify", "parseBearer"],
+    "zttp:cache": ["cacheGet", "cacheSet"],
+    "zttp:scope": ["scope", "ensure"]
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
   "egress": { "hosts": ["api.example.com"], "dynamic": false },
@@ -132,7 +132,7 @@ request headers or body have their GET/HEAD responses cached at
 runtime and served from Zig memory without entering JS. The cache key
 is method+URL only, so a handler whose response depends on a request
 header (auth, content negotiation) is excluded. The
-`X-Zigttp-Proof-Cache: hit` response header confirms a cache hit.
+`X-Zttp-Proof-Cache: hit` response header confirms a cache hit.
 
 ### When each contract assertion is enforced
 
@@ -166,11 +166,11 @@ won't boot" and "individual requests get rejected".
 - Pooling policy is derived from contract properties
   (`contract_runtime.zig:derivePoolingPolicy`) and applied to the
   HandlerPool exactly once via `pool.setPoolingPolicy(...)` from
-  `server.zig:start`. In `zigttp dev --watch --prove`, each accepted
+  `server.zig:start`. In `zttp dev --watch --prove`, each accepted
   swap re-derives the pooling policy from the new contract before the
   handler pool is reused.
-- Attestation envelope (`Zigttp-Attest`) is materialized for
-  `GET /.well-known/zigttp-attest`.
+- Attestation envelope (`Zttp-Attest`) is materialized for
+  `GET /.well-known/zttp-attest`.
 
 **Per request** (in the dispatch path, before any JS runs):
 - Route pre-filter: when `routes_dynamic = false`, the proven route
@@ -181,7 +181,7 @@ won't boot" and "individual requests get rejected".
   — the contract surface stops being a runtime gate for routing.
 - Proof cache lookup: handlers proven `deterministic` + `read_only`
   that read no request headers or body serve `GET`/`HEAD` from the
-  Zig-side cache without entering JS (`X-Zigttp-Proof-Cache: hit`).
+  Zig-side cache without entering JS (`X-Zttp-Proof-Cache: hit`).
   Header/body-dependent handlers are excluded because the cache key is
   method+URL only.
 - Per-name policy checks for SDK-facing categories (env, cache, sql,
@@ -199,7 +199,7 @@ won't boot" and "individual requests get rejected".
   (`zruntime.zig:outboundHostViolation`) via the unwrapped
   `ctx.capability_policy.allowsEgressHost(host)`. The check sits in
   the shared `parseFetchArgs`, so it covers both the sequential and
-  the `zigttp:io` parallel/race fetch paths. This is a runtime-
+  the `zttp:io` parallel/race fetch paths. This is a runtime-
   initiated check on the URL host, not an SDK module call, so it
   does not go through the `*ForActiveModule` wrappers and does not
   require any binding to declare `.policy_check`. The allowlist
@@ -261,7 +261,7 @@ graph before validation.
 ```
 
 Omit a section to leave that capability unrestricted. If a section is
-present, dynamic access in that category is rejected because zigttp
+present, dynamic access in that category is rejected because zttp
 cannot fully enumerate it.
 
 ## OpenAPI and TypeScript SDK (`-Dopenapi`, `-Dsdk=ts`)
@@ -291,7 +291,7 @@ guessing:
 - proven response variants, including multiple status codes when
   statically visible
 - bearer auth metadata
-- `x-zigttp-*` hints whenever part of the surface stays dynamic
+- `x-zttp-*` hints whenever part of the surface stays dynamic
 
 The generated SDK only exposes typed helpers for routes it can prove
 end to end. Everything else remains available through `requestRaw()`
@@ -319,7 +319,7 @@ and virtual module responses. The replay system exploits this.
 **Record** traces during normal operation:
 
 ```bash
-zigttp serve handler.ts --trace traces.jsonl
+zttp serve handler.ts --trace traces.jsonl
 ```
 
 Every virtual module call, `fetchSync` response, `Date.now()`
@@ -329,7 +329,7 @@ and response.
 **Replay** traces against a modified handler to detect regressions:
 
 ```bash
-zigttp serve --replay traces.jsonl handler-v2.ts
+zttp serve --replay traces.jsonl handler-v2.ts
 ```
 
 Reports identical, status-changed, and body-changed results with
@@ -376,13 +376,13 @@ Output: `proof.json` (machine-readable certificate),
 `proof-report.txt` (human-readable), and `upgrade-manifest.json`
 (verdict with full breakdown).
 
-The standalone `zigts prove old.json new.json` CLI compares contracts
+The standalone `zts prove old.json new.json` CLI compares contracts
 without rebuilding (exit 0 for safe, 1 for breaking, 2 for
 needs_review).
 
 ## Proven Live Reload (`--watch --prove`)
 
-`zigttp dev --watch --prove` watches handler files and hot-swaps them
+`zttp dev --watch --prove` watches handler files and hot-swaps them
 in-process on every save. The server recompiles the handler, extracts
 its behavioral contract, diffs it against the running version, and
 applies the change only when the upgrade verdict is `safe` or
@@ -399,7 +399,7 @@ Declare which compiler-proven properties your handler must satisfy
 directly in the return type:
 
 ```typescript
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">;
 
@@ -436,8 +436,8 @@ JWS payload, so a third party can diff two builds and see exactly which
 property moved.
 
 ```bash
-zigttp ratchet show <handler.ts>      # current proven set
-zigttp ratchet check <handler.ts>     # diff active specs against proven; exit 1 if any unmet
+zttp ratchet show <handler.ts>      # current proven set
+zttp ratchet check <handler.ts>     # diff active specs against proven; exit 1 if any unmet
 ```
 
 Handlers that declare no `Spec<...>` ratchet against the default full

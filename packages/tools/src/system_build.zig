@@ -4,18 +4,18 @@
 //! compiles each handler to extract its contract, runs the system linker,
 //! and writes system-contract.json and system-report.txt.
 //!
-//! Usage: zigts link <system.json> [--output-dir <dir>]
+//! Usage: zts link <system.json> [--output-dir <dir>]
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const precompile = @import("precompile.zig");
-const system_linker = zigts.system_linker;
-const handler_contract = zigts.handler_contract;
+const system_linker = zts.system_linker;
+const handler_contract = zts.handler_contract;
 
 /// Optional signed-receipt hook. The keyless tools layer cannot reach the
 /// persistent attest identity, so the developer CLI injects a runtime signer
 /// (`hypermedia_probe_lib.recordWorkflowReceipt`) here at startup. Null in the
-/// standalone `zigts` binary, which emits no receipt. Called after a successful
+/// standalone `zts` binary, which emits no receipt. Called after a successful
 /// link with the bundle's output dir and analysis.
 pub var receipt_probe: ?*const fn (
     std.mem.Allocator,
@@ -63,7 +63,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 }
 
 fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []const u8) !void {
-    const system_json = zigts.file_io.readFile(allocator, system_path, 1024 * 1024) catch |err| {
+    const system_json = zts.file_io.readFile(allocator, system_path, 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ system_path, err });
         std.process.exit(2);
     };
@@ -241,7 +241,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     }
 
     // Sign a kind=workflow receipt over the hypermedia verdict when a runtime
-    // signer is injected (the developer `zigttp` binary). Emitted only AFTER the
+    // signer is injected (the developer `zttp` binary). Emitted only AFTER the
     // failure gates above, so a failed link never leaves a signed receipt on
     // disk to be mistaken for a passing bundle. Best-effort.
     if (receipt_probe) |probe| {
@@ -251,7 +251,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
 
 fn printHelp() void {
     std.debug.print(
-        \\Usage: zigts link <system.json> [options]
+        \\Usage: zts link <system.json> [options]
         \\
         \\Cross-handler contract linking. Proves that a system of handlers
         \\communicates correctly at compile time.

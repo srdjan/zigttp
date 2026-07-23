@@ -7,7 +7,7 @@
 //! route pre-filtering, and property-driven behavior.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const runtime_config = @import("runtime_config.zig");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.handler_contract.HandlerProperties;
@@ -116,12 +116,12 @@ pub const RuntimeContract = struct {
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
     /// len == 0 is a legitimate state for handlers that import only
-    /// capability-free modules (e.g. zigttp:router).
+    /// capability-free modules (e.g. zttp:router).
     capabilities: ?CapabilityMatrix = null,
     /// SHA-256 of the bytecode blob, stamped at build time. All-zero means
     /// the contract did not carry a sandbox block.
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,
-    /// SHA-256 of the zigts rule registry used to extract this contract.
+    /// SHA-256 of the zts rule registry used to extract this contract.
     /// All-zero means the contract did not carry a sandbox block.
     policy_hash: [32]u8 = [_]u8{0} ** 32,
     modules: []const []const u8 = &.{},
@@ -1126,7 +1126,7 @@ fn parseContractFailingAlloc(allocator: std.mem.Allocator) !void {
         \\  "version": 10,
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
         \\  "routes": [],
-        \\  "modules": ["zigttp:env", "zigttp:crypto"],
+        \\  "modules": ["zttp:env", "zttp:crypto"],
         \\  "functions": {},
         \\  "env": {"literal": ["JWT_SECRET", "DB_URL", "API_KEY"], "dynamic": false},
         \\  "egress": {"hosts": [], "dynamic": false},
@@ -1377,7 +1377,7 @@ test "contract wire format round-trips between writer and runtime parser" {
     defer hc.deinit(allocator);
 
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
-    try hc.modules.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    try hc.modules.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
     hc.durable.workflow.properties.retry_safe = true;
     hc.durable.workflow.properties.idempotent = true;
     hc.durable.workflow.properties.fault_covered = true;
@@ -1403,7 +1403,7 @@ test "contract wire format round-trips between writer and runtime parser" {
     try std.testing.expectEqual(@as(usize, 1), rc.env_vars.len);
     try std.testing.expectEqualStrings("API_KEY", rc.env_vars[0]);
     try std.testing.expectEqual(@as(usize, 1), rc.modules.len);
-    try std.testing.expectEqualStrings("zigttp:crypto", rc.modules[0]);
+    try std.testing.expectEqualStrings("zttp:crypto", rc.modules[0]);
     try std.testing.expectEqual(@as(usize, 1), rc.routes.len);
     try std.testing.expectEqualStrings("GET", rc.routes[0].method);
     try std.testing.expectEqualStrings("/users", rc.routes[0].path);
@@ -1422,7 +1422,7 @@ test "parseContractJson reads sandbox block" {
         \\{
         \\  "version": 12,
         \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
-        \\  "modules": ["zigttp:crypto", "zigttp:auth"],
+        \\  "modules": ["zttp:crypto", "zttp:auth"],
         \\  "sandbox": {
         \\    "capabilities": ["clock", "crypto"],
         \\    "capabilityHash": "0000000000000000000000000000000000000000000000000000000000000000"
@@ -1507,8 +1507,8 @@ test "verifyCapabilityMatrix passes for a live-derived matrix" {
     // Build modules and a matching matrix from the live registry
     var modules_list: std.ArrayList([]const u8) = .empty;
     errdefer modules_list.deinit(allocator);
-    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
-    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:auth"));
+    try modules_list.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
+    try modules_list.append(allocator, try allocator.dupe(u8, "zttp:auth"));
 
     var contract = RuntimeContract{
         .env_vars = &.{},
@@ -1531,7 +1531,7 @@ test "verifyCapabilityMatrix detects drift" {
     const allocator = std.testing.allocator;
     var modules_list: std.ArrayList([]const u8) = .empty;
     errdefer modules_list.deinit(allocator);
-    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    try modules_list.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
 
     var contract = RuntimeContract{
         .env_vars = &.{},

@@ -1,11 +1,11 @@
 // Integration example: all virtual modules
-// Tests that zigttp:auth, zigttp:validate, and zigttp:cache resolve correctly
+// Tests that zttp:auth, zttp:validate, and zttp:cache resolve correctly
 
-import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
-import { env } from "zigttp:env";
-import { schemaCompile, validateJson, coerceJson } from "zigttp:validate";
-import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
-import { sha256 } from "zigttp:crypto";
+import { parseBearer, jwtVerify, jwtSign } from "zttp:auth";
+import { env } from "zttp:env";
+import { schemaCompile, validateJson, coerceJson } from "zttp:validate";
+import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
+import { sha256 } from "zttp:crypto";
 
 type RequestBody = {
     name: string;

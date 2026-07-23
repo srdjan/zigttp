@@ -12,7 +12,7 @@
 //!   1. runs a fixed-budget latency probe over the post-apply handler,
 //!   2. hashes the handler bytes (binds the receipt to this exact source),
 //!   3. signs the latency claims with the persistent attest keypair, and
-//!   4. appends a signed `kind=perf` row to `.zigttp/proofs.jsonl`.
+//!   4. appends a signed `kind=perf` row to `.zttp/proofs.jsonl`.
 //!
 //! Everything here is best-effort: a probe that cannot load the handler, a
 //! missing `$HOME`, or an unwritable ledger must never abort the apply. A
@@ -21,11 +21,11 @@
 //! receipt was silently suppressed.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const benchmark = @import("benchmark.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const identity = @import("attest/identity.zig");
-const review = @import("zigttp_proof_review").review;
+const review = @import("zttp_proof_review").review;
 
 const perf_receipt = zq.perf_receipt;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -117,7 +117,7 @@ pub fn recordPerfReceiptWithKey(
 }
 
 /// A `kind=perf` row carries its evidence in the `perf` object; the `facts`
-/// object only needs a `contract_sha` so `zigttp proofs` can key the row.
+/// object only needs a `contract_sha` so `zttp proofs` can key the row.
 /// All list fields are allocated empty so `ReviewFacts.deinit` frees them
 /// uniformly.
 fn minimalFacts(allocator: std.mem.Allocator, sha: []const u8) !review.ReviewFacts {

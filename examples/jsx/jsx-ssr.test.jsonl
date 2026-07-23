@@ -1,6 +1,6 @@
 {"type":"test","name":"renders full SSR page with layout and cards"}
 {"type":"request","method":"GET","url":"/","headers":{},"body":null}
-{"type":"expect","status":200,"bodyContains":"zigttp-server JSX Demo"}
+{"type":"expect","status":200,"bodyContains":"zttp-server JSX Demo"}
 
 {"type":"test","name":"includes welcome card"}
 {"type":"request","method":"GET","url":"/","headers":{},"body":null}

@@ -1,7 +1,7 @@
 // Gateway handler - authenticates and routes to internal services
-import { parseBearer, jwtVerify } from "zigttp:auth";
-import { env } from "zigttp:env";
-import { serviceCall } from "zigttp:service";
+import { parseBearer, jwtVerify } from "zttp:auth";
+import { env } from "zttp:env";
+import { serviceCall } from "zttp:service";
 
 function handler(req: Request): Response {
   // Authenticate

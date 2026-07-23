@@ -1,10 +1,10 @@
-//! zigttp:log - Structured logging (NDJSON to stderr)
+//! zttp:log - Structured logging (NDJSON to stderr)
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:log",
+    .specifier = "zttp:log",
     .name = "log",
     .required_capabilities = &.{ .clock, .stderr },
     .exports = &.{

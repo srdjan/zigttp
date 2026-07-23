@@ -1,6 +1,6 @@
 # TypeScript Support
 
-zigttp includes native TypeScript and TSX support through two features: a type stripper that removes type annotations at load time, and a compile-time evaluator for the `comptime()` function.
+zttp includes native TypeScript and TSX support through two features: a type stripper that removes type annotations at load time, and a compile-time evaluator for the `comptime()` function.
 
 Strict ZigTS is the default profile. Named functions must carry explicit
 parameter and return annotations, `any` is rejected, capability access
@@ -15,7 +15,7 @@ TypeScript-tips canon onto this subset.
 
 ## Type Stripper
 
-The type stripper (`packages/zigts/src/stripper.zig`) removes TypeScript syntax before parsing, preserving line/column positions for error reporting by replacing stripped spans with spaces.
+The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax before parsing, preserving line/column positions for error reporting by replacing stripped spans with spaces.
 
 ### Supported Subset
 
@@ -55,7 +55,7 @@ Up to 8 type parameters per alias are supported.
 
 **Built-in `Spec<...>` for proof obligations:**
 
-`zigttp:types` exposes a built-in generic alias `Spec<S>` that lets the
+`zttp:types` exposes a built-in generic alias `Spec<S>` that lets the
 author narrow which compiler-proven properties their handler must satisfy.
 When no `Spec<...>` is present, every supported v1 spec is active by
 default; when a `Spec<...>` is present, only the named specs are active.
@@ -65,7 +65,7 @@ type-check time - and rides the same alias-resolution machinery as
 type:
 
 ```typescript
-import type { Spec } from "zigttp:types";
+import type { Spec } from "zttp:types";
 
 type Guardrails = Spec<
     | "idempotent"
@@ -93,7 +93,7 @@ helper's return type, resolving to `T` for type checking while carrying
 own body:
 
 ```typescript
-import type { Proof } from "zigttp:types";
+import type { Proof } from "zttp:types";
 
 function fullName(u: User): Proof<string, "pure" | "total"> {
     return `${u.first} ${u.last}`;
@@ -116,7 +116,7 @@ be no wider than `S`. It resolves to `T` for type checking and carries
 `S` - a union of capability names - as the ceiling:
 
 ```typescript
-import type { Effects } from "zigttp:types";
+import type { Effects } from "zttp:types";
 
 function loadRegion(): Effects<string, "env"> {
     return env("REGION");
@@ -157,7 +157,7 @@ function bodies - an annotation never substitutes for a proof.
 
 **Docs mode (`--require-export-capsules`):**
 
-`zigts check --require-export-capsules` is an opt-in, warning-only mode
+`zts check --require-export-capsules` is an opt-in, warning-only mode
 that asks every *exported* helper to carry an explicit capsule:
 ZTS507 when an exported helper has no `Effects<...>`, ZTS508 when it has
 no `Proof<...>`. It is off by default, never touches non-exported
@@ -200,7 +200,7 @@ TSX is supported: JSX tags remain intact while type annotations inside `{ ... }`
 
 ## Type Checking
 
-The type checker (`packages/zigts/src/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
+The type checker (`packages/zts/src/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
 
 ### Checked Properties
 
@@ -362,7 +362,7 @@ Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instanti
 
 ## Compile-Time Evaluation
 
-The `comptime()` function (`packages/zigts/src/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.
+The `comptime()` function (`packages/zts/src/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.
 
 ### Usage
 
@@ -425,10 +425,10 @@ Variables, arbitrary function calls, `Date.now()`, `Math.random()`, `new`, `this
 
 ### Files
 
-- `packages/zigts/src/stripper.zig` - Type stripper with comptime integration
-- `packages/zigts/src/comptime.zig` - Compile-time expression evaluator (~2000 lines)
+- `packages/zts/src/stripper.zig` - Type stripper with comptime integration
+- `packages/zts/src/comptime.zig` - Compile-time expression evaluator (~2000 lines)
 - `StripOptions` controls features: `tsx_mode`, `enable_comptime`, `comptime_env`
 
 ### Build-Time Integration
 
-The stripper runs as a prepass for `.ts` and `.tsx` sources before zigts parsing. Runtime parser receives JS-only output. Enable comptime via `StripOptions.enable_comptime`.
+The stripper runs as a prepass for `.ts` and `.tsx` sources before zts parsing. Runtime parser receives JS-only output. Enable comptime via `StripOptions.enable_comptime`.

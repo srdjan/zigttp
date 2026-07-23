@@ -1,15 +1,15 @@
-//! Native Zig Runtime for zigttp
+//! Native Zig Runtime for zttp
 //!
 //! Pure Zig implementation using zts - no C dependencies.
 //! Designed for FaaS with per-request isolation and fast cold starts.
 
 const std = @import("std");
 const builtin = @import("builtin");
-const compat = @import("zigts").compat;
+const compat = @import("zts").compat;
 const ascii = std.ascii;
 
 // Import zts module
-const zq = @import("zigts");
+const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
@@ -89,7 +89,7 @@ const cost_meter = zq.context.cost_meter;
 
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
-/// In-process registry of co-located sub-handlers, used by zigttp:workflow to
+/// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.
 pub const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
 const Target = @import("in_process_dispatch.zig").Target;
@@ -213,13 +213,13 @@ pub const Runtime = struct {
     /// `wsPoolFromRuntime`. See `installWebSocketModuleState`.
     ws_pool_ref: ?*websocket_pool.Pool = null,
 
-    /// Co-located sub-handler registry for in-process `zigttp:workflow.call`
+    /// Co-located sub-handler registry for in-process `zttp:workflow.call`
     /// dispatch. Server-owned (one instance per process), referenced by every
     /// pooled orchestrator runtime. Set from `config.system_registry` at init
     /// (cast from the type-erased pointer). Null on runtimes with no `--system`
     /// bundle. Read by `workflowCallCallback`; gates `installWorkflowModuleState`.
     system_registry_ref: ?*SystemRuntime = null,
-    /// Server/test-owned actor queue used by `zigttp:queue`. Null keeps the
+    /// Server/test-owned actor queue used by `zttp:queue`. Null keeps the
     /// module importable but makes queue functions return Result errors.
     queue_system_ref: ?*actor_queue.ActorQueue = null,
 
@@ -246,7 +246,7 @@ pub const Runtime = struct {
         source_snapshot: ?[]u8 = null,
         step_depth: u32 = 0,
         step_timeout_deadline_ms: ?i64 = null,
-        /// Monotonic per-run counter naming each `zigttp:workflow.call` as its
+        /// Monotonic per-run counter naming each `zttp:workflow.call` as its
         /// own durable step ("workflow.call#N"). Deterministic across replay
         /// because the orchestrator re-executes the same control flow, so the
         /// Nth call resolves to the same oplog entry. See workflowCallDurable.
@@ -747,7 +747,7 @@ pub const Runtime = struct {
                     has_file_imports = true;
                 },
                 .unknown => {
-                    std.log.err("Unknown module: '{s}'; only zigttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
+                    std.log.err("Unknown module: '{s}'; only zttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
                     return error.UnknownModule;
                 },
             }
@@ -821,7 +821,7 @@ pub const Runtime = struct {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
             inline for (zq.builtin_modules.all) |binding| {
-                if (comptime std.mem.eql(u8, binding.specifier, "zigttp:queue")) {
+                if (comptime std.mem.eql(u8, binding.specifier, "zttp:queue")) {
                     if (self.queue_system_ref != null) {
                         try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
                     } else {
@@ -950,7 +950,7 @@ pub const Runtime = struct {
         return self.queue_system_ref;
     }
 
-    /// Per-pooled-instance reply identity for `zigttp:queue.request()`/
+    /// Per-pooled-instance reply identity for `zttp:queue.request()`/
     /// `receive()` round trips. `config.queue_actor_name` ("main" by default)
     /// is a single value shared by every pooled Runtime, so using it directly
     /// as the reply-to actor would let concurrent in-flight requests on
@@ -2301,7 +2301,7 @@ pub const PercentileTracker = @import("runtime_percentile.zig").PercentileTracke
 // Handler Pool (Lock-Free)
 // ============================================================================
 
-/// Lock-free pool of pre-initialized JavaScript runtimes, backed by zigts.LockFreePool.
+/// Lock-free pool of pre-initialized JavaScript runtimes, backed by zts.LockFreePool.
 /// Uses per-runtime wrappers to install builtins and load handler code once.
 pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 
@@ -2732,7 +2732,7 @@ test "durable run+step cycle frees nested non-closure function bytecode exactly 
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  return run("nested-bytecode-owner", () => {
         \\    const v = step("s", () => 1);
@@ -2750,7 +2750,7 @@ test "durable run+step cycle frees nested non-closure function bytecode exactly 
     try std.testing.expectEqual(@as(u16, 200), response.status);
 }
 
-test "zigttp:queue sends receives and acks JSON payloads" {
+test "zttp:queue sends receives and acks JSON payloads" {
     const allocator = std.testing.allocator;
 
     var queue = actor_queue.ActorQueue.init(allocator, 8, 30_000);
@@ -2770,7 +2770,7 @@ test "zigttp:queue sends receives and acks JSON payloads" {
     try std.testing.expect(queue.ack(direct_msg.id));
 
     const handler_code =
-        \\import { send, receive, ack } from "zigttp:queue";
+        \\import { send, receive, ack } from "zttp:queue";
         \\function handler(req) {
         \\  const sent = send("worker", { kind: "work", n: 3 });
         \\  if (!sent.ok) return Response.json({ error: sent.error }, { status: 500 });
@@ -2877,7 +2877,7 @@ test "virtual module import alias resolves to callable binding" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { env as getEnv } from "zigttp:env";
+        \\import { env as getEnv } from "zttp:env";
         \\function handler(req) {
         \\  return Response.text(typeof getEnv);
         \\}
@@ -2937,7 +2937,7 @@ test "built-in module import runs under capability wrapper context" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { uuid, nanoid } from "zigttp:id";
+        \\import { uuid, nanoid } from "zttp:id";
         \\function handler(req) {
         \\  const a = uuid();
         \\  const b = nanoid(4);
@@ -2975,7 +2975,7 @@ test "durable run reuses completed response for duplicate key" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
+        \\import { run } from "zttp:durable";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
@@ -3036,7 +3036,7 @@ test "durable run resumes from completed step state" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
@@ -3098,7 +3098,7 @@ test "proof-gated durable retry allows proven workflow replay" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  return run("retry:proven", () => {
         \\    const seed = step("seed", () => Math.random());
@@ -3220,7 +3220,7 @@ test "exceeding a constant cost ceiling records a soundness incident" {
     defer rt.deinit();
 
     try rt.loadHandler(
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
         \\  env("TWO");
@@ -3267,7 +3267,7 @@ test "requests within the ceiling record no incident" {
     defer rt.deinit();
 
     try rt.loadHandler(
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
         \\  return Response.text("ok");
@@ -3309,7 +3309,7 @@ test "cost meter resets between pooled requests" {
     defer rt.deinit();
 
     try rt.loadHandler(
-        \\import { env } from "zigttp:env";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
         \\  return Response.text("ok");
@@ -3356,7 +3356,7 @@ test "proof-gated durable retry blocks unproven workflow replay" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  return run("retry:unproven", () => {
         \\    const seed = step("seed", () => Math.random());
@@ -3401,7 +3401,7 @@ test "idempotency ledger allows unproven durable retry" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
@@ -3438,7 +3438,7 @@ test "idempotency ledger allows unproven duplicate durable response reuse" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
+        \\import { run } from "zttp:durable";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => Response.json({ value: Math.random() }));
@@ -3533,8 +3533,8 @@ test "workflow.call inside durable run replays a completed step from cache (no r
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { call } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
@@ -3582,8 +3582,8 @@ test "workflow.call inside durable run records its dispatch as a durable step" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { call } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
@@ -3643,8 +3643,8 @@ test "workflow.call queue mode persists child result before durable step result"
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { call } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("wf:queue", () => {
         \\    const res = call("greet", { method: "POST", path: "/greet", body: "hello", headers: { "x-trace": "queued" } });
@@ -3702,8 +3702,8 @@ test "workflow-queue dead letter suspends the parent, and replay resolves it" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { call } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("wf:dead-retry", () => {
         \\    const res = call("greet", { method: "GET", path: "/greet" });
@@ -3818,8 +3818,8 @@ test "workflow.saga runs every step and returns ok:true when none fail" {
     const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:ok", () => saga([
         \\    { name: "a", run: () => Response.json({ step: "a" }) },
@@ -3846,8 +3846,8 @@ test "workflow.saga compensates completed steps in reverse order on failure" {
     const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:fail", () => saga([
         \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: () => Response.json({ undone: "reserve" }) },
@@ -3881,8 +3881,8 @@ test "workflow.saga returns terminal 500 when a compensation itself fails" {
     const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:compfail", () => saga([
         \\    { name: "reserve", run: () => Response.json({ ok: true }), compensate: () => Response.json({ e: 1 }, { status: 500 }) },
@@ -3950,8 +3950,8 @@ test "workflow.saga replays cached do: steps and re-derives compensation on reco
     // cached do:charge (500) is honored, the saga still fails and compensates
     // reserve. If the steps were wrongly re-run, charge would be 200 -> ok:true.
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { saga } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { saga } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("saga:replay", () => saga([
         \\    { name: "reserve", run: () => Response.json({ live: true }), compensate: () => Response.json({ undone: true }) },
@@ -3984,7 +3984,7 @@ test "workflow.fanout returns sub-handler responses in declaration order" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { fanout } from "zigttp:workflow";
+        \\import { fanout } from "zttp:workflow";
         \\function handler(req) {
         \\  const rs = fanout([{ name: "a" }, { name: "b" }, { name: "c" }]);
         \\  return Response.json({ n: rs.length, a: rs[0].json(), b: rs[1].json(), c: rs[2].json() });
@@ -4022,8 +4022,8 @@ test "workflow.fanout records the whole fan-out as one durable step" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { fanout } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { fanout } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("par:1", () => {
         \\    const rs = fanout([{ name: "a" }, { name: "b" }]);
@@ -4078,8 +4078,8 @@ test "workflow.fanout replays its aggregate from cache without re-dispatching" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run } from "zigttp:durable";
-        \\import { fanout } from "zigttp:workflow";
+        \\import { run } from "zttp:durable";
+        \\import { fanout } from "zttp:workflow";
         \\function handler(req) {
         \\  return run("par:replay", () => {
         \\    const rs = fanout([{ name: "a" }, { name: "b" }]);
@@ -4112,7 +4112,7 @@ test "durable sleepUntil returns pending response without duplicating wait" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, sleepUntil } from "zigttp:durable";
+        \\import { run, sleepUntil } from "zttp:durable";
         \\function handler(req) {
         \\  return run("timer:123", () => {
         \\    sleepUntil(4102444800000);
@@ -4187,7 +4187,7 @@ test "durable suspend survives JIT promotion of the run() callback" {
     // suspends every time (no replay dedup) - that accumulates the profile counts
     // that promote its shared bytecode to the baseline JIT.
     const handler_code =
-        \\import { run, sleepUntil } from "zigttp:durable";
+        \\import { run, sleepUntil } from "zttp:durable";
         \\function handler(req) {
         \\  return run(req.url, () => {
         \\    sleepUntil(4102444800000);
@@ -4222,7 +4222,7 @@ test "durable waitSignal resumes from queued signal" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, waitSignal, signal } from "zigttp:durable";
+        \\import { run, waitSignal, signal } from "zttp:durable";
         \\function handler(req) {
         \\  if (req.url === "/signal") {
         \\    return Response.json({ delivered: signal("job:123", "approved", { ok: true }) });
@@ -4282,7 +4282,7 @@ test "durable stepWithTimeout times out a durable sleep boundary" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, stepWithTimeout, sleep } from "zigttp:durable";
+        \\import { run, stepWithTimeout, sleep } from "zttp:durable";
         \\function handler(req) {
         \\  return run("timeout:sleep", () => {
         \\    const result = stepWithTimeout("slow", 5, () => {
@@ -4330,7 +4330,7 @@ test "durable stepWithTimeout times out waitSignal before consuming a later sign
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, stepWithTimeout, waitSignal, signal } from "zigttp:durable";
+        \\import { run, stepWithTimeout, waitSignal, signal } from "zttp:durable";
         \\function handler(req) {
         \\  if (req.url === "/signal") {
         \\    return Response.json({ delivered: signal("timeout:signal", "approved", { ok: true }) });
@@ -4406,7 +4406,7 @@ test "durable fetch retries 5xx responses and succeeds within the retry budget" 
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
-        \\import {{ fetch }} from "zigttp:fetch";
+        \\import {{ fetch }} from "zttp:fetch";
         \\function handler(req) {{
         \\  const res = fetch("{s}", {{ durable: {{ key: "retry-success", retries: 5, backoff: "none" }} }});
         \\  return Response.json({{ status: res.status }});
@@ -4452,7 +4452,7 @@ test "durable fetch stops retrying once the retry budget is exhausted" {
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
-        \\import {{ fetch }} from "zigttp:fetch";
+        \\import {{ fetch }} from "zttp:fetch";
         \\function handler(req) {{
         \\  const res = fetch("{s}", {{ durable: {{ key: "retry-exhausted", retries: 0, backoff: "none" }} }});
         \\  return Response.json({{ status: res.status }});
@@ -4498,8 +4498,8 @@ test "durable fetch retry loop stops once the step deadline passes instead of ex
     };
 
     const handler_code =
-        \\import { run, stepWithTimeout } from "zigttp:durable";
-        \\import { fetch } from "zigttp:fetch";
+        \\import { run, stepWithTimeout } from "zttp:durable";
+        \\import { fetch } from "zttp:fetch";
         \\function handler(req) {
         \\  return run("fetch:deadline", () => {
         \\    const result = stepWithTimeout("call", 50, () => {
@@ -4546,7 +4546,7 @@ test "durable signal returns false after completion" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, signal } from "zigttp:durable";
+        \\import { run, signal } from "zttp:durable";
         \\function handler(req) {
         \\  if (req.url === "/signal") {
         \\    return Response.json({ delivered: signal("done:123", "approved", { ok: true }) });
@@ -4585,7 +4585,7 @@ test "durable step outside run fails" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { step } from "zigttp:durable";
+        \\import { step } from "zttp:durable";
         \\function handler(req) {
         \\  step("seed", () => 1);
         \\  return Response.json({ ok: true });
@@ -4709,7 +4709,7 @@ test "request helpers expose body parsing and case-insensitive headers" {
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .empty,
-        .body = try allocator.dupe(u8, "{\"name\":\"zigttp\"}"),
+        .body = try allocator.dupe(u8, "{\"name\":\"zttp\"}"),
     };
     defer request.deinit(allocator);
 
@@ -4735,8 +4735,8 @@ test "request helpers expose body parsing and case-insensitive headers" {
     try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
     try std.testing.expectEqualStrings("Bearer override", obj.get("auth").?.string);
     try std.testing.expect(obj.get("missing") == null); // undefined values are omitted from JSON
-    try std.testing.expectEqualStrings("{\"name\":\"zigttp\"}", obj.get("body").?.string);
-    try std.testing.expectEqualStrings("zigttp", obj.get("name").?.string);
+    try std.testing.expectEqualStrings("{\"name\":\"zttp\"}", obj.get("body").?.string);
+    try std.testing.expectEqualStrings("zttp", obj.get("name").?.string);
 }
 
 test "request helpers define empty and invalid body semantics" {
@@ -4813,7 +4813,7 @@ test "Headers Request and Response factories share the HTTP model" {
         \\  headers.set("X-Mode", "fast");
         \\  const beforeDelete = headers.has("x-mode");
         \\  headers.delete("x-mode");
-        \\  const request = Request("/items?id=41&name=zigttp", {
+        \\  const request = Request("/items?id=41&name=zttp", {
         \\    method: "POST",
         \\    headers: headers,
         \\    body: "{\"ok\":true}"
@@ -4863,7 +4863,7 @@ test "Headers Request and Response factories share the HTTP model" {
     try std.testing.expectEqualStrings("POST", obj.get("requestMethod").?.string);
     try std.testing.expectEqualStrings("/items", obj.get("requestPath").?.string);
     try std.testing.expectEqual(@as(i64, 41), obj.get("requestId").?.integer);
-    try std.testing.expectEqualStrings("zigttp", obj.get("requestName").?.string);
+    try std.testing.expectEqualStrings("zttp", obj.get("requestName").?.string);
     try std.testing.expectEqualStrings("application/json", obj.get("requestType").?.string);
     try std.testing.expectEqual(true, obj.get("requestOk").?.bool);
     try std.testing.expectEqual(@as(i64, 201), obj.get("responseStatus").?.integer);
@@ -5066,7 +5066,7 @@ test "fetchSync respects embedded capability policy host allowlist" {
     try std.testing.expectEqualStrings("HostNotAllowed", obj.get("blocked").?.string);
 }
 
-// Regression guard: the concurrent fetch path (zigttp:io parallel) shares
+// Regression guard: the concurrent fetch path (zttp:io parallel) shares
 // parseFetchArgs with the sync path, so the egress allowlist is enforced at
 // collection time. A disallowed host is rejected before a descriptor is
 // registered, so it never opens a socket; its position in the results array
@@ -5085,7 +5085,7 @@ test "parallel fetch enforces egress allowlist - disallowed host never registers
     // Both thunks target a disallowed host: no descriptor registers, so
     // both positions are undefined and example.com is never connected.
     const handler_code =
-        \\import { parallel } from "zigttp:io";
+        \\import { parallel } from "zttp:io";
         \\function a() { return fetchSync("http://example.com/one"); }
         \\function b() { return fetchSync("http://example.com/two"); }
         \\function handler(req) {
@@ -5135,7 +5135,7 @@ test "parallel fetch allows allowlisted host and drops disallowed one" {
     };
 
     const handler_code = try std.fmt.allocPrint(allocator,
-        \\import {{ parallel }} from "zigttp:io";
+        \\import {{ parallel }} from "zttp:io";
         \\function allowed() {{ return fetchSync("{s}"); }}
         \\function blocked() {{ return fetchSync("http://example.com/x"); }}
         \\function handler(req) {{
@@ -5242,7 +5242,7 @@ test "dev_capability_policy config enforces egress on parallel fetch" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { parallel } from "zigttp:io";
+        \\import { parallel } from "zttp:io";
         \\function a() { return fetchSync("http://example.com/one"); }
         \\function b() { return fetchSync("http://example.com/two"); }
         \\function handler(req) {
@@ -5358,7 +5358,7 @@ test "fetchSync sends request data and exposes response helpers" {
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
 }
 
-test "zigttp fetch replay consumes traced inner and outer rows and preserves headers" {
+test "zttp fetch replay consumes traced inner and outer rows and preserves headers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -5405,8 +5405,8 @@ test "zigttp fetch replay consumes traced inner and outer rows and preserves hea
     defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
 
     const handler_code =
-        \\import { fetch } from "zigttp:fetch";
-        \\import { env } from "zigttp:env";
+        \\import { fetch } from "zttp:fetch";
+        \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const response = fetch("http://example.com/weather");
         \\  const body = response.json();
@@ -5442,7 +5442,7 @@ test "zigttp fetch replay consumes traced inner and outer rows and preserves hea
     try std.testing.expectEqual(@as(u32, 0), replay_state.divergences);
 }
 
-test "zigttp fetch replay preserves missing content-type header" {
+test "zttp fetch replay preserves missing content-type header" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -5475,7 +5475,7 @@ test "zigttp fetch replay preserves missing content-type header" {
     defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
 
     const handler_code =
-        \\import { fetch } from "zigttp:fetch";
+        \\import { fetch } from "zttp:fetch";
         \\function handler(req) {
         \\  const response = fetch("http://example.com/plain");
         \\  return Response.json({
@@ -5510,7 +5510,7 @@ test "zigttp fetch replay preserves missing content-type header" {
 // plain JS so the replay tests below exercise the real fetch -> json() -> shape
 // pipeline without the type-import surface; behavior is identical.
 const weather_handler_src =
-    \\import { fetch } from "zigttp:fetch";
+    \\import { fetch } from "zttp:fetch";
     \\function handler(req) {
     \\  if (req.method !== "GET") {
     \\    return Response.json({ error: "method_not_allowed" }, { status: 405 });
@@ -7204,7 +7204,7 @@ test "durable run refuses the oplog while a recovery claim holds it" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { run, step } from "zigttp:durable";
+        \\import { run, step } from "zttp:durable";
         \\function handler(req) {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {

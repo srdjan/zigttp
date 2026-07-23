@@ -5,14 +5,14 @@
 //! handler does (env vars, egress hosts, cache namespaces, routes) as proven
 //! facts - not heuristic guesses.
 //!
-//! The old build-time AWS renderer has been retired; runtime `zigttp deploy`
+//! The old build-time AWS renderer has been retired; runtime `zttp deploy`
 //! consumes the portable fact extraction and reporting surfaces from this file.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const handler_contract = zigts.handler_contract;
+const zts = @import("zts");
+const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const contract_diff = zigts.contract_diff;
+const contract_diff = zts.contract_diff;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts
@@ -84,7 +84,7 @@ pub const ProvenFacts = struct {
 
     // WebSocket event exports. When any is true the handler upgrades
     // incoming `Upgrade: websocket` requests and dispatches through
-    // zigttp:websocket. Deploy targets that need a different binding
+    // zttp:websocket. Deploy targets that need a different binding
     // (e.g. Cloudflare Durable Objects) can branch on `has_websocket`.
     has_websocket: bool = false,
     websocket_on_open: bool = false,
@@ -92,10 +92,10 @@ pub const ProvenFacts = struct {
     websocket_on_close: bool = false,
     websocket_on_error: bool = false,
 
-    // `zigttp:fetch` host set. Populated from the contract's egress
-    // hosts when the handler imports `zigttp:fetch`. Rendered as a
+    // `zttp:fetch` host set. Populated from the contract's egress
+    // hosts when the handler imports `zttp:fetch`. Rendered as a
     // separate allow-list so targets can distinguish "fetchSync
-    // egress" (all hosts) from "zigttp:fetch egress" (the durable
+    // egress" (all hosts) from "zttp:fetch egress" (the durable
     // subset).
     fetch_hosts: []const []const u8 = &.{},
 };
@@ -169,11 +169,11 @@ pub fn extractProvenFacts(
 
     const proof_level = deriveProofLevel(contract);
 
-    // `zigttp:fetch` egress subset: when the handler imports the
+    // `zttp:fetch` egress subset: when the handler imports the
     // module the whole egress set is fetch-capable. Downstream targets
     // that want a narrower allow-list (e.g. Cloudflare egress) treat
     // fetch_hosts as the set to configure.
-    const imports_fetch = containsString(contract.modules.items, "zigttp:fetch");
+    const imports_fetch = containsString(contract.modules.items, "zttp:fetch");
     const fetch_hosts: []const []const u8 = if (imports_fetch) contract.egress.hosts.items else &.{};
 
     const ws = contract.websocket;
@@ -287,7 +287,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     // Template header
     try w.writeAll("  \"AWSTemplateFormatVersion\": \"2010-09-09\",\n");
     try w.writeAll("  \"Transform\": \"AWS::Serverless-2016-10-31\",\n");
-    try w.writeAll("  \"Description\": \"zigttp proven deployment - ");
+    try w.writeAll("  \"Description\": \"zttp proven deployment - ");
     try writeJsonStringContent(w, facts.handler_path);
     try w.writeAll(" (proof: ");
     try w.writeAll(facts.proof_level.toString());
@@ -295,8 +295,8 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
 
     // Metadata
     try w.writeAll("  \"Metadata\": {\n");
-    try w.writeAll("    \"zigttp\": {\n");
-    try w.print("      \"version\": \"{s}\",\n", .{zigts.version.string});
+    try w.writeAll("    \"zttp\": {\n");
+    try w.print("      \"version\": \"{s}\",\n", .{zts.version.string});
     try w.writeAll("      \"proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\",\n");
@@ -468,95 +468,95 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
 
     // Tags
     try w.writeAll("        \"Tags\": {\n");
-    try w.writeAll("          \"zigttp:proven\": \"");
+    try w.writeAll("          \"zttp:proven\": \"");
     try w.writeAll(if (facts.proof_level == .complete) "true" else "false");
     try w.writeAll("\",\n");
-    try w.writeAll("          \"zigttp:proofLevel\": \"");
+    try w.writeAll("          \"zttp:proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:durableWorkflowProofLevel\": \"");
+    try w.writeAll(",\n          \"zttp:durableWorkflowProofLevel\": \"");
     try w.writeAll(facts.durable_workflow_proof_level.toString());
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:durableWorkflowRetrySafe\": \"");
+    try w.writeAll(",\n          \"zttp:durableWorkflowRetrySafe\": \"");
     try w.writeAll(if (facts.durable_workflow_retry_safe) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:durableWorkflowIdempotent\": \"");
+    try w.writeAll(",\n          \"zttp:durableWorkflowIdempotent\": \"");
     try w.writeAll(if (facts.durable_workflow_idempotent) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:durableWorkflowFaultCovered\": \"");
+    try w.writeAll(",\n          \"zttp:durableWorkflowFaultCovered\": \"");
     try w.writeAll(if (facts.durable_workflow_fault_covered) "true" else "false");
     try w.writeAll("\"");
 
-    try w.writeAll(",\n          \"zigttp:retrySafe\": \"");
+    try w.writeAll(",\n          \"zttp:retrySafe\": \"");
     try w.writeAll(if (facts.retry_safe) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:readOnly\": \"");
+    try w.writeAll(",\n          \"zttp:readOnly\": \"");
     try w.writeAll(if (facts.read_only) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:injectionSafe\": \"");
+    try w.writeAll(",\n          \"zttp:injectionSafe\": \"");
     try w.writeAll(if (facts.injection_safe) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:idempotent\": \"");
+    try w.writeAll(",\n          \"zttp:idempotent\": \"");
     try w.writeAll(if (facts.idempotent) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:stateIsolated\": \"");
+    try w.writeAll(",\n          \"zttp:stateIsolated\": \"");
     try w.writeAll(if (facts.state_isolated) "true" else "false");
     try w.writeAll("\"");
     if (facts.max_io_depth) |depth| {
-        try w.print(",\n          \"zigttp:maxIoDepth\": \"{d}\"", .{depth});
+        try w.print(",\n          \"zttp:maxIoDepth\": \"{d}\"", .{depth});
     }
     if (facts.cost_total) |bound| {
-        try w.writeAll(",\n          \"zigttp:costClass\": \"");
+        try w.writeAll(",\n          \"zttp:costClass\": \"");
         try w.writeAll(bound.class().asString());
         try w.writeAll("\"");
         switch (bound) {
             .constant => {},
             .linear => |linear| {
-                try w.print(",\n          \"zigttp:costBound\": \"{d}+{d}*n\"", .{ linear.base, linear.coefficient });
-                try w.writeAll(",\n          \"zigttp:costSource\": \"");
+                try w.print(",\n          \"zttp:costBound\": \"{d}+{d}*n\"", .{ linear.base, linear.coefficient });
+                try w.writeAll(",\n          \"zttp:costSource\": \"");
                 try writeCostSource(w, linear.source);
                 try w.writeAll("\"");
             },
             .unbounded => |source| {
-                try w.writeAll(",\n          \"zigttp:costSource\": \"");
+                try w.writeAll(",\n          \"zttp:costSource\": \"");
                 try writeCostSource(w, source);
                 try w.writeAll("\"");
             },
         }
-        try w.writeAll(",\n          \"zigttp:costWorstCase\": \"");
+        try w.writeAll(",\n          \"zttp:costWorstCase\": \"");
         if (costWorstCaseTotal(facts)) |worst| {
             try w.print("{d}", .{worst});
         } else {
             try w.writeAll("unbounded");
         }
         try w.writeAll("\"");
-        try w.print(",\n          \"zigttp:costBodyLimit\": \"{d}\"", .{facts.cost_worst_case_body_limit});
+        try w.print(",\n          \"zttp:costBodyLimit\": \"{d}\"", .{facts.cost_worst_case_body_limit});
     }
 
     // Flow provenance tags
-    try w.writeAll(",\n          \"zigttp:noSecretLeakage\": \"");
+    try w.writeAll(",\n          \"zttp:noSecretLeakage\": \"");
     try w.writeAll(if (facts.no_secret_leakage) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:noCredentialLeakage\": \"");
+    try w.writeAll(",\n          \"zttp:noCredentialLeakage\": \"");
     try w.writeAll(if (facts.no_credential_leakage) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:inputValidated\": \"");
+    try w.writeAll(",\n          \"zttp:inputValidated\": \"");
     try w.writeAll(if (facts.input_validated) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:piiContained\": \"");
+    try w.writeAll(",\n          \"zttp:piiContained\": \"");
     try w.writeAll(if (facts.pii_contained) "true" else "false");
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zigttp:faultCovered\": \"");
+    try w.writeAll(",\n          \"zttp:faultCovered\": \"");
     try w.writeAll(if (facts.fault_covered) "true" else "false");
     try w.writeAll("\"");
 
     if (facts.egress_hosts.len > 0 or facts.egress_proven) {
-        try w.writeAll(",\n          \"zigttp:egressProven\": \"");
+        try w.writeAll(",\n          \"zttp:egressProven\": \"");
         try w.writeAll(if (facts.egress_proven) "true" else "false");
         try w.writeAll("\"");
 
         if (facts.egress_hosts.len > 0) {
-            try w.writeAll(",\n          \"zigttp:egressHosts\": \"");
+            try w.writeAll(",\n          \"zttp:egressHosts\": \"");
             for (facts.egress_hosts, 0..) |host, i| {
                 if (i > 0) try w.writeAll(",");
                 try writeJsonStringContent(w, host);
@@ -575,7 +575,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("      \"Type\": \"AWS::EC2::SecurityGroup\",\n");
         try w.writeAll("      \"Condition\": \"HasVpc\",\n");
         try w.writeAll("      \"Properties\": {\n");
-        try w.writeAll("        \"GroupDescription\": \"zigttp proven egress - ");
+        try w.writeAll("        \"GroupDescription\": \"zttp proven egress - ");
         if (facts.egress_proven) {
             try w.writeAll("restricted to: ");
             for (facts.egress_hosts, 0..) |host, i| {
@@ -641,7 +641,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
 /// Wrangler's published shape: top-level `name`, `compatibility_date`,
 /// route patterns translated to Workers route objects, env var names as
 /// `[vars]` entries (values left empty so `wrangler secret put` or a CI
-/// step supplies them), and a custom `[zigttp]` table carrying proof
+/// step supplies them), and a custom `[zttp]` table carrying proof
 /// metadata. Wrangler ignores unknown top-level tables, so the metadata
 /// rides along without breaking deploys.
 fn renderCloudflareWorkers(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const RenderOutput {
@@ -650,7 +650,7 @@ fn renderCloudflareWorkers(allocator: std.mem.Allocator, facts: *const ProvenFac
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
     const w = &aw.writer;
 
-    try w.writeAll("# Generated by zigttp deploy_manifest. Do not edit by hand.\n");
+    try w.writeAll("# Generated by zttp deploy_manifest. Do not edit by hand.\n");
     try w.writeAll("# Proof level: ");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\n\n");
@@ -697,7 +697,7 @@ fn renderCloudflareWorkers(allocator: std.mem.Allocator, facts: *const ProvenFac
     // Proof metadata table. Wrangler treats unknown top-level tables as
     // pass-through metadata; this is informational, not consumed by the
     // platform. Mirrors the metadata block the AWS renderer emits.
-    try w.writeAll("[zigttp]\n");
+    try w.writeAll("[zttp]\n");
     try w.writeAll("proof_level = \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\"\n");
@@ -841,7 +841,7 @@ const writeJsonStringContent = handler_contract.writeJsonStringContent;
 // -------------------------------------------------------------------------
 
 pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []const u8) !void {
-    try w.writeAll("zigttp Proven Deployment Report\n");
+    try w.writeAll("zttp Proven Deployment Report\n");
     try w.writeAll("Handler: ");
     try w.writeAll(facts.handler_path);
     try w.writeAll("\nProvider: ");
@@ -1246,10 +1246,10 @@ test "linear cost bound emits costClass/costBound tags and no maxIoDepth" {
     }
 
     const content = outputs[0].content;
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costClass\": \"linear\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costBound\": \"1+1*n\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:costSource\": \"5:3 for...of over `ids`\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "zigttp:maxIoDepth") == null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:costClass\": \"linear\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:costBound\": \"1+1*n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:costSource\": \"5:3 for...of over `ids`\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "zttp:maxIoDepth") == null);
 }
 
 test "worst-case cost tags render at the body limit" {
@@ -1283,9 +1283,9 @@ test "worst-case cost tags render at the body limit" {
     }
 
     const content = outputs[0].content;
-    const class_idx = std.mem.indexOf(u8, content, "\"zigttp:costClass\": \"linear\"") orelse return error.MissingCostClass;
-    const worst_idx = std.mem.indexOf(u8, content, "\"zigttp:costWorstCase\": \"1048579\"") orelse return error.MissingCostWorstCase;
-    const body_idx = std.mem.indexOf(u8, content, "\"zigttp:costBodyLimit\": \"1048576\"") orelse return error.MissingCostBodyLimit;
+    const class_idx = std.mem.indexOf(u8, content, "\"zttp:costClass\": \"linear\"") orelse return error.MissingCostClass;
+    const worst_idx = std.mem.indexOf(u8, content, "\"zttp:costWorstCase\": \"1048579\"") orelse return error.MissingCostWorstCase;
+    const body_idx = std.mem.indexOf(u8, content, "\"zttp:costBodyLimit\": \"1048576\"") orelse return error.MissingCostBodyLimit;
     try std.testing.expect(class_idx < worst_idx);
     try std.testing.expect(worst_idx < body_idx);
 }
@@ -1340,10 +1340,10 @@ test "renderAws with env vars and routes" {
     try std.testing.expect(std.mem.indexOf(u8, content, "/api/users/{proxy+}") != null);
 
     // Tags
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:proven\": \"true\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:proofLevel\": \"complete\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:proven\": \"true\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:proofLevel\": \"complete\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"durableWorkflow\": { \"used\": true, \"proofLevel\": \"complete\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zigttp:durableWorkflowRetrySafe\": \"true\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:durableWorkflowRetrySafe\": \"true\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "api.stripe.com") != null);
 
     // Verification metadata
@@ -1518,7 +1518,7 @@ test "renderAws exposes websocket metadata when the handler has ws events" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"onError\": false") != null);
 }
 
-test "renderAws exposes fetchHosts when the handler imports zigttp:fetch" {
+test "renderAws exposes fetchHosts when the handler imports zttp:fetch" {
     const allocator = std.testing.allocator;
 
     const fetch_hosts = [_][]const u8{ "billing.example", "metrics.example" };
@@ -1603,7 +1603,7 @@ test "renderCloudflareWorkers omits path-only routes and keeps host-qualified ro
     try std.testing.expect(std.mem.indexOf(u8, content, "[vars]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "JWT_SECRET = \"\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "DATABASE_URL = \"\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "[zigttp]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "[zttp]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "fetch_hosts = [\"api.upstream.dev\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "verification = [\"exhaustiveReturns\", \"resultsSafe\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "durable_workflow_proof_level = \"partial\"") != null);

@@ -3,7 +3,7 @@
 //! the trace / durable-oplog file descriptors.
 
 const std = @import("std");
-const zq = @import("zigts");
+const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
 
@@ -70,24 +70,24 @@ pub const RuntimeConfig = struct {
     /// request body limit.
     cost_ceilings: ?CostCeilings = null,
     system_config_path: ?[]const u8 = null,
-    /// Route durable `zigttp:workflow` child dispatch through a persisted
+    /// Route durable `zttp:workflow` child dispatch through a persisted
     /// workflow queue. Requires both `durable_oplog_dir` and `system_config_path`.
     workflow_queue_enabled: bool = false,
     /// In-process co-located handler registry (`*in_process_dispatch.SystemRuntime`)
-    /// for `zigttp:workflow.call`. Type-erased to keep this leaf config free of
+    /// for `zttp:workflow.call`. Type-erased to keep this leaf config free of
     /// the runtime-pool import cycle; cast back in `zruntime.installBindings`.
     /// Server-owned and shared by every pooled orchestrator runtime; null when
     /// no `--system` bundle is loaded.
     system_registry: ?*anyopaque = null,
     /// Optional in-process actor queue (`*actor_queue.ActorQueue`) used by
-    /// `zigttp:queue`. Type-erased to keep RuntimeConfig independent from the
+    /// `zttp:queue`. Type-erased to keep RuntimeConfig independent from the
     /// server/runtime ownership graph. Null keeps the module importable but
     /// makes queue operations return Result errors.
     queue_system: ?*anyopaque = null,
     /// When true, the server creates a process-owned in-memory actor queue and
     /// wires it into every pooled runtime unless queue_system is already set.
     queue_actor_enabled: bool = false,
-    /// Actor identity used by `zigttp:queue.receive()` when no actor name is
+    /// Actor identity used by `zttp:queue.receive()` when no actor name is
     /// supplied, and as the source/reply actor for sends from this runtime.
     queue_actor_name: []const u8 = "main",
     /// Mailbox capacity used by server-owned ActorQueue instances.

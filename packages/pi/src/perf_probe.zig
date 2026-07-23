@@ -1,6 +1,6 @@
 //! Perf-as-proof receipt probe (PI side).
 //!
-//! Perf-receipt primitives live across the signed JWS (`zigts.perf_receipt`),
+//! Perf-receipt primitives live across the signed JWS (`zts.perf_receipt`),
 //! the `kind=perf` ledger row (`runtime/proof_ledger.zig`), and the
 //! engine-backed latency probe (`runtime/benchmark.zig`). Wiring them onto
 //! applied edits goes through this seam because the probe needs the JS engine
@@ -16,7 +16,7 @@
 //!
 //! The probe is best-effort by contract: a failed probe never fails an
 //! apply. The auditable artifact is the signed `kind=perf` row the probe
-//! writes to `.zigttp/proofs.jsonl`; this side only triggers it.
+//! writes to `.zttp/proofs.jsonl`; this side only triggers it.
 
 const std = @import("std");
 

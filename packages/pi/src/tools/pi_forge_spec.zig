@@ -5,13 +5,13 @@
 //! returns an inspectable forge run payload.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const proof_enrichment = @import("../proof_enrichment.zig");
 const common = @import("common.zig");
 
-const json_utils = zigts.json_utils;
+const json_utils = zts.json_utils;
 
 const name = "pi_forge_spec";
 
@@ -83,7 +83,7 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const source = zigts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
@@ -363,11 +363,11 @@ fn appendMissingTypeImports(
     source: []const u8,
     needs_effects: bool,
 ) !void {
-    if (std.mem.indexOf(u8, source, "Spec") == null or std.mem.indexOf(u8, source, "from \"zigttp:types\"") == null) {
-        try out.appendSlice(allocator, "import type { Spec } from \"zigttp:types\";\n");
+    if (std.mem.indexOf(u8, source, "Spec") == null or std.mem.indexOf(u8, source, "from \"zttp:types\"") == null) {
+        try out.appendSlice(allocator, "import type { Spec } from \"zttp:types\";\n");
     }
-    if (needs_effects and (std.mem.indexOf(u8, source, "Effects") == null or std.mem.indexOf(u8, source, "from \"zigttp:types\"") == null)) {
-        try out.appendSlice(allocator, "import type { Effects } from \"zigttp:types\";\n");
+    if (needs_effects and (std.mem.indexOf(u8, source, "Effects") == null or std.mem.indexOf(u8, source, "from \"zttp:types\"") == null)) {
+        try out.appendSlice(allocator, "import type { Effects } from \"zttp:types\";\n");
     }
     if (out.items.len > 0 and source.len > 0) try out.append(allocator, '\n');
 }
@@ -431,10 +431,10 @@ fn replaceCalls(
 }
 
 fn ensureStepImport(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
-    if (std.mem.indexOf(u8, source, "zigttp:durable") != null and std.mem.indexOf(u8, source, "step") != null) {
+    if (std.mem.indexOf(u8, source, "zttp:durable") != null and std.mem.indexOf(u8, source, "step") != null) {
         return try allocator.dupe(u8, source);
     }
-    return try std.fmt.allocPrint(allocator, "import {{ step }} from \"zigttp:durable\";\n\n{s}", .{source});
+    return try std.fmt.allocPrint(allocator, "import {{ step }} from \"zttp:durable\";\n\n{s}", .{source});
 }
 
 fn appendStep(
@@ -493,7 +493,7 @@ test "annotate handler adds spec return type and import" {
     ;
     const out = try annotateHandler(testing.allocator, source, intent);
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "import type { Spec } from \"zigttp:types\";") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "import type { Spec } from \"zttp:types\";") != null);
     try testing.expect(std.mem.indexOf(u8, out, "function handler(req: Request): Response & Spec<\"deterministic\" | \"idempotent\"> {") != null);
 }
 
@@ -506,7 +506,7 @@ test "rewrite nondeterminism wraps Date.now and imports step" {
     ;
     const out = (try rewriteNondeterminism(testing.allocator, source)) orelse return error.MissingRewrite;
     defer testing.allocator.free(out);
-    try testing.expect(std.mem.indexOf(u8, out, "import { step } from \"zigttp:durable\";") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "import { step } from \"zttp:durable\";") != null);
     try testing.expect(std.mem.indexOf(u8, out, "step(\"deterministic.clock.1\", () => Date.now())") != null);
 }
 
@@ -518,7 +518,7 @@ test "execute forges deterministic spec candidate that clears veto" {
         \\}
         \\
     ;
-    try zigts.file_io.writeFile(testing.allocator, rel_path, source);
+    try zts.file_io.writeFile(testing.allocator, rel_path, source);
 
     var result = try execute(testing.allocator, &.{ "spec", "file=.zig-cache/tmp/spec-forge-handler.ts", "specs=deterministic,idempotent" });
     defer result.deinit(testing.allocator);

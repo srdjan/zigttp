@@ -199,7 +199,7 @@ test "assemble: tool_use cassette yields a tool_calls reply with assembled JSON 
     switch (outcome.reply.response) {
         .tool_calls => |calls| {
             try testing.expectEqual(@as(usize, 1), calls.len);
-            try testing.expectEqualStrings("zigts_expert_describe_rule", calls[0].name);
+            try testing.expectEqualStrings("zts_expert_describe_rule", calls[0].name);
             try testing.expectEqualStrings("{\"rule\":\"ZTS303\"}", calls[0].args_json);
         },
         else => return error.TestFailed,
@@ -226,7 +226,7 @@ test "assemble: text preamble plus tool batch preserves narration and every tool
         .{ .content_block_stop = .{ .index = 0 } },
         .{ .content_block_start = .{
             .index = 1,
-            .kind = .{ .tool_use = .{ .id = "toolu_meta", .name = "zigts_expert_meta" } },
+            .kind = .{ .tool_use = .{ .id = "toolu_meta", .name = "zts_expert_meta" } },
         } },
         .{ .content_block_stop = .{ .index = 1 } },
         .{ .content_block_start = .{

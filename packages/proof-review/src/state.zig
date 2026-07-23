@@ -1,5 +1,5 @@
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const types = @import("types.zig");
 const io_util = @import("io_util.zig");
 const json_util = @import("json_util.zig");
@@ -72,7 +72,7 @@ pub fn load(allocator: std.mem.Allocator) !Store {
         else => return err,
     };
     const path = statePath();
-    const bytes = zigts.file_io.readFile(allocator, path, 1024 * 1024) catch |err| switch (err) {
+    const bytes = zts.file_io.readFile(allocator, path, 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return .{ .entries = try allocator.alloc(Entry, 0) },
         else => return err,
     };
@@ -150,7 +150,7 @@ pub fn save(allocator: std.mem.Allocator, store: *const Store) !void {
     try json.endObject();
     const bytes = try aw.toOwnedSlice();
     defer allocator.free(bytes);
-    try zigts.file_io.writeFile(allocator, path, bytes);
+    try zts.file_io.writeFile(allocator, path, bytes);
 }
 
 fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
@@ -212,11 +212,11 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
 pub fn ensureStateDir() !void {
     var io_backend = io_util.threadedIo(std.heap.smp_allocator);
     defer io_backend.deinit();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ".zigttp");
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ".zttp");
 }
 
 pub fn statePath() []const u8 {
-    return ".zigttp/deploy-state.json";
+    return ".zttp/deploy-state.json";
 }
 
 test "state store round trips entries" {

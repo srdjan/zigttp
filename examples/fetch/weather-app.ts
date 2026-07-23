@@ -1,4 +1,4 @@
-// Weather Forecast - a small web app on the zigttp runtime.
+// Weather Forecast - a small web app on the zttp runtime.
 //
 // GET /          serves the frontend UI: latitude/longitude inputs and a
 //                "Get Weather" button. The page fetches /forecast client-side.
@@ -12,21 +12,21 @@
 // vary per request without making the egress host unprovable.
 //
 // Run:
-//   zigttp serve examples/fetch/weather-app.ts \
+//   zttp serve examples/fetch/weather-app.ts \
 //     --outbound-host api.open-meteo.com -p 3000
 //
 // Try it:
 //   open http://localhost:3000
 //   curl "http://localhost:3000/forecast?latitude=40.71&longitude=-74.01"
 
-import type { Spec } from "zigttp:types";
-import { fetch } from "zigttp:fetch";
+import type { Spec } from "zttp:types";
+import { fetch } from "zttp:fetch";
 
 type WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
 
 // The frontend UI. A static page: the form posts nothing - its submit handler
 // fetches /forecast and renders the result. (Browser-side script only; the
-// zigttp engine just serves this string.)
+// zttp engine just serves this string.)
 function page(): string {
   return `<!doctype html>
 <html lang="en">
@@ -52,7 +52,7 @@ function page(): string {
 </head>
 <body>
 <h1>Weather Forecast</h1>
-<p class="muted">Powered by zigttp - native fetch, zero dependencies, proven egress.</p>
+<p class="muted">Powered by zttp - native fetch, zero dependencies, proven egress.</p>
 <form id="f">
   <label>Latitude <input id="lat" type="number" step="any" value="52.52" required></label>
   <label>Longitude <input id="lng" type="number" step="any" value="13.41" required></label>

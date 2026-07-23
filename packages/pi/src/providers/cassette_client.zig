@@ -20,8 +20,8 @@
 //! bytes per JSONL line.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const file_io = zigts.file_io;
+const zts = @import("zts");
+const file_io = zts.file_io;
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const anthropic_sse_parser = @import("anthropic/sse_parser.zig");

@@ -2,7 +2,7 @@
 //!
 //! The sibling expert_eval.zig pins the routing surface (does an ask reach the
 //! right compiler-native tool). This module measures the next thing: given the
-//! model's drafts, how good is the generated zigts code? It drives a real turn
+//! model's drafts, how good is the generated zts code? It drives a real turn
 //! through the real compiler veto in an isolated workspace and reports the
 //! headline number - first-draft veto-pass rate - plus round-trips-to-green and
 //! a per-ZTS-code gap histogram that ranks which teaching gap to close next.
@@ -42,7 +42,7 @@ pub const CodegenCase = struct {
     name: []const u8,
     prompt: []const u8,
     /// Bytes written into the tmp workspace before the turn. Lets a case model
-    /// "edit an existing handler" or seed a zigttp.json so the SQL veto path
+    /// "edit an existing handler" or seed a zttp.json so the SQL veto path
     /// resolves.
     seed_files: []const SeedFile = &.{},
     /// The task kind this prompt should route to. Ties the codegen corpus to the
@@ -187,9 +187,9 @@ pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
 }
 
 fn isViolationTool(tool_name: []const u8) bool {
-    return std.mem.eql(u8, tool_name, "zigts_expert_edit_simulate") or
-        std.mem.eql(u8, tool_name, "zigts_expert_review_patch") or
-        std.mem.eql(u8, tool_name, "zigts_check");
+    return std.mem.eql(u8, tool_name, "zts_expert_edit_simulate") or
+        std.mem.eql(u8, tool_name, "zts_expert_review_patch") or
+        std.mem.eql(u8, tool_name, "zts_check");
 }
 
 fn findZts(text: []const u8) ?[]const u8 {
@@ -258,9 +258,9 @@ test "runCase scores a clean first draft as a veto pass" {
 
 test "runCase scores a clean workflow first draft as a veto pass" {
     const workflow_handler =
-        \\import { run } from "zigttp:durable";
-        \\import { call } from "zigttp:workflow";
-        \\import type { Spec } from "zigttp:types";
+        \\import { run } from "zttp:durable";
+        \\import { call } from "zttp:workflow";
+        \\import type { Spec } from "zttp:types";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical"> {
         \\  const key = req.headers.get("idempotency-key") ?? "workflow-demo";

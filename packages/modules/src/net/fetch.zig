@@ -1,11 +1,11 @@
-//! zigttp:fetch - web-standard outbound HTTP.
+//! zttp:fetch - web-standard outbound HTTP.
 //!
 //! The native fn only validates arguments, fetches the installed runtime
 //! callback, and delegates. The callback is populated during runtime
-//! bootstrap from zigts side (see packages/zigts/src/modules/net/fetch.zig).
+//! bootstrap from zts side (see packages/zts/src/modules/net/fetch.zig).
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 
 pub const MODULE_STATE_SLOT: usize = 11; // module_slots.Slot.fetch
@@ -28,7 +28,7 @@ pub const FetchState = struct {
 };
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:fetch",
+    .specifier = "zttp:fetch",
     .name = "fetch",
     .required_capabilities = &.{ .network, .runtime_callback },
     .stateful = true,

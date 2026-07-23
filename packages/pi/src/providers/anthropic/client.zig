@@ -239,7 +239,7 @@ test "buildRequestBody: emits structured messages with model, system, user, no t
 
     const body = try buildRequestBody(arena.allocator(), .{
         .api_key = "test-fixture-key",
-        .system_prompt = "you are a zigts expert",
+        .system_prompt = "you are a zts expert",
     }, &transcript, null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
@@ -250,7 +250,7 @@ test "buildRequestBody: emits structured messages with model, system, user, no t
     try testing.expect(root.get("tools") == null);
 
     const system = root.get("system").?.array.items;
-    try testing.expectEqualStrings("you are a zigts expert", system[0].object.get("text").?.string);
+    try testing.expectEqualStrings("you are a zts expert", system[0].object.get("text").?.string);
 
     const msgs = root.get("messages").?.array.items;
     try testing.expectEqualStrings("user", msgs[0].object.get("role").?.string);

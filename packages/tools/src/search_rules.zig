@@ -1,10 +1,10 @@
-//! `zigts search` subcommand.
+//! `zts search` subcommand.
 //!
 //! Searches rules by keyword (substring match against name, description, help).
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
+const zts = @import("zts");
+const rule_registry = zts.rule_registry;
 const describe_rule = @import("describe_rule.zig");
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -69,9 +69,9 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
 fn printHelp() void {
     const help =
-        \\zigts search - search diagnostic rules by keyword
+        \\zts search - search diagnostic rules by keyword
         \\
-        \\Usage: zigts search <keyword> [--json]
+        \\Usage: zts search <keyword> [--json]
         \\
         \\Searches rule names, descriptions, and help text for substring matches.
         \\

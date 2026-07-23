@@ -1,10 +1,10 @@
-//! zigttp:http - HTTP request/response helpers
+//! zttp:http - HTTP request/response helpers
 
 const std = @import("std");
-const sdk = @import("zigttp-sdk");
+const sdk = @import("zttp-sdk");
 
 pub const binding = sdk.ModuleBinding{
-    .specifier = "zigttp:http",
+    .specifier = "zttp:http",
     .name = "http",
     .exports = &.{
         .{ .name = "parseCookies", .module_func = parseCookiesImpl, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true, .credential = true } },

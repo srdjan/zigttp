@@ -1,17 +1,17 @@
 //! pi_repair_plan - compile a handler proof failure into typed repair plans.
 
 const std = @import("std");
-const zigts = @import("zigts");
+const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
 
-const ir = zigts.parser;
-const counterexample = zigts.counterexample;
-const flow_checker = zigts.flow_checker;
-const handler_verifier = zigts.handler_verifier;
-const json_utils = zigts.json_utils;
-const repair_plan = zigts.repair_plan;
+const ir = zts.parser;
+const counterexample = zts.counterexample;
+const flow_checker = zts.flow_checker;
+const handler_verifier = zts.handler_verifier;
+const json_utils = zts.json_utils;
+const repair_plan = zts.repair_plan;
 
 const name = "pi_repair_plan";
 
@@ -82,7 +82,7 @@ pub fn execute(
     const absolute = try common.resolveInsideWorkspace(allocator, root, args[0]);
     defer allocator.free(absolute);
 
-    const source = zigts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
@@ -124,14 +124,14 @@ pub fn planFromSource(
         }
     }
 
-    var strip_result = zigts.strip(allocator, source, .{ .comptime_env = .{} }) catch |e| {
+    var strip_result = zts.strip(allocator, source, .{ .comptime_env = .{} }) catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": TypeScript strip failed: {s}\n", .{@errorName(e)});
     };
     defer strip_result.deinit();
 
-    var atoms = zigts.context.AtomTable.init(allocator);
+    var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = zigts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -143,11 +143,11 @@ pub fn planFromSource(
         return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
     };
 
-    var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
+    var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
     defer verifier.deinit();
     _ = try verifier.verify(handler_fn);
 
-    var checker = zigts.FlowChecker.init(allocator, ir_view, &atoms);
+    var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     _ = try checker.check(handler_fn);
 
@@ -156,7 +156,7 @@ pub fn planFromSource(
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
 
-    const policy_hash = zigts.rule_registry.policyHash();
+    const policy_hash = zts.rule_registry.policyHash();
     try w.writeAll("{\"ok\":");
     const has_failures = hasVerifierErrors(verifier.getDiagnostics()) or
         hasRequestedFlowDiagnostics(checker.getDiagnostics(), goals.items);
@@ -190,12 +190,12 @@ pub fn planFromSource(
     // Failures here are non-fatal: the repair plan still surfaces, just
     // without persistence.
     const corpus_dir = if (persist_witnesses)
-        (zigts.witness_corpus.corpusDir(allocator, rel_path) catch null)
+        (zts.witness_corpus.corpusDir(allocator, rel_path) catch null)
     else
         null;
     defer if (corpus_dir) |d| allocator.free(d);
     if (corpus_dir) |d| {
-        zigts.witness_corpus.ensureCorpusDir(allocator, d, rel_path) catch {};
+        zts.witness_corpus.ensureCorpusDir(allocator, d, rel_path) catch {};
     }
 
     var first_witness = true;
@@ -217,7 +217,7 @@ pub fn planFromSource(
         defer witness.deinit(allocator);
 
         if (corpus_dir) |d| {
-            if (zigts.witness_corpus.persist(allocator, d, witness)) |pres| {
+            if (zts.witness_corpus.persist(allocator, d, witness)) |pres| {
                 var owned = pres;
                 owned.deinit(allocator);
             } else |_| {}
@@ -407,7 +407,7 @@ pub fn concreteTemplate(
 
 pub fn repairSubjectName(
     ir_view: ir.IrView,
-    atoms: *zigts.context.AtomTable,
+    atoms: *zts.context.AtomTable,
     diag: handler_verifier.Diagnostic,
 ) ?[]const u8 {
     return switch (diag.kind) {
@@ -419,8 +419,8 @@ pub fn repairSubjectName(
 
 fn memberObjectName(
     ir_view: ir.IrView,
-    atoms: *zigts.context.AtomTable,
-    node: zigts.parser.NodeIndex,
+    atoms: *zts.context.AtomTable,
+    node: zts.parser.NodeIndex,
 ) ?[]const u8 {
     const tag = ir_view.getTag(node) orelse return null;
     if (tag == .identifier) return identifierName(ir_view, atoms, node);
@@ -431,8 +431,8 @@ fn memberObjectName(
 
 fn identifierName(
     ir_view: ir.IrView,
-    atoms: *zigts.context.AtomTable,
-    node: zigts.parser.NodeIndex,
+    atoms: *zts.context.AtomTable,
+    node: zts.parser.NodeIndex,
 ) ?[]const u8 {
     const tag = ir_view.getTag(node) orelse return null;
     if (tag != .identifier) return null;
@@ -501,7 +501,7 @@ test "execute rejects structural property goals" {
 
 test "planFromSource plans repairs from an in-memory draft" {
     const source =
-        \\import { validateJson } from "zigttp:validate";
+        \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\  const result = validateJson("item", req.body);

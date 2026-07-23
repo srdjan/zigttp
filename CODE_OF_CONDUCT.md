@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-The zigttp project is committed to providing a welcoming, harassment-free
+The zttp project is committed to providing a welcoming, harassment-free
 experience for everyone who participates, regardless of background or identity.
 
 ## Standard
@@ -14,7 +14,7 @@ at:
 
 https://www.contributor-covenant.org/version/2/1/code_of_conduct/
 
-By participating in zigttp you agree to uphold that standard in all project
+By participating in zttp you agree to uphold that standard in all project
 spaces (the repository, issues, pull requests, discussions, and reviews) and
 whenever you are representing the project in a public space.
 
