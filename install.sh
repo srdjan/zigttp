@@ -24,6 +24,7 @@ LOCK_CANDIDATE=""
 LOCK_HELD=0
 REAP_FILE=""
 REAP_HELD=0
+RELEASE_METADATA=""
 
 main() {
     mkdir -p "$BIN_DIR"
@@ -35,24 +36,23 @@ main() {
     detect_platform
     resolve_version
     check_existing
+    resolve_release_assets
 
     printf "Installing zttp %s (%s/%s) to %s\n" "$VERSION" "$OS" "$ARCH" "$BIN_DIR"
 
     INSTALL_TMPDIR=$(mktemp -d)
 
-    TARBALL="zttp-${VERSION}-${OS}-${ARCH}.tar.gz"
-    CHECKSUM="${TARBALL}.sha256"
     BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
     download "${BASE_URL}/${TARBALL}" "${INSTALL_TMPDIR}/${TARBALL}"
     download "${BASE_URL}/${CHECKSUM}" "${INSTALL_TMPDIR}/${CHECKSUM}"
 
     verify_checksum "${INSTALL_TMPDIR}/${TARBALL}" "${INSTALL_TMPDIR}/${CHECKSUM}"
-    validate_archive_paths "${INSTALL_TMPDIR}/${TARBALL}" "zttp-${VERSION}-${OS}-${ARCH}"
+    validate_archive_paths "${INSTALL_TMPDIR}/${TARBALL}" "$PAYLOAD_ROOT"
 
     mkdir -p "$BIN_DIR"
     EXTRACT_DIR="${INSTALL_TMPDIR}/extract"
-    PAYLOAD_DIR="${EXTRACT_DIR}/zttp-${VERSION}-${OS}-${ARCH}"
+    PAYLOAD_DIR="${EXTRACT_DIR}/${PAYLOAD_ROOT}"
     mkdir -p "$EXTRACT_DIR"
     tar xzf "${INSTALL_TMPDIR}/${TARBALL}" -C "$EXTRACT_DIR"
 
@@ -68,9 +68,9 @@ main() {
     BACKUP_DIR="${TRANSACTION_DIR}/backup"
     mkdir "$BACKUP_DIR"
 
-    stage_binary "$PAYLOAD_DIR" zttp "$ZTTP_STAGE"
-    stage_binary "$PAYLOAD_DIR" zts "$ZIGTS_STAGE"
-    stage_binary "$PAYLOAD_DIR" zttp-runtime "$RUNTIME_STAGE"
+    stage_binary "$PAYLOAD_DIR" "$ZTTP_SOURCE" "$ZTTP_STAGE"
+    stage_binary "$PAYLOAD_DIR" "$ZTS_SOURCE" "$ZIGTS_STAGE"
+    stage_binary "$PAYLOAD_DIR" "$RUNTIME_SOURCE" "$RUNTIME_STAGE"
     verify_binary "$ZTTP_STAGE" zttp staged
     verify_binary "$ZIGTS_STAGE" zts staged
     verify_binary "$RUNTIME_STAGE" zttp-runtime staged
@@ -138,22 +138,29 @@ resolve_version() {
             if [ -z "$VERSION" ]; then
                 VERSION=$(first_release_tag "$RELEASES" "")
             fi
+            RELEASE_METADATA="$RELEASES"
             ;;
         latest)
             printf "Fetching latest version, including prereleases...\n"
-            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20" \
-                | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            RELEASES=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20")
+            VERSION=$(first_release_tag "$RELEASES" "")
+            RELEASE_METADATA="$RELEASES"
             ;;
         stable)
             printf "Fetching latest stable version...\n"
-            VERSION=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-                | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+            if RELEASE_METADATA=$(download_stdout "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null); then
+                VERSION=$(first_release_tag "$RELEASE_METADATA" "")
+            else
+                RELEASE_METADATA=""
+                VERSION=""
+            fi
             if [ -z "$VERSION" ]; then
                 # /releases/latest 404s when every release is a prerelease/draft.
                 # Fall back to the newest release of any kind so a first-time
                 # `curl | sh` never dead-ends.
                 RELEASES=$(download_stdout "https://api.github.com/repos/${REPO}/releases?per_page=20")
                 VERSION=$(first_release_tag "$RELEASES" "")
+                RELEASE_METADATA="$RELEASES"
             fi
             ;;
         *)
@@ -166,6 +173,46 @@ resolve_version() {
         printf "Error: could not determine latest version\n" >&2
         exit 1
     fi
+}
+
+release_has_asset() {
+    metadata="$1"
+    asset_name="$2"
+
+    printf '%s\n' "$metadata" |
+        sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)"[[:space:]]*,\{0,1\}[[:space:]]*$/\1/p' |
+        grep -Fqx "$asset_name"
+}
+
+resolve_release_assets() {
+    if [ -z "$RELEASE_METADATA" ]; then
+        RELEASE_METADATA=$(download_stdout "https://api.github.com/repos/${REPO}/releases/tags/${VERSION}")
+    fi
+
+    current_root="zttp-${VERSION}-${OS}-${ARCH}"
+    legacy_root="zigttp-${VERSION}-${OS}-${ARCH}"
+
+    if release_has_asset "$RELEASE_METADATA" "${current_root}.tar.gz" &&
+        release_has_asset "$RELEASE_METADATA" "${current_root}.tar.gz.sha256"; then
+        PAYLOAD_ROOT="$current_root"
+        ZTTP_SOURCE="zttp"
+        ZTS_SOURCE="zts"
+        RUNTIME_SOURCE="zttp-runtime"
+    elif release_has_asset "$RELEASE_METADATA" "${legacy_root}.tar.gz" &&
+        release_has_asset "$RELEASE_METADATA" "${legacy_root}.tar.gz.sha256"; then
+        PAYLOAD_ROOT="$legacy_root"
+        ZTTP_SOURCE="zigttp"
+        ZTS_SOURCE="zigts"
+        RUNTIME_SOURCE="zigttp-runtime"
+    else
+        printf "Error: release %s has no complete archive/checksum pair for %s/%s\n" "$VERSION" "$OS" "$ARCH" >&2
+        printf "Expected either %s or %s and its exact .sha256 asset\n" \
+            "${current_root}.tar.gz" "${legacy_root}.tar.gz" >&2
+        exit 1
+    fi
+
+    TARBALL="${PAYLOAD_ROOT}.tar.gz"
+    CHECKSUM="${TARBALL}.sha256"
 }
 
 first_release_tag() {
@@ -434,7 +481,7 @@ cleanup() {
 
 binary_has_expected_version() {
     name="$1"
-    prefix="$2"
+    shift
 
     if [ ! -x "${BIN_DIR}/${name}" ]; then
         return 1
@@ -443,14 +490,19 @@ binary_has_expected_version() {
         return 1
     fi
 
-    [ "$version_output" = "${prefix} ${VERSION}" ] ||
-        [ "$version_output" = "${prefix} ${VERSION#v}" ]
+    for prefix in "$@"; do
+        if [ "$version_output" = "${prefix} ${VERSION}" ] ||
+            [ "$version_output" = "${prefix} ${VERSION#v}" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 check_existing() {
-    if binary_has_expected_version zttp zttp &&
-        binary_has_expected_version zts zts &&
-        binary_has_expected_version zttp-runtime zttp; then
+    if binary_has_expected_version zttp zttp zigttp &&
+        binary_has_expected_version zts zts zigts &&
+        binary_has_expected_version zttp-runtime zttp zigttp; then
         printf "zttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
         exit 0
     fi
