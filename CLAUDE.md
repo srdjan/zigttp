@@ -280,7 +280,7 @@ zttp expert
 - Tests live alongside code in `test "..."` blocks. Run relevant `zig build test*` after changes.
 - `errdefer` on all allocations. `orelse` instead of `?` unwrap.
 - Benchmark before optimizing. If targets already met, stop.
-- Benchmarks live in `../zigttp-bench`. Do not create benchmark scripts here.
+- Benchmarks live in `../zttp-bench`. Do not create benchmark scripts here.
 - Draft structure first before deep codebase exploration.
 - Always close any processes and browser instances you start (dev servers,
   `preview`, headless Chrome, long-running watchers) once the task is done.

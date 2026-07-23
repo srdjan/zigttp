@@ -8,7 +8,6 @@ echo "Building with dyld optimizations..."
 # Build with LTO and aggressive optimization
 zig build \
   -Doptimize=ReleaseFast \
-  -Dhandler=../zigttp-bench/handlers/zigttp/handler.js \
   --verbose-link 2>&1 | tee build_link.log
 
 echo ""

@@ -31,7 +31,7 @@ zig build release
 ./zig-out/bin/zts describe-rule --hash   # must match policy-hash.txt
 ```
 
-Larger benchmarks live in the sibling repo `../zigttp-bench`; do not add benchmark scripts here.
+Larger benchmarks live in the sibling repo `../zttp-bench`; do not add benchmark scripts here.
 
 ## Adding a virtual module
 
